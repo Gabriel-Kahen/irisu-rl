@@ -155,6 +155,17 @@ function drawHud(state) {
   ctx.fillStyle = "#ffffff18";
   ctx.fillRect(trackX, trackY, trackW, 3);
 
+  const digits = String(state.score).padStart(8, "0");
+  ctx.save();
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.font = "900 26px Georgia, serif";
+  ctx.strokeStyle = "#681a38";
+  ctx.lineWidth = 5;
+  ctx.strokeText(digits, 320, 462);
+  ctx.fillStyle = "#eee0a4";
+  ctx.fillText(digits, 320, 462);
+  ctx.restore();
 }
 
 function drawWalls(state) {
