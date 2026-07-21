@@ -16,21 +16,13 @@ body {
   min-height: 100vh;
   color: var(--paper);
   background: #070a0b;
-  background-image:
-    linear-gradient(#ffffff05 1px, transparent 1px),
-    linear-gradient(90deg, #ffffff04 1px, transparent 1px),
-    radial-gradient(circle at 50% 10%, #243034 0, #0a0f11 38%, #060809 76%);
-  background-size: 36px 36px, 36px 36px, auto;
 }
 
 button, input { font: inherit; }
 button { color: inherit; cursor: pointer; }
 .app { width: min(900px, calc(100% - 24px)); margin: 0 auto; padding: 16px 0 12px; }
 header { display: flex; align-items: end; justify-content: space-between; margin-bottom: 13px; }
-.brand { display: grid; grid-template-columns: auto auto; column-gap: 10px; align-items: end; }
-.brand > span { grid-row: span 2; color: var(--rose); font: italic 900 22px Georgia, serif; transform: rotate(-5deg); }
-.brand b { font: italic 800 30px Georgia, serif; letter-spacing: -.05em; line-height: .9; }
-.brand small { color: #7c8585; font-size: 8px; letter-spacing: .18em; }
+.brand { font: italic 800 30px Georgia, serif; letter-spacing: -.05em; line-height: .9; }
 .connection { display: flex; gap: 8px; align-items: center; color: var(--muted); font-size: 10px; letter-spacing: .12em; text-transform: uppercase; }
 .connection i { width: 7px; height: 7px; border-radius: 50%; background: #a8975d; }
 .connection.live i { background: #b4ba8e; box-shadow: 0 0 12px #d9e0a366; }
@@ -68,7 +60,6 @@ kbd { margin-left: 4px; color: #858c8c; font-size: 7px; }
 
 @media (max-width: 540px) {
   .app { width: calc(100% - 12px); padding-top: 10px; }
-  .brand small { display: none; }
   .game-frame { border-left: 0; border-right: 0; }
   .header-actions kbd, .connection span { display: none; }
 }

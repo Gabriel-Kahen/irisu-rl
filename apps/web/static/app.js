@@ -105,30 +105,8 @@ function drawBody(body) {
 }
 
 function drawBackdrop() {
-  const gradient = ctx.createRadialGradient(330, 180, 20, 320, 230, 420);
-  gradient.addColorStop(0, "#1c292b");
-  gradient.addColorStop(.58, "#0c1517");
-  gradient.addColorStop(1, "#060a0b");
-  ctx.fillStyle = gradient;
+  ctx.fillStyle = "#0c1517";
   ctx.fillRect(0, 0, 640, 480);
-
-  // A subdued, asset-free echo of the game's layered sketchbook background.
-  ctx.save();
-  ctx.globalAlpha = .12;
-  ctx.fillStyle = "#020505";
-  ctx.beginPath(); ctx.ellipse(330, 245, 100, 205, 0, 0, Math.PI * 2); ctx.fill();
-  ctx.beginPath(); ctx.ellipse(330, 112, 67, 82, 0, 0, Math.PI * 2); ctx.fill();
-  ctx.strokeStyle = "#b2c0bb";
-  ctx.lineWidth = 1;
-  const doodles = [[54,95,28], [550,92,34], [70,300,24], [550,325,26]];
-  for (const [x, y, s] of doodles) {
-    ctx.beginPath();
-    ctx.ellipse(x, y, s * .55, s * .42, 0, 0, Math.PI * 2);
-    ctx.moveTo(x - s * .35, y - s * .32); ctx.quadraticCurveTo(x - s * .7, y - s * 1.5, x - s * .18, y - s * .55);
-    ctx.moveTo(x + s * .2, y - s * .38); ctx.quadraticCurveTo(x + s * .55, y - s * 1.45, x + s * .42, y - s * .48);
-    ctx.stroke();
-  }
-  ctx.restore();
 }
 
 function outlinedText(text, x, y, size, align = "left") {
@@ -163,13 +141,13 @@ function drawHud(state) {
   const digits = String(state.score).padStart(8, "0");
   ctx.save();
   ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
   ctx.font = "900 26px Georgia, serif";
-  ctx.letterSpacing = "5px";
   ctx.strokeStyle = "#681a38";
   ctx.lineWidth = 5;
-  ctx.strokeText(digits, 320, 476);
+  ctx.strokeText(digits, 320, 462);
   ctx.fillStyle = "#eee0a4";
-  ctx.fillText(digits, 320, 476);
+  ctx.fillText(digits, 320, 462);
   ctx.restore();
 }
 
