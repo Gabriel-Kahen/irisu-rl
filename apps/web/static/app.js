@@ -20,7 +20,23 @@ let aim = {x: 320, y: 390, visible: false};
 let started = false;
 let lastEvent = -1;
 let toastTimer;
+let fastForwardTimer;
 let game = null;
+
+const fastForwardIdleMs = 160;
+
+function stopFastForward() {
+  clearTimeout(fastForwardTimer);
+  fastForwardTimer = 0;
+  game?.setFastForward(false);
+}
+
+function continueFastForward() {
+  if (!snapshot?.running) return;
+  game?.setFastForward(true);
+  clearTimeout(fastForwardTimer);
+  fastForwardTimer = setTimeout(stopFastForward, fastForwardIdleMs);
+}
 
 function showToast(text) {
   ui.toast.textContent = text;
@@ -55,6 +71,7 @@ function shoot(kind = "weak") {
 
 function setRunning(running) {
   if (!game) return;
+  if (!running) stopFastForward();
   game.setRunning(running);
   started ||= running;
   syncUi();
@@ -62,6 +79,7 @@ function setRunning(running) {
 
 function restart() {
   if (!game) return;
+  stopFastForward();
   const seed = crypto.getRandomValues(new Uint32Array(1))[0];
   game.restart(seed);
   started = true;
@@ -243,7 +261,8 @@ function receiveSnapshot(next, error) {
   }
   acceptSnapshot(next);
   ui.connection.className = "connection live";
-  ui.connection.lastElementChild.textContent = snapshot.running ? "live" : "ready";
+  ui.connection.lastElementChild.textContent = snapshot.fastForward ? "fast" :
+    snapshot.running ? "live" : "ready";
   syncUi();
 }
 
@@ -255,6 +274,11 @@ canvas.addEventListener("pointerdown", (event) => {
   shoot(event.shiftKey ? "both" : event.button === 2 ? "strong" : "weak");
 });
 canvas.addEventListener("contextmenu", (event) => event.preventDefault());
+canvas.addEventListener("wheel", (event) => {
+  event.preventDefault();
+  if (event.deltaY > 0) continueFastForward();
+  else if (event.deltaY < 0) stopFastForward();
+}, {passive: false});
 ui.startButton.addEventListener("click", () => setRunning(true));
 ui.pause.addEventListener("click", () => setRunning(!snapshot?.running));
 ui.restart.addEventListener("click", restart);
@@ -266,6 +290,7 @@ window.addEventListener("keydown", (event) => {
   if (event.key.toLowerCase() === "w") shoot("weak");
   if (event.key.toLowerCase() === "s") shoot("strong");
 });
+window.addEventListener("blur", stopFastForward);
 
 draw();
 BrowserGame.create(receiveSnapshot).then((instance) => { game = instance; })

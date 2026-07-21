@@ -25,6 +25,7 @@ export class BrowserGame {
     this.handle = api.create(this.seed);
     if (!this.handle) throw new Error("could not create simulator");
     this.running = false;
+    this.fastForward = false;
     this.queue = [];
     this.events = [];
     this.timer = 0;
@@ -39,7 +40,8 @@ export class BrowserGame {
 
   emit() {
     this.onSnapshot({observation: this.observation, events: this.events,
-      running: this.running, seed: this.seed, terminal_reason: this.terminalReason});
+      running: this.running, fastForward: this.fastForward,
+      seed: this.seed, terminal_reason: this.terminalReason});
   }
 
   restart(seed, running = true) {
@@ -51,6 +53,7 @@ export class BrowserGame {
     this.releaseNext = false;
     this.terminalReason = null;
     this.running = running;
+    this.fastForward = false;
     this.deadline = performance.now() + 20;
     this.emit();
   }
@@ -67,7 +70,16 @@ export class BrowserGame {
   setRunning(running) {
     this.running = Boolean(running && !this.observation.terminated &&
       !this.observation.truncated);
+    if (!this.running) this.fastForward = false;
     this.deadline = performance.now() + 20;
+    this.emit();
+  }
+
+  setFastForward(active) {
+    const next = Boolean(active && this.running &&
+      !this.observation.terminated && !this.observation.truncated);
+    if (next === this.fastForward) return;
+    this.fastForward = next;
     this.emit();
   }
 
@@ -87,6 +99,7 @@ export class BrowserGame {
       this.terminalReason = names.has("level_completed") ? "level_completed" :
         this.observation.truncated ? "time_limit" : "game_over";
       this.running = false;
+      this.fastForward = false;
       this.queue.length = 0;
     }
   }
@@ -97,13 +110,18 @@ export class BrowserGame {
       const due = now < this.deadline ? 0 :
         Math.min(5, Math.floor((now - this.deadline) / 20) + 1);
       try {
-        for (let i = 0; i < due && this.running; i++) this.step();
-        if (due) this.emit();
+        // The original fast-forward still runs every 20 ms gameplay update;
+        // it merely traverses 20 updates between presented frames.
+        const steps = this.fastForward && due ? 20 : due;
+        for (let i = 0; i < steps && this.running; i++) this.step();
+        if (steps) this.emit();
       } catch (error) {
         this.running = false;
+        this.fastForward = false;
         this.onSnapshot(null, error);
       }
-      this.deadline += due * 20;
+      if (this.fastForward && due) this.deadline = now + 20;
+      else this.deadline += due * 20;
     } else this.deadline = now + 20;
     this.timer = window.setTimeout(() => this.loop(),
       Math.max(1, this.deadline - performance.now()));
