@@ -22,6 +22,21 @@ Open <http://127.0.0.1:8000>.
 Touch taps fire weak shots; desktop players can right-click or press `S` for a
 strong shot.
 
+## Build the static WebAssembly app
+
+Install the Emscripten SDK, then run:
+
+```bash
+apps/web/build-static.sh
+```
+
+This writes the GitHub Pages artifact to `apps/web/dist`. The browser module is
+single-threaded so it does not require cross-origin isolation headers. Import
+the default factory from `irisu-wasm.js`, await it, and use `cwrap` with the exported
+`irisu_web_create`, `irisu_web_destroy`, `irisu_web_reset`, and
+`irisu_web_step` functions. Reset and step return JSON containing
+`{observation, events}`.
+
 ## Host later
 
 The app serves its static frontend and JSON API from one process, so it can be

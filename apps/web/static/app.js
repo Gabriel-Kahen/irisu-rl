@@ -1,3 +1,5 @@
+import {BrowserGame} from "./wasm-runtime.js";
+
 const canvas = document.querySelector("#game");
 const ctx = canvas.getContext("2d");
 const $ = (selector) => document.querySelector(selector);
@@ -18,17 +20,7 @@ let aim = {x: 320, y: 390, visible: false};
 let started = false;
 let lastEvent = -1;
 let toastTimer;
-
-async function request(path, body) {
-  const response = await fetch(path, {
-    method: body ? "POST" : "GET",
-    headers: body ? {"Content-Type": "application/json"} : {},
-    body: body ? JSON.stringify(body) : undefined,
-  });
-  const value = await response.json();
-  if (!response.ok) throw new Error(value.error || `request failed (${response.status})`);
-  return value;
-}
+let game = null;
 
 function showToast(text) {
   ui.toast.textContent = text;
@@ -53,23 +45,25 @@ function canvasPoint(event) {
   };
 }
 
-async function shoot(kind = "weak") {
+function shoot(kind = "weak") {
   if (!snapshot || snapshot.observation.terminated || snapshot.observation.truncated) return;
   started = true;
   ui.start.hidden = true;
-  try { acceptSnapshot(await request("/api/action", {kind, x: aim.x, y: aim.y})); }
+  try { game?.shoot(kind, aim.x, aim.y); }
   catch (error) { showToast(error.message); }
 }
 
-async function setRunning(running) {
-  acceptSnapshot(await request("/api/control", {running}));
+function setRunning(running) {
+  if (!game) return;
+  game.setRunning(running);
   started ||= running;
   syncUi();
 }
 
-async function restart() {
+function restart() {
+  if (!game) return;
   const seed = crypto.getRandomValues(new Uint32Array(1))[0];
-  acceptSnapshot(await request("/api/restart", {seed}), true);
+  game.restart(seed);
   started = true;
   lastEvent = -1;
   syncUi();
@@ -262,17 +256,17 @@ function syncUi() {
   processEvents(snapshot.events);
 }
 
-async function poll() {
-  const pollStarted = performance.now();
-  try {
-    acceptSnapshot(await request("/api/state"));
-    ui.connection.className = "connection live";
-    ui.connection.lastElementChild.textContent = snapshot.running ? "live" : "ready";
-    syncUi();
-  } catch (_) {
+function receiveSnapshot(next, error) {
+  if (error) {
     ui.connection.className = "connection error";
-    ui.connection.lastElementChild.textContent = "disconnected";
-  } finally { setTimeout(poll, Math.max(0, 20 - (performance.now() - pollStarted))); }
+    ui.connection.lastElementChild.textContent = "engine error";
+    showToast(error.message);
+    return;
+  }
+  acceptSnapshot(next);
+  ui.connection.className = "connection live";
+  ui.connection.lastElementChild.textContent = snapshot.running ? "live" : "ready";
+  syncUi();
 }
 
 canvas.addEventListener("pointermove", (event) => { aim = {...canvasPoint(event), visible: true}; });
@@ -296,4 +290,5 @@ window.addEventListener("keydown", (event) => {
 });
 
 draw();
-poll();
+BrowserGame.create(receiveSnapshot).then((instance) => { game = instance; })
+  .catch((error) => receiveSnapshot(null, error));
