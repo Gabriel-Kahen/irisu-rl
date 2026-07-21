@@ -4,8 +4,8 @@ const canvas = document.querySelector("#game");
 const ctx = canvas.getContext("2d");
 const $ = (selector) => document.querySelector(selector);
 const ui = {
-  connection: $("#connection"), over: $("#gameOver"), again: $("#againButton"),
-  finalTitle: $("#finalTitle"), finalScore: $("#finalScore"),
+  over: $("#gameOver"), again: $("#againButton"), finalTitle: $("#finalTitle"),
+  finalScore: $("#finalScore"),
   paused: $("#paused"), pause: $("#pauseButton"), restart: $("#restartButton"),
   toast: $("#toast"),
 };
@@ -240,15 +240,10 @@ function syncUi() {
 
 function receiveSnapshot(next, error) {
   if (error) {
-    ui.connection.className = "connection error";
-    ui.connection.lastElementChild.textContent = "engine error";
     showToast(error.message);
     return;
   }
   acceptSnapshot(next);
-  ui.connection.className = "connection live";
-  ui.connection.lastElementChild.textContent = snapshot.fastForward ? "fast" :
-    snapshot.running ? "live" : "ready";
   syncUi();
 }
 

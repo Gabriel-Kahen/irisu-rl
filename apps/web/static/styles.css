@@ -25,13 +25,8 @@ button { color: inherit; cursor: pointer; }
 .app { width: min(800px, calc(100% - 24px), calc((100vh - 92px) * 4 / 3)); padding: 16px 0; }
 header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 13px; }
 .brand { font: 700 24px ui-sans-serif, system-ui, sans-serif; letter-spacing: -.04em; line-height: 1; }
-.connection { display: flex; gap: 8px; align-items: center; color: var(--muted); font-size: 10px; letter-spacing: .12em; text-transform: uppercase; }
-.connection i { width: 7px; height: 7px; border-radius: 50%; background: #a8975d; }
-.connection.live i { background: #b4ba8e; box-shadow: 0 0 12px #d9e0a366; }
-.connection.error i { background: #c74658; }
 .header-actions { display: flex; align-items: center; gap: 8px; }
 .header-actions > button { padding: 6px 9px; border: 1px solid #303838; background: #101617aa; color: #b4b8b5; font-size: 9px; text-transform: uppercase; }
-.header-actions .connection { margin-left: 5px; }
 
 .layout { display: flex; flex-direction: column; gap: 9px; }
 .game-frame {
@@ -66,7 +61,6 @@ kbd { margin-left: 4px; color: #858c8c; font-size: 7px; }
   .brand { font-size: 20px; }
   .header-actions { gap: 4px; }
   .header-actions > button { padding: 5px 6px; }
-  .header-actions .connection { margin-left: 2px; }
   .game-frame { border-left: 0; border-right: 0; }
-  .header-actions kbd, .connection span { display: none; }
+  .header-actions kbd { display: none; }
 }
