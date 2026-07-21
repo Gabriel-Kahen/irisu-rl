@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "irisu-env"
+version = "0.1.0"
+description = "Thin Python interface to the separately built deterministic headless IriSu clone"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.optional-dependencies]
+gymnasium = ["gymnasium>=1.0"]
+
+[tool.setuptools]
+package-dir = {"" = "python"}
+include-package-data = false
+
+[tool.setuptools.packages.find]
+where = ["python"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -1,0 +1,6 @@
+{
+  global:
+    irisu_*;
+  local:
+    *;
+};

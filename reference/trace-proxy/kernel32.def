@@ -1,0 +1,10 @@
+LIBRARY KERNEL32.dll
+EXPORTS
+    CloseHandle@4
+    CreateFileA@28
+    FlushFileBuffers@4
+    GetModuleFileNameA@12
+    GetProcAddress@8
+    LoadLibraryA@4
+    WriteFile@20
+

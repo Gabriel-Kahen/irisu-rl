@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#090d0f">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'">
+  <title>IriSu — Headless Play</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <main class="app">
+    <header>
+      <div class="brand"><span>いりす</span><b>IriSu</b><small>HEADLESS NORMAL MODE</small></div>
+      <div class="header-actions">
+        <button id="pauseButton">pause <kbd>space</kbd></button>
+        <button id="restartButton">restart <kbd>R</kbd></button>
+        <div id="connection" class="connection"><i></i><span>connecting</span></div>
+      </div>
+    </header>
+
+    <div class="layout">
+      <section class="game-frame">
+        <canvas id="game" width="640" height="480" aria-label="IriSu game field"></canvas>
+        <div id="startCard" class="modal">
+          <span class="modal-kicker">NORMAL MODE</span>
+          <h1>Keep the pieces alive.</h1>
+          <p>Make matching colors touch. Clear chains before they rot.</p>
+          <button id="startButton" class="primary">begin</button>
+        </div>
+        <div id="gameOver" class="modal" hidden>
+          <span class="modal-kicker">RUN COMPLETE</span>
+          <h1 id="finalTitle">Game over</h1>
+          <p id="finalScore">00000000</p>
+          <button id="againButton" class="primary">try again</button>
+        </div>
+        <div id="paused" class="pause-mark" hidden>PAUSED</div>
+      </section>
+
+    </div>
+  </main>
+  <div id="toast" class="toast"></div>
+  <script src="/app.js"></script>
+</body>
+</html>

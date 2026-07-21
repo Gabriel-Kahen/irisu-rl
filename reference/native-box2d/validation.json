@@ -1,0 +1,117 @@
+{
+  "schema": 2,
+  "date": "2026-07-20",
+  "status": "valid_bounded_native_physics_parity",
+  "claim": "The exact-forward simulator's clean-room ELF32 MSVC9 host matched every active per-operation wrapper stream through all 47019 original physics steps, including all 573557 contact cursor results. Getter-only records, two constructor/bootstrap generations, and the original process's post-step teardown suffix are outside this comparison. This is not by itself a full-game score-parity claim.",
+  "source": {
+    "engine": "pristine Box2D SVN revision 58",
+    "archive_sha256": "db3e9f5a232e1df2992c926029e0f24ddd416542d3e802441938eee7373adf50",
+    "solver_order": "all normal constraints, then all tangent constraints",
+    "island_contact_reversal": false,
+    "wrapper_sha256": "643a5866fe2872dc2ce15a4bb6e87e09dc9ef4790f35385ea446024c2e94dda5"
+  },
+  "compiler": {
+    "identity": "Microsoft (R) 32-bit C/C++ Optimizing Compiler Version 15.00.21022.08 for 80x86",
+    "compile_flags": [
+      "/nologo",
+      "/c",
+      "/O2",
+      "/fp:precise",
+      "/MT",
+      "/D",
+      "NDEBUG",
+      "/EHs-c-",
+      "/GR-",
+      "/GS-"
+    ]
+  },
+  "pe_control": {
+    "dll_sha256": "6876b8ab66157f0243a7b9d919169f4a554ab6ce323e8f01bff573a79194e337",
+    "dll_archived": false,
+    "prefix_result_sha256": "b2180fde733ac9a5360bfb3ade2fedd5740e04512aa5d8711b86d85924a174ec",
+    "prefix_first_bad_step": 0,
+    "full_result_sha256": "1f0c332846c91f1d091e3a3f88dc380abe06646b00677ba8ed289c386ab4d32d",
+    "full_first_bad_step": 0
+  },
+  "native_host": {
+    "generator": "tools/host-msvc9-box2d.py",
+    "observed_library_sha256": "06413dc8affbdd2387a06d045e5c373130b3d32b5f0ad9bde3d6b5106d3f0e2a",
+    "library_archived": false,
+    "architecture": "ELF32 i386",
+    "wine_used_for_execution": false,
+    "weak_coff_aliases_repaired": 21,
+    "rel32_addends_adjusted": 467,
+    "contains_text_relocations": true,
+    "x87_control_words_validated": ["027f", "137f"],
+    "full_result_sha256": "1f0c332846c91f1d091e3a3f88dc380abe06646b00677ba8ed289c386ab4d32d",
+    "full_first_bad_step": 0
+  },
+  "oracle": {
+    "replay_sha256": "73bf5b5d4a478c9bf73b62a6df98f16a01fde2cf97eb751438cd0ae857e3362d",
+    "original_getter_trace_sha256": "e57730cbf284cdd8d369d17a7a3fe2bb9760014e74543efe6d9b09be217c827f",
+    "original_records_streamed": 10777298,
+    "exact_forward_runner_sha256": "b2fde03afa80c1e16e82592caacfe38fdef6a93070552d71c4331cecb9137062",
+    "exact_forward_result_sha256": "bb8a81554cfc03bbfa186fdba6ee080f691eaabb451e1f562627050ed2fdf236",
+    "exact_forward_trace_sha256": "cde35ca60b5511678edf128ed8f3ae09c8cf00e240696325c4acc8681f829eb0",
+    "comparison_tool": "tools/compare-exact-wrapper-trace.py",
+    "comparison_result_sha256": "1db375516a07e068f66841c07e295e53eca7bda9b236fcf7b82bd77147e485ff",
+    "steps": 47019,
+    "native_records_compared": 813412,
+    "streams": {
+      "init": 1,
+      "create": 2368,
+      "set_v": 2368,
+      "set_user_data": 2368,
+      "set_position": 183387,
+      "destroy": 2344,
+      "step": 47019,
+      "contact": 573557
+    },
+    "constructor_bootstrap": {
+      "native_init_generations_skipped": 2,
+      "native_records_skipped": 96
+    },
+    "original_only_post_step_teardown": {
+      "step": 47019,
+      "set_position": 153500,
+      "destroy": 24,
+      "dispose": 1
+    },
+    "ignored_getter_records": {
+      "get_scalar": 7357770,
+      "get_v": 2452590
+    },
+    "first_mismatch": null,
+    "status": "exact_through_final_physics_step"
+  },
+  "historical_137f_harness": {
+    "original_wrapper_trace_sha256": "1049e3935d551b292b575abd8d3cfb5c6f7bfb4378b92cb7abc120bede695c67",
+    "generated_harness_source_sha256": "2c3967f2395a9047c1084f53e2ed3d0c4ff82aad655767a137e148262ebaa55f",
+    "steps": 14706,
+    "wrapper_operations": 267463,
+    "contact_results_compared": 191339,
+    "first_bad_step": 0
+  },
+  "getter_trace_027f_oracle": {
+    "original_trace_sha256": "e57730cbf284cdd8d369d17a7a3fe2bb9760014e74543efe6d9b09be217c827f",
+    "generated_harness_source_sha256": "1e1366e5cbee058520cf0bb6f262c8bccc5450711ddf148fd288aa934d3a2437",
+    "native_harness_sha256": "21f7f6d3cf61b8287a16fc7ad7be28205693be2a8e1f67eed3579327584b4947",
+    "result_sha256": "0de08361ca4655cacf4572bddc515cdab515192f38fb419ce0a41b3170ac4f1d",
+    "steps": 47019,
+    "contact_results_compared": 573557,
+    "set_position_calls": 336887,
+    "created_bodies": 2368,
+    "first_bad_step": 0,
+    "getter_scope": "The harness replays every mutating wrapper call and checks every contact result. It does not compare the trace's per-body getter records beyond the separately archived 32515-field prefix comparison."
+  },
+  "discriminating_variants": {
+    "interleaved_normal_tangent": {
+      "dll_sha256": "957b08d1a4caa299515df8722ad7a7bfb904d44be16e1af854fca2e4ab542ef6",
+      "first_bad_step": 73
+    },
+    "reversed_island_contacts": {
+      "dll_sha256": "ff0fb37f222cba7ddb949193f31410015a5e916c6cc803c4f3f2607ce856cad4",
+      "first_bad_step": 3
+    }
+  }
+}

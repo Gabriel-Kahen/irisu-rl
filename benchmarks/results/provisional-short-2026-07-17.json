@@ -1,0 +1,218 @@
+{
+  "build": {
+    "benchmark_script_sha256": "7b98c8fd4d771684baf3c39332f2a98e14f4001f00e8f841b348c34773fd25fa",
+    "cmake_build_type": "RelWithDebInfo",
+    "cmake_generator": "Ninja",
+    "cxx_compiler": "/usr/bin/c++",
+    "git_revision": null,
+    "library_bytes": 2779248,
+    "library_path": "/home/gabe/Documents/irisu/build-agent-policy/libirisu_clone.so",
+    "library_sha256": "d369a7137e880308871cff1e1d31d967262665743574a9c64643846b7085e939",
+    "native_build_info": {
+      "abi_version": 1,
+      "clone_version": "0.1.0",
+      "determinism_scope": "same supported build",
+      "physics": "Box2D 1.4.3 SourceForge SVN r58",
+      "snapshot_schema": 2,
+      "target": "IriSu Syndrome v2.03 normal"
+    },
+    "python_package_version": "0.1.0"
+  },
+  "configuration": {
+    "fidelity_certified": false,
+    "implementation_parameter_count": 30,
+    "implementation_parameters_sha256": "84878d3b20e63888b3bf5cd3527f73f9b66081a53f10d3b15d4ba25ecf6d6285",
+    "native_config": {
+      "angular_damping": 0.02,
+      "bonus_interval_spawns": 200,
+      "bonus_material": [
+        50,
+        0.1,
+        0.6
+      ],
+      "bonus_size": 24,
+      "chain_score_exponent": 2,
+      "cleanup_margin": [
+        200,
+        400
+      ],
+      "cleanup_margin_x": 200,
+      "cleanup_margin_y": 400,
+      "click_cooldown_ticks": 1,
+      "client": [
+        640,
+        480
+      ],
+      "color_level_stride": 10,
+      "colors": [
+        3,
+        8,
+        10
+      ],
+      "config_hash": 6986711958496429409,
+      "deletion_delay_ticks": 120,
+      "field": [
+        94,
+        20,
+        420,
+        370
+      ],
+      "field_blank": 30,
+      "field_thickness": 16,
+      "floor_contact_tolerance": 1,
+      "gauge": [
+        10000,
+        1000,
+        120,
+        5000,
+        1
+      ],
+      "gravity_y": 360,
+      "legacy_box2d_revision": 58,
+      "level": [
+        1000,
+        100,
+        4
+      ],
+      "linear_damping": 0.01,
+      "max_episode_ticks": 1000000,
+      "maximum_colors": 8,
+      "maximum_level": 100,
+      "passive_gauge_decay_per_tick": 1,
+      "piece_life_ticks": 10000,
+      "piece_material": [
+        1,
+        1,
+        0
+      ],
+      "piece_size_weights": [
+        10,
+        40,
+        20
+      ],
+      "piece_sizes": [
+        30,
+        48,
+        64
+      ],
+      "profile_id": "v2.03-normal",
+      "projectile_life_ticks": 1200,
+      "projectile_material": [
+        8,
+        1,
+        0
+      ],
+      "projectile_size": 24,
+      "projectile_velocity_y": [
+        -250,
+        -500
+      ],
+      "schema_version": 1,
+      "score_per_level": 1000,
+      "scripted_fall_speed": 10,
+      "side_wall": [
+        100,
+        370
+      ],
+      "side_wall_bottom": 370,
+      "side_wall_top": 100,
+      "size_score_values": [
+        20,
+        28,
+        40
+      ],
+      "solver_iterations": 10,
+      "spawn_acceleration_level_stride": 4,
+      "spawn_interval_ticks": 50,
+      "starting_colors": 3,
+      "strong_projectile_vy": -500,
+      "target_game_version": 203,
+      "tick_seconds": 0.02,
+      "weak_projectile_vy": -250,
+      "world_magnification": 100
+    },
+    "native_config_hash": "0x60f5c98252274561",
+    "profile_file": "/home/gabe/Documents/irisu/configs/v2.03-normal.toml",
+    "profile_file_sha256": "0100c040a8b3871b5e52674664816c6ad1bc0b0cb5eb443319d30ef4a1e88598",
+    "profile_id": "v2.03-normal",
+    "profile_status": "calibration-lead",
+    "provisional": true
+  },
+  "generated_at_utc": "2026-07-18T03:12:05+00:00",
+  "host": {
+    "cpu_model": "AMD Ryzen 7 3700X 8-Core Processor",
+    "hostname": "gabelinux",
+    "logical_cpus_available": 16,
+    "machine": "x86_64",
+    "operating_system": "Linux-7.1.2-3-cachyos-x86_64-with-glibc2.43",
+    "python": "3.14.6",
+    "python_implementation": "CPython"
+  },
+  "label": "current provisional v2.03-normal profile; not fidelity-certified",
+  "parameters": {
+    "num_envs": 4,
+    "policy": {
+      "max_wait_ticks": 5,
+      "name": "RandomPolicy",
+      "prng": "SplitMix64",
+      "shot_probability": 0.25,
+      "strong_probability": 0.5
+    },
+    "seed": 20260717,
+    "single_steps": 2000,
+    "snapshot_iterations": 1000,
+    "vector_steps": 500,
+    "warmup": 50
+  },
+  "results": {
+    "single_env": {
+      "action_counts": {
+        "strong_shot": 238,
+        "wait": 1519,
+        "weak_shot": 243
+      },
+      "decision_steps": 2000,
+      "decision_steps_per_second": 1934.392,
+      "elapsed_seconds": 1.033916416,
+      "episode_resets": 8,
+      "final_state_hash": "0x68b7652bbc703607",
+      "simulation_ticks": 4986,
+      "simulation_ticks_per_second": 4822.44,
+      "total_reward": 0
+    },
+    "snapshot": {
+      "clone_elapsed_seconds": 0.004826756,
+      "clone_operations_per_second": 207178.486,
+      "final_state_hash": "0x15623b32e0dc8ea5",
+      "iterations": 1000,
+      "restore_elapsed_seconds": 0.023731926,
+      "restore_operations_per_second": 42137.33,
+      "snapshot_bytes": 251,
+      "snapshot_sha256": "f01757b4b1fc04e00b7f90343fa22e53d6f0f3faea8e1089c6121cbd07886031"
+    },
+    "sync_vector": {
+      "action_counts": {
+        "strong_shot": 249,
+        "wait": 1512,
+        "weak_shot": 239
+      },
+      "aggregate_decision_steps": 2000,
+      "aggregate_decision_steps_per_second": 3269.788,
+      "elapsed_seconds": 0.611660516,
+      "episode_group_resets": 3,
+      "final_state_hashes": [
+        "0x5cd69d72f5d814bd",
+        "0x8119709408eff97f",
+        "0xd96ec64f5da9c81c",
+        "0x54ea8ea5c3dcbfea"
+      ],
+      "num_envs": 4,
+      "simulation_ticks": 5019,
+      "simulation_ticks_per_second": 8205.532,
+      "total_reward": 0,
+      "vector_step_calls": 500,
+      "vector_step_calls_per_second": 817.447
+    }
+  },
+  "schema_version": 1
+}

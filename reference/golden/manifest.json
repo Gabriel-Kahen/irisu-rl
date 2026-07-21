@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "threshold_percent": 95,
+  "target": {
+    "profile": "v2.03-normal",
+    "game_version": "v2.03 with English-patched data",
+    "executable_sha256": "0636d3e44439d88807d0c00aeb1bb072316c69fc13a21f79d67e53affad28255",
+    "dat_dxa_sha256": "b36ef6864bf2d0e626d5087edb5b571ef548ebd5dde9fbc9b87f7b4ac3e89d4a",
+    "config_sha256": "1e29431fe8209c25784d4741f7972737561281169bbb5a56f62e3e0f0b63de35",
+    "box2d_sha256": "34f1387cbe51fb09a3e7cd868236ed3c0b73be2f70fcf5b09ae6c48187d14fcd",
+    "clone_config_u64": "0xec0e8463feaf2670"
+  },
+  "scenarios": []
+}

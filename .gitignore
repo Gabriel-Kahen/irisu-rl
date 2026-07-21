@@ -1,0 +1,43 @@
+# Local reference material. These files are useful for clean-room calibration but
+# may contain third-party binaries, assets, recordings, or mutable game state.
+/reference/game/
+/reference/archives/
+/reference/replays/raw/
+/reference/videos/raw/
+/reference/runs/
+/reference/captures/
+
+# Local experiment outputs.
+/reference/**/*.log
+/reference/**/*.tmp
+
+# Python tooling caches.
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+.venv/
+dist/
+python/*.egg-info/
+
+# Frontend and deployment-local files.
+.env
+.env.*
+!.env.example
+node_modules/
+.next/
+/apps/*/coverage/
+/apps/*/dist/
+
+# Editor and operating-system metadata.
+.DS_Store
+.idea/
+.vscode/
+
+# Local native build products.
+/build/
+/build-*/
+/.tmp/
+compile_commands.json

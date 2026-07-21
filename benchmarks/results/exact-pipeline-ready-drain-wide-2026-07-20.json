@@ -1,0 +1,1125 @@
+{
+  "artifacts": {
+    "sources": {
+      "CMakeLists.txt": "65ab4fc094d10cae4c6ef34dfeda2d094bfa093162813cc8e01f3a0b2ac383e4",
+      "benchmarks/exact_pipeline.py": "5d044d7a3b602e13bbe0a3730a2ddac7bbd80a47ce0947b5e8d39d85b81e2c65",
+      "benchmarks/native_physics.cpp": "65cc0704748379e40118862d55845f9224f701ed6d01423a53c2f07eaf339e2e",
+      "clone/core/config.cpp": "2dae49b87434456ee40c3ad9c338b0f114abc7907829b63b4b5a2035222cc0e3",
+      "clone/core/config_io.cpp": "a5935b878709b662fc985e0c4800691ffa3b34220eb0a011fe76c3f694689424",
+      "clone/core/dx_random.cpp": "87bbd8c19ab697f5282688bdeb14c930bab48ca409f910275dfb0a0c177eb32c",
+      "clone/core/normal_rules.cpp": "96859737fb2eefa82de75e3dc769264f712bb85dc9b6b29d2d4cc58d8e4516ae",
+      "clone/core/physics.cpp": "668a468c5dc3a0216bfefe89d5a5885eb6bd7da5494f10f3962b827a966a74d2",
+      "clone/core/simulator.cpp": "7849ac8dc07cbc8fb15b8994dd233555882008581e89c4443926c7752441e61f",
+      "clone/include/irisu/config.hpp": "0ba54ee5bb5205b2b34b48f47493cb6f6f4fea3a34805d48a9dc878d8665dcd3",
+      "clone/include/irisu/config_io.hpp": "a6b7e7ce38a8b2ff23a3096342c56eca62741d5aadb8f50782e80639998923fe",
+      "clone/include/irisu/dx_random.hpp": "5ccf1a5ce994d8a5cea5c79187142dde21d3b89113f3db5ac423056b5c8cf1c4",
+      "clone/include/irisu/floating_point.hpp": "2c3e8975b407a29bddfe2cdb31e2c22970425c192806f3809d99eb9fbb3265dd",
+      "clone/include/irisu/math.hpp": "ac00c53c47ef46a3b87360d7b50ae08c7819c1b1d422625a40fbab1ee02572e3",
+      "clone/include/irisu/normal_rules.hpp": "fd9c8f5ce6d61e9b9ddeb5cc6f680789bb6c3988c5f2727ca41ada3005639025",
+      "clone/include/irisu/physics.hpp": "92fe9f258873243f01278a394f1670e56e6984a64a2fa3d101c79bfe4c8319fe",
+      "clone/include/irisu/simulator.hpp": "f3a135406e01a884abc0d5b2dddec561316d9943c4bf206c19514992e084e29f",
+      "clone/include/irisu/types.hpp": "37f315c90f0ab7ced3a08b91a3a77bd94feccab97dcff9f5a06cd3fc37522ab8",
+      "python/irisu_env/__init__.py": "953c65f087714b85d610e96a50f5c988cdd5105965224c69d3aa488cb56a14f9",
+      "python/irisu_env/env.py": "24c63384bb3caab348120400475922ff3852d6165a0c332ad8239b3f807a986b",
+      "python/irisu_env/exact_ipc.py": "fb30a22cd9a7168ac7c69004c08837b5380207b672c9c9e40d2fa385fa366f75",
+      "python/irisu_env/mechanics.py": "389e3a5fe2c14a4960a585615c190b72907465b08025b51f60c857159bd73dcd",
+      "python/irisu_env/native.py": "fd838dd51720f273697afc5fe4d6a7112836a59b5e90af9ccdfa2006d29f0542",
+      "python/irisu_env/padded.py": "4017bb12b10b995590279886a46fd683f909d49eb911f05834218225b8a9f125",
+      "python/irisu_env/policies.py": "956895938b1a1ad94cf3c7c4b8d9805cfcc1bd98841925c90369f088eef2608b",
+      "python/irisu_env/randomization.py": "cf8f0dba6e8f60f5591126f3727d046af3c1530aaf87eee1e0089ecd10c24efc",
+      "python/irisu_env/render.py": "5ea574a2f4dc3421a0b03adefbcaa1022bbfadf14f2a04d3e39210870863c069",
+      "python/irisu_env/transfer.py": "59409ebff838194664bf709b6c904d2ecbf2190931b63194781c758f3a53687f",
+      "python/irisu_env/vector.py": "b3b778d823e16c092c35f141c63af16e7095762629ae1a1f5c8c4205de1befb6",
+      "reference/native-box2d/msvc-runtime.S": "6f702907fa64050aaa97cffb90514fabe2709616a32a71ce8fcc04acf8c1fb70",
+      "reference/native-box2d/multiworld/box2d-wrapper-msvc.cpp": "e2e2f3cd3bc02ce5f81cbbedf5009f6dd7f2c512bea8eb042fe2293d396b987e",
+      "reference/native-box2d/multiworld/msvc-bridge.c": "d4f0daeb1c81132a0438e3a0e4fef1dc66e548f745bdb78f5c9d6fa547fd52a0",
+      "reference/native-box2d/multiworld/msvc-runtime.S": "1c807d0fbb660e679ff53fe7ca4704d967e40f1dc46daadbe1f28338f0cdce67",
+      "tools/exact-physics-prototype/ipc_worker.cpp": "9f8e6f147c1482ec0c614026af9576850581fbb4b87dc7817e5f2951ba2874b2",
+      "tools/exact-physics-prototype/physics_wrapper_forward.cpp": "859c0c00dd6d1028ae201f8358504042c1d03d1870de96b3406cad6ca7bd1d73",
+      "tools/host-msvc9-box2d-multiworld.py": "840669197b05320dc4fc19e6b720b6203322f87d5212c4af02e70a38a938e5ea",
+      "tools/host-msvc9-box2d.py": "8911057f11c121b9ac5ce732a0b8a530a1a8d705757f5de1098214cc7cbd860f"
+    },
+    "worker": "/home/gabe/Documents/irisu/build-physics-integration-exact-multiworld-2/irisu-exact-worker",
+    "worker_info": {
+      "backend": "exact-msvc9-r58-multiworld-forward",
+      "body_capacity": 196,
+      "compiler": "16.1.1 20260625",
+      "config_hash": 17009678407634462320,
+      "exact_library_sha256": "bf46953217a7bcd49f382d44cb05dd58db373fb9f86dc1e42eb531c12c71908a",
+      "pid": 458662,
+      "pointer_bits": 32,
+      "process_model": 1,
+      "protocol_version": 1,
+      "x87_control_word": 639
+    },
+    "worker_sha256": "aa7ba4a6998b6dfeb59d1ea80cd1690cd0e7b727cf9968c38f362e60835e6d57"
+  },
+  "elapsed_seconds": 330.950612958,
+  "gates": {
+    "dense_padded_lazy_max_lanes": {
+      "actual": 7312.579124905478,
+      "lanes": 32,
+      "metric": "results.padded_lazy_random_policy.32.operations_per_second",
+      "passed": false,
+      "target": 20000.0,
+      "unit": "decisions_per_second"
+    }
+  },
+  "host": {
+    "logical_cpus": 16,
+    "machine": "x86_64",
+    "platform": "Linux-7.1.2-3-cachyos-x86_64-with-glibc2.43",
+    "python": "3.14.6"
+  },
+  "parameters": {
+    "decode_iterations": 30000,
+    "iterations": 3000,
+    "physics_ticks": 30000,
+    "prepare_steps": 1000,
+    "snapshot_branches": 30,
+    "snapshot_history_steps": 1000,
+    "snapshot_restores": 7,
+    "vector_lanes": [
+      1,
+      4,
+      8,
+      16,
+      32
+    ]
+  },
+  "raw_episode_reset": {
+    "included_in_step_latency": false,
+    "strategy": "fresh identity-matched worker process"
+  },
+  "results": {
+    "irisu_env_step": {
+      "elapsed_seconds": 0.363186974,
+      "observed_body_count": {
+        "max": 22,
+        "mean": 18.185333333333332,
+        "min": 13
+      },
+      "operations": 3000,
+      "operations_per_second": 8260.20814281737,
+      "sample_mean_us": 121.06232466666667,
+      "sample_p50_us": 117.615,
+      "sample_p95_us": 146.57,
+      "sample_p99_us": 164.785
+    },
+    "native_physics_48_body": {
+      "body_count": 48,
+      "body_ticks": 1440000,
+      "body_ticks_per_second": 3631326.55544,
+      "contacts_observed": 128887,
+      "elapsed_seconds": 0.396549299,
+      "excitation_count": 1200,
+      "excitation_period_ticks": 25,
+      "excitation_trace_hash": "0x06f92ab5d1853bfc",
+      "final_state_hash": "0x7cc8a80258dee6bd",
+      "initial_state_hash": "0xa02fd7946295ca45",
+      "physics_ticks": 30000,
+      "physics_ticks_per_second": 75652.6365717,
+      "schema_version": 2,
+      "seed": 20260720,
+      "solver_iterations": 10,
+      "tick_seconds": 0.02,
+      "timed_start_state_hash": "0xa18aa121767fded5",
+      "warmup_ticks": 500,
+      "workload": "legacy_physics_typical_board_v2"
+    },
+    "native_simulator_random_policy": {
+      "action_counts": [
+        2235,
+        389,
+        376,
+        0
+      ],
+      "action_trace_hash": "0xce87de1d75705d2a",
+      "core_step_elapsed_seconds": 2.03699704,
+      "decision_steps": 3000,
+      "episode_resets": 3,
+      "event_count_max": 461,
+      "event_count_mean": 116.692,
+      "event_count_min": 1,
+      "event_trace_hash": "0xa30d32f84b6a6957",
+      "event_vector_capacity_max": 512,
+      "event_vector_capacity_mean": 166.821333333,
+      "final_gauge": 3474,
+      "final_score": 48,
+      "final_tick": 926,
+      "observation_elapsed_seconds": 0.003115238,
+      "observed_body_count_max": 196,
+      "observed_body_count_mean": 87.4023333333,
+      "observed_body_count_min": 11,
+      "policy_seed": 1381450071,
+      "schema_version": 1,
+      "seed": 41,
+      "step_plus_observation_per_second": 1470.50730117,
+      "wall_decisions_per_second": 1433.69011601,
+      "workload": "simulator_random_policy_one_tick_v1"
+    },
+    "native_simulator_workload_equivalence": {
+      "action_counts": true,
+      "episode_resets": true,
+      "observed_body_count": true,
+      "observed_event_count": true
+    },
+    "padded_lazy_random_policy": {
+      "1": {
+        "action_counts": {
+          "0": 2235,
+          "1": 389,
+          "2": 376
+        },
+        "elapsed_seconds": 2.278854673,
+        "episode_resets": 3,
+        "event_access": "lazy count only; no FetchEvents request",
+        "lanes": 1,
+        "observed_body_count": {
+          "max": 196,
+          "mean": 87.40233333333333,
+          "min": 11
+        },
+        "observed_event_count": {
+          "max": 461,
+          "mean": 116.692,
+          "min": 1
+        },
+        "operations": 3000,
+        "operations_per_second": 1316.4507748318358,
+        "policy": "RandomPolicy(max_wait_ticks=1)",
+        "sample_mean_us": 759.6182243333333,
+        "sample_p50_us": 445.292,
+        "sample_p95_us": 2234.737,
+        "sample_p99_us": 2820.729,
+        "worker_response_frame_bytes": {
+          "max": 19824,
+          "mean": 8964.233333333334,
+          "min": 1324
+        },
+        "worker_response_size_formula": "224 + 100 * body_count",
+        "worker_response_size_mismatches": 0
+      },
+      "16": {
+        "action_counts": {
+          "0": 35830,
+          "1": 6096,
+          "2": 6074
+        },
+        "elapsed_seconds": 8.950910079,
+        "episode_resets": 38,
+        "event_access": "lazy count only; no FetchEvents request",
+        "lanes": 16,
+        "observed_body_count": {
+          "max": 196,
+          "mean": 108.28508333333333,
+          "min": 11
+        },
+        "observed_event_count": {
+          "max": 486,
+          "mean": 167.0593125,
+          "min": 1
+        },
+        "operations": 48000,
+        "operations_per_second": 5362.5831983961325,
+        "policy": "RandomPolicy(max_wait_ticks=1)",
+        "sample_mean_us": 2983.636693,
+        "sample_p50_us": 3254.576,
+        "sample_p95_us": 4186.269,
+        "sample_p99_us": 4666.939,
+        "worker_response_frame_bytes": {
+          "max": 19824,
+          "mean": 11052.508333333333,
+          "min": 1324
+        },
+        "worker_response_size_formula": "224 + 100 * body_count",
+        "worker_response_size_mismatches": 0
+      },
+      "32": {
+        "action_counts": {
+          "0": 71767,
+          "1": 12110,
+          "2": 12123
+        },
+        "elapsed_seconds": 13.128063076,
+        "episode_resets": 84,
+        "event_access": "lazy count only; no FetchEvents request",
+        "lanes": 32,
+        "observed_body_count": {
+          "max": 196,
+          "mean": 104.427625,
+          "min": 11
+        },
+        "observed_event_count": {
+          "max": 496,
+          "mean": 159.60098958333333,
+          "min": 1
+        },
+        "operations": 96000,
+        "operations_per_second": 7312.579124905478,
+        "policy": "RandomPolicy(max_wait_ticks=1)",
+        "sample_mean_us": 4376.0210253333335,
+        "sample_p50_us": 4716.162,
+        "sample_p95_us": 5773.965,
+        "sample_p99_us": 6248.023,
+        "worker_response_frame_bytes": {
+          "max": 19824,
+          "mean": 10666.7625,
+          "min": 1324
+        },
+        "worker_response_size_formula": "224 + 100 * body_count",
+        "worker_response_size_mismatches": 0
+      },
+      "4": {
+        "action_counts": {
+          "0": 8927,
+          "1": 1501,
+          "2": 1572
+        },
+        "elapsed_seconds": 6.263749117,
+        "episode_resets": 9,
+        "event_access": "lazy count only; no FetchEvents request",
+        "lanes": 4,
+        "observed_body_count": {
+          "max": 196,
+          "mean": 111.00025,
+          "min": 11
+        },
+        "observed_event_count": {
+          "max": 469,
+          "mean": 173.93733333333333,
+          "min": 1
+        },
+        "operations": 12000,
+        "operations_per_second": 1915.7855424687502,
+        "policy": "RandomPolicy(max_wait_ticks=1)",
+        "sample_mean_us": 2087.9163723333336,
+        "sample_p50_us": 2237.061,
+        "sample_p95_us": 2997.718,
+        "sample_p99_us": 3297.0,
+        "worker_response_frame_bytes": {
+          "max": 19824,
+          "mean": 11324.025,
+          "min": 1324
+        },
+        "worker_response_size_formula": "224 + 100 * body_count",
+        "worker_response_size_mismatches": 0
+      },
+      "8": {
+        "action_counts": {
+          "0": 17853,
+          "1": 3052,
+          "2": 3095
+        },
+        "elapsed_seconds": 7.18318982,
+        "episode_resets": 19,
+        "event_access": "lazy count only; no FetchEvents request",
+        "lanes": 8,
+        "observed_body_count": {
+          "max": 196,
+          "mean": 110.86508333333333,
+          "min": 11
+        },
+        "observed_event_count": {
+          "max": 484,
+          "mean": 172.95429166666668,
+          "min": 1
+        },
+        "operations": 24000,
+        "operations_per_second": 3341.134036744695,
+        "policy": "RandomPolicy(max_wait_ticks=1)",
+        "sample_mean_us": 2394.3966066666662,
+        "sample_p50_us": 2659.398,
+        "sample_p95_us": 3203.781,
+        "sample_p99_us": 3454.741,
+        "worker_response_frame_bytes": {
+          "max": 19824,
+          "mean": 11310.508333333333,
+          "min": 1324
+        },
+        "worker_response_size_formula": "224 + 100 * body_count",
+        "worker_response_size_mismatches": 0
+      }
+    },
+    "padded_workload_equivalence": {
+      "1": {
+        "action_counts": true,
+        "episode_resets": true,
+        "observed_body_count": true,
+        "observed_event_count": true
+      },
+      "16": {
+        "action_counts": true,
+        "episode_resets": true,
+        "observed_body_count": true,
+        "observed_event_count": true
+      },
+      "32": {
+        "action_counts": true,
+        "episode_resets": true,
+        "observed_body_count": true,
+        "observed_event_count": true
+      },
+      "4": {
+        "action_counts": true,
+        "episode_resets": true,
+        "observed_body_count": true,
+        "observed_event_count": true
+      },
+      "8": {
+        "action_counts": true,
+        "episode_resets": true,
+        "observed_body_count": true,
+        "observed_event_count": true
+      }
+    },
+    "raw_padded_random_policy_vector": {
+      "1": {
+        "action_counts": {
+          "0": 2235,
+          "1": 389,
+          "2": 376
+        },
+        "elapsed_seconds": 2.131046669,
+        "episode_resets": 3,
+        "lanes": 1,
+        "observed_body_count": {
+          "max": 196,
+          "mean": 87.40233333333333,
+          "min": 11
+        },
+        "observed_event_count": {
+          "max": 461,
+          "mean": 116.692,
+          "min": 1
+        },
+        "operations": 3000,
+        "operations_per_second": 1407.7589400741556,
+        "response_content_bytes": {
+          "max": 19804,
+          "mean": 8944.233333333334,
+          "min": 1304
+        },
+        "sample_mean_us": 710.3488896666667,
+        "sample_p50_us": 401.06,
+        "sample_p95_us": 2115.428,
+        "sample_p99_us": 2699.534,
+        "wire_mode": "live bodies without events"
+      },
+      "16": {
+        "action_counts": {
+          "0": 35830,
+          "1": 6096,
+          "2": 6074
+        },
+        "elapsed_seconds": 8.393154,
+        "episode_resets": 38,
+        "lanes": 16,
+        "observed_body_count": {
+          "max": 196,
+          "mean": 108.28508333333333,
+          "min": 11
+        },
+        "observed_event_count": {
+          "max": 486,
+          "mean": 167.0593125,
+          "min": 1
+        },
+        "operations": 48000,
+        "operations_per_second": 5718.946655810199,
+        "response_content_bytes": {
+          "max": 19804,
+          "mean": 11032.508333333333,
+          "min": 1304
+        },
+        "sample_mean_us": 2797.718,
+        "sample_p50_us": 3063.615,
+        "sample_p95_us": 3964.19,
+        "sample_p99_us": 4492.582,
+        "wire_mode": "live bodies without events"
+      },
+      "32": {
+        "action_counts": {
+          "0": 71767,
+          "1": 12110,
+          "2": 12123
+        },
+        "elapsed_seconds": 12.210847411,
+        "episode_resets": 84,
+        "lanes": 32,
+        "observed_body_count": {
+          "max": 196,
+          "mean": 104.427625,
+          "min": 11
+        },
+        "observed_event_count": {
+          "max": 496,
+          "mean": 159.60098958333333,
+          "min": 1
+        },
+        "operations": 96000,
+        "operations_per_second": 7861.862225345599,
+        "response_content_bytes": {
+          "max": 19804,
+          "mean": 10646.7625,
+          "min": 1304
+        },
+        "sample_mean_us": 4070.282470333333,
+        "sample_p50_us": 4447.947,
+        "sample_p95_us": 5608.556,
+        "sample_p99_us": 6399.215,
+        "wire_mode": "live bodies without events"
+      },
+      "4": {
+        "action_counts": {
+          "0": 8927,
+          "1": 1501,
+          "2": 1572
+        },
+        "elapsed_seconds": 5.964541142,
+        "episode_resets": 9,
+        "lanes": 4,
+        "observed_body_count": {
+          "max": 196,
+          "mean": 111.00025,
+          "min": 11
+        },
+        "observed_event_count": {
+          "max": 469,
+          "mean": 173.93733333333333,
+          "min": 1
+        },
+        "operations": 12000,
+        "operations_per_second": 2011.8898862983147,
+        "response_content_bytes": {
+          "max": 19804,
+          "mean": 11304.025,
+          "min": 1304
+        },
+        "sample_mean_us": 1988.1803806666667,
+        "sample_p50_us": 2123.022,
+        "sample_p95_us": 2855.521,
+        "sample_p99_us": 3090.175,
+        "wire_mode": "live bodies without events"
+      },
+      "8": {
+        "action_counts": {
+          "0": 17853,
+          "1": 3052,
+          "2": 3095
+        },
+        "elapsed_seconds": 6.7664676,
+        "episode_resets": 19,
+        "lanes": 8,
+        "observed_body_count": {
+          "max": 196,
+          "mean": 110.86508333333333,
+          "min": 11
+        },
+        "observed_event_count": {
+          "max": 484,
+          "mean": 172.95429166666668,
+          "min": 1
+        },
+        "operations": 24000,
+        "operations_per_second": 3546.9023748816885,
+        "response_content_bytes": {
+          "max": 19804,
+          "mean": 11290.508333333333,
+          "min": 1304
+        },
+        "sample_mean_us": 2255.4892,
+        "sample_p50_us": 2548.96,
+        "sample_p95_us": 3113.559,
+        "sample_p99_us": 3313.649,
+        "wire_mode": "live bodies without events"
+      }
+    },
+    "raw_padded_workload_equivalence": {
+      "1": {
+        "action_counts": true,
+        "episode_resets": true,
+        "observed_body_count": true,
+        "observed_event_count": true
+      },
+      "16": {
+        "action_counts": true,
+        "episode_resets": true,
+        "observed_body_count": true,
+        "observed_event_count": true
+      },
+      "32": {
+        "action_counts": true,
+        "episode_resets": true,
+        "observed_body_count": true,
+        "observed_event_count": true
+      },
+      "4": {
+        "action_counts": true,
+        "episode_resets": true,
+        "observed_body_count": true,
+        "observed_event_count": true
+      },
+      "8": {
+        "action_counts": true,
+        "episode_resets": true,
+        "observed_body_count": true,
+        "observed_event_count": true
+      }
+    },
+    "raw_random_policy_vector": {
+      "1": {
+        "action_counts": {
+          "0": 2235,
+          "1": 389,
+          "2": 376
+        },
+        "elapsed_seconds": 2.114014671,
+        "episode_resets": 3,
+        "lanes": 1,
+        "observed_body_count": {
+          "max": 196,
+          "mean": 87.40233333333333,
+          "min": 11
+        },
+        "observed_event_count": {
+          "max": 461,
+          "mean": 116.692,
+          "min": 1
+        },
+        "operations": 3000,
+        "operations_per_second": 1419.1008421814306,
+        "response_content_bytes": {
+          "max": 53053,
+          "mean": 17176.016,
+          "min": 1461
+        },
+        "sample_mean_us": 704.671557,
+        "sample_p50_us": 400.208,
+        "sample_p95_us": 2109.797,
+        "sample_p99_us": 2686.932,
+        "wire_mode": "live bodies plus events"
+      },
+      "16": {
+        "action_counts": {
+          "0": 35830,
+          "1": 6096,
+          "2": 6074
+        },
+        "elapsed_seconds": 8.432974652,
+        "episode_resets": 38,
+        "lanes": 16,
+        "observed_body_count": {
+          "max": 196,
+          "mean": 108.28508333333333,
+          "min": 11
+        },
+        "observed_event_count": {
+          "max": 486,
+          "mean": 167.0593125,
+          "min": 1
+        },
+        "operations": 48000,
+        "operations_per_second": 5691.941690897424,
+        "response_content_bytes": {
+          "max": 54854,
+          "mean": 22886.914270833335,
+          "min": 1361
+        },
+        "sample_mean_us": 2810.9915506666666,
+        "sample_p50_us": 3098.14,
+        "sample_p95_us": 3976.234,
+        "sample_p99_us": 4519.344,
+        "wire_mode": "live bodies plus events"
+      },
+      "32": {
+        "action_counts": {
+          "0": 71767,
+          "1": 12110,
+          "2": 12123
+        },
+        "elapsed_seconds": 12.473828331,
+        "episode_resets": 84,
+        "lanes": 32,
+        "observed_body_count": {
+          "max": 196,
+          "mean": 104.427625,
+          "min": 11
+        },
+        "observed_event_count": {
+          "max": 496,
+          "mean": 159.60098958333333,
+          "min": 1
+        },
+        "operations": 96000,
+        "operations_per_second": 7696.113611041165,
+        "response_content_bytes": {
+          "max": 55368,
+          "mean": 21966.830541666666,
+          "min": 1361
+        },
+        "sample_mean_us": 4157.942777,
+        "sample_p50_us": 4525.034,
+        "sample_p95_us": 5755.565,
+        "sample_p99_us": 6428.26,
+        "wire_mode": "live bodies plus events"
+      },
+      "4": {
+        "action_counts": {
+          "0": 8927,
+          "1": 1501,
+          "2": 1572
+        },
+        "elapsed_seconds": 5.895670742,
+        "episode_resets": 9,
+        "lanes": 4,
+        "observed_body_count": {
+          "max": 196,
+          "mean": 111.00025,
+          "min": 11
+        },
+        "observed_event_count": {
+          "max": 469,
+          "mean": 173.93733333333333,
+          "min": 1
+        },
+        "operations": 12000,
+        "operations_per_second": 2035.391819715023,
+        "response_content_bytes": {
+          "max": 53348,
+          "mean": 23636.68975,
+          "min": 1361
+        },
+        "sample_mean_us": 1965.2235806666665,
+        "sample_p50_us": 2143.281,
+        "sample_p95_us": 2822.178,
+        "sample_p99_us": 3070.638,
+        "wire_mode": "live bodies plus events"
+      },
+      "8": {
+        "action_counts": {
+          "0": 17853,
+          "1": 3052,
+          "2": 3095
+        },
+        "elapsed_seconds": 6.789551752,
+        "episode_resets": 19,
+        "lanes": 8,
+        "observed_body_count": {
+          "max": 196,
+          "mean": 110.86508333333333,
+          "min": 11
+        },
+        "observed_event_count": {
+          "max": 484,
+          "mean": 172.95429166666668,
+          "min": 1
+        },
+        "operations": 24000,
+        "operations_per_second": 3534.8430760440574,
+        "response_content_bytes": {
+          "max": 54559,
+          "mean": 23558.123125,
+          "min": 1361
+        },
+        "sample_mean_us": 2263.1839173333333,
+        "sample_p50_us": 2549.04,
+        "sample_p95_us": 3152.203,
+        "sample_p99_us": 3353.304,
+        "wire_mode": "live bodies plus events"
+      }
+    },
+    "representative_workload_equivalence": {
+      "1": {
+        "action_counts": true,
+        "episode_resets": true,
+        "observed_body_count": true,
+        "observed_event_count": true
+      },
+      "16": {
+        "action_counts": true,
+        "episode_resets": true,
+        "observed_body_count": true,
+        "observed_event_count": true
+      },
+      "32": {
+        "action_counts": true,
+        "episode_resets": true,
+        "observed_body_count": true,
+        "observed_event_count": true
+      },
+      "4": {
+        "action_counts": true,
+        "episode_resets": true,
+        "observed_body_count": true,
+        "observed_event_count": true
+      },
+      "8": {
+        "action_counts": true,
+        "episode_resets": true,
+        "observed_body_count": true,
+        "observed_event_count": true
+      }
+    },
+    "snapshot_branching": {
+      "durable_restore": {
+        "elapsed_seconds": 0.701867577,
+        "operations": 7,
+        "operations_per_second": 9.9733913196563,
+        "sample_mean_us": 100266.79671428572,
+        "sample_p50_us": 100274.214,
+        "sample_p95_us": 103754.56,
+        "sample_p99_us": 103754.56
+      },
+      "durable_snapshot_bytes": 28104,
+      "fast_branch": {
+        "elapsed_seconds": 0.008777408,
+        "operations": 30,
+        "operations_per_second": 3417.865501979628,
+        "sample_mean_us": 292.58026666666666,
+        "sample_p50_us": 281.158,
+        "sample_p95_us": 376.831,
+        "sample_p99_us": 491.701
+      },
+      "fast_checkpoint_us": 183.27,
+      "history_actions": 1000,
+      "median_restore_over_branch": 356.6472019291644,
+      "validation": "state hash and durable snapshot equality per branch"
+    },
+    "thread_vector_random_policy": {
+      "1": {
+        "action_counts": {
+          "0": 2235,
+          "1": 389,
+          "2": 376
+        },
+        "elapsed_seconds": 4.043193351,
+        "episode_resets": 3,
+        "lanes": 1,
+        "observed_body_count": {
+          "max": 196,
+          "mean": 87.40233333333333,
+          "min": 11
+        },
+        "observed_event_count": {
+          "max": 461,
+          "mean": 116.692,
+          "min": 1
+        },
+        "operations": 3000,
+        "operations_per_second": 741.9877655017443,
+        "policy": "RandomPolicy(max_wait_ticks=1)",
+        "vector_round_mean_us": 1347.731117,
+        "vector_round_p50_us": 867.373,
+        "vector_round_p95_us": 3736.66,
+        "vector_round_p99_us": 4681.159
+      },
+      "16": {
+        "action_counts": {
+          "0": 35830,
+          "1": 6096,
+          "2": 6074
+        },
+        "elapsed_seconds": 49.997746558,
+        "episode_resets": 38,
+        "lanes": 16,
+        "observed_body_count": {
+          "max": 196,
+          "mean": 108.28508333333333,
+          "min": 11
+        },
+        "observed_event_count": {
+          "max": 486,
+          "mean": 167.0593125,
+          "min": 1
+        },
+        "operations": 48000,
+        "operations_per_second": 960.0432680364402,
+        "policy": "RandomPolicy(max_wait_ticks=1)",
+        "vector_round_mean_us": 16665.91551933333,
+        "vector_round_p50_us": 18115.427,
+        "vector_round_p95_us": 23376.975,
+        "vector_round_p99_us": 25679.337
+      },
+      "32": {
+        "action_counts": {
+          "0": 71767,
+          "1": 12110,
+          "2": 12123
+        },
+        "elapsed_seconds": 97.111162494,
+        "episode_resets": 84,
+        "lanes": 32,
+        "observed_body_count": {
+          "max": 196,
+          "mean": 104.427625,
+          "min": 11
+        },
+        "observed_event_count": {
+          "max": 496,
+          "mean": 159.60098958333333,
+          "min": 1
+        },
+        "operations": 96000,
+        "operations_per_second": 988.5578293425469,
+        "policy": "RandomPolicy(max_wait_ticks=1)",
+        "vector_round_mean_us": 32370.387498,
+        "vector_round_p50_us": 34076.527,
+        "vector_round_p95_us": 46165.878,
+        "vector_round_p99_us": 51308.75
+      },
+      "4": {
+        "action_counts": {
+          "0": 8927,
+          "1": 1501,
+          "2": 1572
+        },
+        "elapsed_seconds": 15.589915965,
+        "episode_resets": 9,
+        "lanes": 4,
+        "observed_body_count": {
+          "max": 196,
+          "mean": 111.00025,
+          "min": 11
+        },
+        "observed_event_count": {
+          "max": 469,
+          "mean": 173.93733333333333,
+          "min": 1
+        },
+        "operations": 12000,
+        "operations_per_second": 769.7283312456906,
+        "policy": "RandomPolicy(max_wait_ticks=1)",
+        "vector_round_mean_us": 5196.638655000001,
+        "vector_round_p50_us": 5487.947,
+        "vector_round_p95_us": 7793.635,
+        "vector_round_p99_us": 8244.789
+      },
+      "8": {
+        "action_counts": {
+          "0": 17853,
+          "1": 3052,
+          "2": 3095
+        },
+        "elapsed_seconds": 25.825001568,
+        "episode_resets": 19,
+        "lanes": 8,
+        "observed_body_count": {
+          "max": 196,
+          "mean": 110.86508333333333,
+          "min": 11
+        },
+        "observed_event_count": {
+          "max": 484,
+          "mean": 172.95429166666668,
+          "min": 1
+        },
+        "operations": 24000,
+        "operations_per_second": 929.3319861687297,
+        "policy": "RandomPolicy(max_wait_ticks=1)",
+        "vector_round_mean_us": 8608.333856000001,
+        "vector_round_p50_us": 8970.284,
+        "vector_round_p95_us": 12885.741,
+        "vector_round_p99_us": 14117.606
+      }
+    },
+    "thread_vector_step": {
+      "1": {
+        "action_counts": {
+          "0": 3000
+        },
+        "elapsed_seconds": 0.390050086,
+        "episode_resets": 2,
+        "lanes": 1,
+        "observed_body_count": {
+          "max": 22,
+          "mean": 16.531333333333333,
+          "min": 11
+        },
+        "observed_event_count": {
+          "max": 44,
+          "mean": 1.105,
+          "min": 1
+        },
+        "operations": 3000,
+        "operations_per_second": 7691.319929615398,
+        "policy": "wait(1)",
+        "vector_round_mean_us": 130.01669533333333,
+        "vector_round_p50_us": 126.191,
+        "vector_round_p95_us": 163.873,
+        "vector_round_p99_us": 197.107
+      },
+      "16": {
+        "action_counts": {
+          "0": 48000
+        },
+        "elapsed_seconds": 4.038718566,
+        "episode_resets": 17,
+        "lanes": 16,
+        "observed_body_count": {
+          "max": 28,
+          "mean": 16.864854166666667,
+          "min": 11
+        },
+        "observed_event_count": {
+          "max": 54,
+          "mean": 1.0526666666666666,
+          "min": 0
+        },
+        "operations": 48000,
+        "operations_per_second": 11884.95786858945,
+        "policy": "wait(1)",
+        "vector_round_mean_us": 1346.239522,
+        "vector_round_p50_us": 1354.27,
+        "vector_round_p95_us": 1509.616,
+        "vector_round_p99_us": 1696.725
+      },
+      "32": {
+        "action_counts": {
+          "0": 96000
+        },
+        "elapsed_seconds": 8.170109585,
+        "episode_resets": 39,
+        "lanes": 32,
+        "observed_body_count": {
+          "max": 28,
+          "mean": 16.742802083333334,
+          "min": 10
+        },
+        "observed_event_count": {
+          "max": 53,
+          "mean": 1.0498125,
+          "min": 0
+        },
+        "operations": 96000,
+        "operations_per_second": 11750.148391675459,
+        "policy": "wait(1)",
+        "vector_round_mean_us": 2723.369861666667,
+        "vector_round_p50_us": 2698.139,
+        "vector_round_p95_us": 3152.669,
+        "vector_round_p99_us": 3449.616
+      },
+      "4": {
+        "action_counts": {
+          "0": 12000
+        },
+        "elapsed_seconds": 1.078417412,
+        "episode_resets": 5,
+        "lanes": 4,
+        "observed_body_count": {
+          "max": 27,
+          "mean": 17.2905,
+          "min": 11
+        },
+        "observed_event_count": {
+          "max": 45,
+          "mean": 1.0699166666666666,
+          "min": 1
+        },
+        "operations": 12000,
+        "operations_per_second": 11127.416774312987,
+        "policy": "wait(1)",
+        "vector_round_mean_us": 359.4724706666667,
+        "vector_round_p50_us": 359.949,
+        "vector_round_p95_us": 419.963,
+        "vector_round_p99_us": 471.763
+      },
+      "8": {
+        "action_counts": {
+          "0": 24000
+        },
+        "elapsed_seconds": 2.058831892,
+        "episode_resets": 10,
+        "lanes": 8,
+        "observed_body_count": {
+          "max": 28,
+          "mean": 16.982083333333332,
+          "min": 11
+        },
+        "observed_event_count": {
+          "max": 48,
+          "mean": 1.0695416666666666,
+          "min": 0
+        },
+        "operations": 24000,
+        "operations_per_second": 11657.095508019263,
+        "policy": "wait(1)",
+        "vector_round_mean_us": 686.2772973333333,
+        "vector_round_p50_us": 679.59,
+        "vector_round_p95_us": 781.054,
+        "vector_round_p99_us": 865.094
+      }
+    },
+    "worker_pipeline": {
+      "captured_observation_payload_bytes": 2112,
+      "captured_transition_payload_bytes": 2361,
+      "decode_captured_transition": {
+        "elapsed_seconds": 1.690543988,
+        "operations": 30000,
+        "operations_per_second": 17745.76716899957,
+        "sample_mean_us": 56.35146626666667,
+        "sample_p50_us": 55.696,
+        "sample_p95_us": 60.555,
+        "sample_p99_us": 69.382
+      },
+      "decoded_client_step": {
+        "elapsed_seconds": 0.29555988,
+        "operations": 3000,
+        "operations_per_second": 10150.227425995707,
+        "sample_mean_us": 98.51996000000001,
+        "sample_p50_us": 94.962,
+        "sample_p95_us": 120.911,
+        "sample_p99_us": 139.597
+      },
+      "info_dict_materialization": {
+        "elapsed_seconds": 0.024958766,
+        "operations": 30000,
+        "operations_per_second": 1201982.5018592665,
+        "sample_mean_us": 0.8319588666666667,
+        "sample_p50_us": 0.822,
+        "sample_p95_us": 0.881,
+        "sample_p99_us": 1.012
+      },
+      "observation_dict_materialization": {
+        "elapsed_seconds": 0.326408261,
+        "operations": 30000,
+        "operations_per_second": 91909.43852980486,
+        "sample_mean_us": 10.880275366666666,
+        "sample_p50_us": 10.8,
+        "sample_p95_us": 11.152,
+        "sample_p99_us": 14.398
+      },
+      "observed_body_count": {
+        "max": 22,
+        "mean": 18.185333333333332,
+        "min": 13
+      },
+      "observed_event_count": {
+        "max": 33,
+        "mean": 1.09,
+        "min": 1
+      },
+      "raw_observe_round_trip": {
+        "elapsed_seconds": 0.028717881,
+        "operations": 3000,
+        "operations_per_second": 104464.53204538315,
+        "sample_mean_us": 9.572627,
+        "sample_p50_us": 9.418,
+        "sample_p95_us": 10.551,
+        "sample_p99_us": 13.747
+      },
+      "raw_step_round_trip": {
+        "elapsed_seconds": 0.129544702,
+        "operations": 3000,
+        "operations_per_second": 23158.029264678073,
+        "sample_mean_us": 43.181567333333334,
+        "sample_p50_us": 38.975,
+        "sample_p95_us": 66.718,
+        "sample_p99_us": 75.695
+      }
+    }
+  },
+  "schema_version": 2,
+  "semantics": "exact eager transitions plus packed transitions with lazy event detail",
+  "workload": "exact_worker_pipeline_one_tick_v1"
+}

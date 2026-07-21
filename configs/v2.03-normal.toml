@@ -1,0 +1,1172 @@
+schema_version = 1
+
+[profile]
+id = "v2.03-normal"
+game_version = "2.03"
+mode = "normal"
+status = "release-defaults-proxy-validated"
+executable_sha256 = "0636d3e44439d88807d0c00aeb1bb072316c69fc13a21f79d67e53affad28255"
+box2d_sha256 = "34f1387cbe51fb09a3e7cd868236ed3c0b73be2f70fcf5b09ae6c48187d14fcd"
+shipped_config_sha256 = "1e29431fe8209c25784d4741f7972737561281169bbb5a56f62e3e0f0b63de35"
+
+[[mechanic]]
+key = "field.client_rect"
+value = [130, 120, 320, 250]
+value_type = "int_list"
+unit = "display_unit"
+provenance = "binary-derived"
+uncertainty = ["numerical"]
+uncertainty_note = "Production defaults are proven by the executable initializer and fresh-process Box2D proxy trace; long-run legacy solver drift remains numerical."
+source = "reference/game-rules-analysis.md#static-field-geometry"
+validating_experiments = ["BIN-RULES-001"]
+planned_experiments = []
+
+[[mechanic]]
+key = "field.opening_blank"
+value = 40
+value_type = "integer"
+unit = "display_unit"
+provenance = "binary-derived"
+uncertainty = ["numerical"]
+uncertainty_note = "The mode-0 normal profile uses this blank before the bottom fixture; the nonzero-mode/Metsu-side INI profile uses 30."
+source = "reference/game-rules-analysis.md#static-field-geometry"
+validating_experiments = ["BIN-RULES-001"]
+planned_experiments = []
+
+[[mechanic]]
+key = "field.wall_thickness"
+value = 16
+value_type = "integer"
+unit = "display_unit"
+provenance = "binary-derived"
+uncertainty = ["numerical"]
+uncertainty_note = "Exact signed-truncation fixture placement is recovered; solver skin remains numerical."
+source = "reference/game-rules-analysis.md#static-field-geometry"
+validating_experiments = ["BIN-RULES-001"]
+planned_experiments = []
+
+[[mechanic]]
+key = "field.top_geometry"
+value = [-140, 320, 300]
+value_type = "int_list"
+unit = "display_unit"
+provenance = "binary-derived"
+uncertainty = ["numerical"]
+uncertainty_note = "Order is center Y, full width, full height and exact fixture construction is recovered."
+source = "reference/game-rules-analysis.md#static-field-geometry"
+validating_experiments = ["BIN-RULES-001"]
+planned_experiments = []
+
+[[mechanic]]
+key = "field.bottom_height"
+value = 16
+value_type = "integer"
+unit = "display_unit"
+provenance = "binary-derived"
+uncertainty = ["numerical"]
+uncertainty_note = "Exact full-height bottom fixture construction is recovered."
+source = "reference/game-rules-analysis.md#static-field-geometry"
+validating_experiments = ["BIN-RULES-001"]
+planned_experiments = []
+
+[[mechanic]]
+key = "colored.material"
+value = [1.0, 1.0, 0.0]
+value_type = "float_list"
+unit = "legacy_material_triplet"
+provenance = "shipped-config"
+uncertainty = ["numerical"]
+uncertainty_note = "Exact density, friction, and restitution used by normal box/triangle fixtures; the wrapper retains the legacy default all-colliding filter."
+source = "reference/game-rules-analysis.md#position-rotation-color-and-shape--provenstatic"
+validating_experiments = ["BIN-RULES-001", "DLL-MATERIAL-001"]
+planned_experiments = []
+
+[[mechanic]]
+key = "colored.active_sizes"
+value = [32, 46, 54, 60, 72, 90, 140, 5, 5, 5]
+value_type = "int_list"
+unit = "display_unit"
+provenance = "binary-derived"
+uncertainty = ["numerical"]
+uncertainty_note = "Exact ten-slot production table; the first seven slots are selectable and the final three retain zero-weight filler values."
+source = "reference/game-rules-analysis.md#position-rotation-color-and-shape--provenstatic"
+validating_experiments = ["BIN-RULES-001", "DLL-SHAPE-001"]
+planned_experiments = []
+
+[[mechanic]]
+key = "colored.active_size_weights"
+value = [20, 28, 28, 14, 5, 3, 1, 0, 0, 0]
+value_type = "int_list"
+unit = "relative_weight"
+provenance = "binary-derived"
+uncertainty = ["numerical"]
+uncertainty_note = "Exact 99-ticket production table and GetRand(98) selection are recovered."
+source = "reference/game-rules-analysis.md#cadence-and-size"
+validating_experiments = ["BIN-RULES-001", "DLL-RNG-001"]
+planned_experiments = []
+
+[[mechanic]]
+key = "colored.life_span"
+value = 100000
+value_type = "integer"
+unit = "tick"
+provenance = "binary-derived"
+uncertainty = ["timing"]
+uncertainty_note = "Actor-update decrement and same-creation-frame first update are proven; pool cleanup timing is separate."
+source = "reference/game-rules-analysis.md#lifetimes-and-deletion"
+validating_experiments = ["BIN-RULES-001"]
+planned_experiments = []
+
+[[mechanic]]
+key = "colored.death_delay"
+value = 40
+value_type = "integer"
+unit = "tick"
+provenance = "binary-derived"
+uncertainty = ["timing"]
+uncertainty_note = "Exact production strict rot_timer > 40 threshold for class-4 blocks in actor-slot update order."
+source = "reference/game-rules-analysis.md#rot"
+validating_experiments = ["BIN-RULES-001"]
+planned_experiments = []
+
+[[mechanic]]
+key = "projectile.size"
+value = 24.0
+value_type = "float"
+unit = "display_unit"
+provenance = "shipped-config"
+uncertainty = ["numerical"]
+uncertainty_note = "Proven full width and height of the projectile box."
+source = "reference/game-rules-analysis.md#shots"
+validating_experiments = ["BIN-RULES-001", "DLL-SHAPE-001"]
+planned_experiments = []
+
+[[mechanic]]
+key = "projectile.material"
+value = [8.0, 1.0, 0.0]
+value_type = "float_list"
+unit = "legacy_material_triplet"
+provenance = "shipped-config"
+uncertainty = ["numerical"]
+uncertainty_note = "Exact density, friction, and restitution used by each 24x24 projectile box; the wrapper retains the legacy default all-colliding filter."
+source = "reference/game-rules-analysis.md#shots"
+validating_experiments = ["BIN-RULES-001", "DLL-PROJECTILE-001"]
+planned_experiments = []
+
+[[mechanic]]
+key = "projectile.life_span"
+value = 3000
+value_type = "integer"
+unit = "tick"
+provenance = "binary-derived"
+uncertainty = ["timing"]
+uncertainty_note = "Expires on its 3000th actor update, including the creation frame as update one."
+source = "reference/game-rules-analysis.md#lifetimes-and-deletion"
+validating_experiments = ["BIN-RULES-001"]
+planned_experiments = []
+
+[[mechanic]]
+key = "projectile.initial_velocity_y_slots"
+value = [-250, -500]
+value_type = "int_list"
+unit = "raw_velocity_parameter"
+provenance = "shipped-config"
+uncertainty = ["numerical"]
+uncertainty_note = "Left/right fresh-edge mapping and wrapper scaling are proven."
+source = "reference/game-rules-analysis.md#shots"
+validating_experiments = ["BIN-RULES-001", "DLL-STEP-001"]
+planned_experiments = []
+
+[[mechanic]]
+key = "bonus.size"
+value = 24
+value_type = "integer"
+unit = "display_unit"
+provenance = "shipped-config"
+uncertainty = ["numerical"]
+uncertainty_note = "Exact full diameter of the special circle; the wrapper receives radius 12."
+source = "reference/game-rules-analysis.md#special-orb-schedule"
+validating_experiments = ["BIN-RULES-001", "DLL-SHAPE-001"]
+planned_experiments = []
+
+[[mechanic]]
+key = "bonus.material"
+value = [50.0, 0.1, 0.6]
+value_type = "float_list"
+unit = "legacy_material_triplet"
+provenance = "shipped-config"
+uncertainty = ["numerical"]
+uncertainty_note = "Exact density, friction, and restitution used by the special circle; legacy mixing is reproduced by revision 58."
+source = "reference/game-rules-analysis.md#special-orb-schedule"
+validating_experiments = ["BIN-RULES-001", "DLL-MATERIAL-001"]
+planned_experiments = []
+
+[[mechanic]]
+key = "wall.material"
+value = [1.0, 1.0]
+value_type = "float_list"
+unit = "legacy_material_pair"
+provenance = "shipped-config"
+uncertainty = ["numerical"]
+uncertainty_note = "Exact friction and restitution of both density-zero side fixtures; revision-58 mixing is sqrt friction and max restitution."
+source = "reference/game-rules-analysis.md#static-field-geometry"
+validating_experiments = ["BIN-RULES-001", "DLL-MATERIAL-001"]
+planned_experiments = []
+
+[[mechanic]]
+key = "bottom.material"
+value = [1.0, 0.0]
+value_type = "float_list"
+unit = "legacy_material_pair"
+provenance = "shipped-config"
+uncertainty = ["numerical"]
+uncertainty_note = "Exact friction and restitution of the density-zero bottom fixture created third."
+source = "reference/game-rules-analysis.md#static-field-geometry"
+validating_experiments = ["BIN-RULES-001", "DLL-MATERIAL-001"]
+planned_experiments = []
+
+[[mechanic]]
+key = "top.material"
+value = [1.0, 0.5]
+value_type = "float_list"
+unit = "legacy_material_pair"
+provenance = "shipped-config"
+uncertainty = ["numerical"]
+uncertainty_note = "Exact friction and restitution of the density-zero top fixture created fourth at center (306,-140), full size 320x300."
+source = "reference/game-rules-analysis.md#static-field-geometry"
+validating_experiments = ["BIN-RULES-001", "DLL-MATERIAL-001"]
+planned_experiments = []
+
+[[mechanic]]
+key = "gauge.client_rect"
+value = [34, 100, 20, 350]
+value_type = "int_list"
+unit = "display_unit"
+provenance = "shipped-config"
+uncertainty = ["runtime-use", "geometry"]
+uncertainty_note = "Order is x, y, width, height; this is presentation geometry, not gauge arithmetic."
+source = "reference/mechanics-evidence.md#gauge-and-fixed-step"
+validating_experiments = []
+planned_experiments = ["GAME-HUD-001"]
+
+[[mechanic]]
+key = "gauge.maximum"
+value = 40000
+value_type = "integer"
+unit = "gauge_unit"
+provenance = "binary-derived"
+uncertainty = ["timing"]
+uncertainty_note = "Exact clamp maximum; ordering relative to block-pool rot is recovered."
+source = "reference/game-rules-analysis.md#gauge-gains-and-passive-drain"
+validating_experiments = ["BIN-RULES-001"]
+planned_experiments = []
+
+[[mechanic]]
+key = "gauge.initial"
+value = 3000
+value_type = "integer"
+unit = "gauge_unit"
+provenance = "binary-derived"
+uncertainty = ["timing"]
+uncertainty_note = "Exact reset value; the first passive drain occurs on the first scene update."
+source = "reference/game-rules-analysis.md#gauge-gains-and-passive-drain"
+validating_experiments = ["BIN-RULES-001"]
+planned_experiments = []
+
+[[mechanic]]
+key = "gauge.plus_unit"
+value = 120
+value_type = "integer"
+unit = "gauge_unit"
+provenance = "shipped-config"
+uncertainty = ["runtime-use"]
+uncertainty_note = "Proven configuration trap: normal clear reward is hard-coded 700, not this 120."
+source = "reference/game-rules-analysis.md#configuration-boundaries-and-remaining-leads"
+validating_experiments = ["BIN-RULES-001"]
+planned_experiments = []
+
+[[mechanic]]
+key = "gauge.rotten_penalty"
+value = 5000
+value_type = "integer"
+unit = "gauge_unit"
+provenance = "shipped-config"
+uncertainty = ["runtime-use"]
+uncertainty_note = "Proven configuration trap: normal rot uses P=1800+20*L, not this 5000."
+source = "reference/game-rules-analysis.md#configuration-boundaries-and-remaining-leads"
+validating_experiments = ["BIN-RULES-001"]
+planned_experiments = []
+
+[[mechanic]]
+key = "world.magnification"
+value = 100.0
+value_type = "float"
+unit = "display_units_per_world_unit"
+provenance = "shipped-config"
+uncertainty = ["runtime-use"]
+uncertainty_note = "Proven configuration trap: normal world construction passes literal magnification 10 instead."
+source = "reference/game-rules-analysis.md#configuration-boundaries-and-remaining-leads"
+validating_experiments = ["BIN-RULES-001", "DLL-STEP-001"]
+planned_experiments = []
+
+[[mechanic]]
+key = "world.normal_step"
+value = 0.020
+value_type = "float"
+unit = "seconds_per_normal_step"
+provenance = "shipped-config"
+uncertainty = ["timing"]
+uncertainty_note = "Exact fixed normal physics step before multiplication by the signed time multiplier."
+source = "reference/game-rules-analysis.md#fixed-update-provenstatic"
+validating_experiments = ["BIN-RULES-001", "DLL-STEP-001"]
+planned_experiments = []
+
+[[mechanic]]
+key = "world.solver_iterations"
+value = 10
+value_type = "integer"
+unit = "solver_iterations"
+provenance = "binary-derived"
+uncertainty = ["numerical"]
+uncertainty_note = "Recovered call site uses exactly 10 and the imported revision-58 solver is covered by the DLL oracle trace."
+source = "reference/binary-analysis.md#recovered-wrapper-abi"
+validating_experiments = ["BIN-RULES-001", "DLL-STEP-001"]
+planned_experiments = []
+
+[[mechanic]]
+key = "normal.initial_board_counts"
+value = [10, 10]
+value_type = "int_list"
+unit = "spawn"
+provenance = "binary-derived"
+uncertainty = ["timing"]
+uncertainty_note = "Exact constructor order: ten rotten physics-owned blocks, then ten scripted falling blocks."
+source = "reference/game-rules-analysis.md#reset-prefill-and-pre-word-actor-pass--provenstatic"
+validating_experiments = ["BIN-RULES-001"]
+planned_experiments = []
+
+[[mechanic]]
+key = "normal.initial_board_y"
+value = [200, 60]
+value_type = "int_list"
+unit = "display_unit"
+provenance = "binary-derived"
+uncertainty = ["numerical"]
+uncertainty_note = "Exact constructor Y arguments in rotten-then-scripted order; the scripted set reaches float32 Y=60.2 in the hidden actor pass."
+source = "reference/game-rules-analysis.md#reset-prefill-and-pre-word-actor-pass--provenstatic"
+validating_experiments = ["BIN-RULES-001"]
+planned_experiments = []
+
+[[mechanic]]
+key = "normal.initial_actor_passes"
+value = 1
+value_type = "integer"
+unit = "dimensionless"
+provenance = "binary-derived"
+uncertainty = ["timing"]
+uncertainty_note = "Exact outer actor-pool pass after Field construction and before replay word 0; it is not a scene/physics tick."
+source = "reference/game-rules-analysis.md#reset-prefill-and-pre-word-actor-pass--provenstatic"
+validating_experiments = ["BIN-RULES-001"]
+planned_experiments = []
+
+[[unknown_setting]]
+raw_key = "a"
+value = 50
+value_type = "integer"
+provenance = "shipped-config"
+clue = "Japanese comment says normal-block frequency; recovered normal mode uses the hard-coded level formula instead, so this raw key is not a clone input."
+source = "reference/mechanics-evidence.md#unresolved-normal-mode-tuning-keys"
+validating_experiments = ["BIN-RULES-001"]
+planned_experiments = []
+
+[[unknown_setting]]
+raw_key = "b"
+value = 0.1
+value_type = "float"
+provenance = "shipped-config"
+clue = "Japanese comment says speed; recovered normal mode uses the hard-coded scripted-descent formula instead, so this raw key is not a clone input."
+source = "reference/mechanics-evidence.md#unresolved-normal-mode-tuning-keys"
+validating_experiments = ["BIN-RULES-001"]
+planned_experiments = []
+
+[[unknown_setting]]
+raw_key = "c"
+value = 8
+value_type = "integer"
+provenance = "shipped-config"
+clue = "Japanese comment says color; recovered normal mode uses the hard-coded inclusive color-ID formula instead, so this raw key is not a clone input."
+source = "reference/mechanics-evidence.md#unresolved-normal-mode-tuning-keys"
+validating_experiments = ["BIN-RULES-001"]
+planned_experiments = []
+
+[[unknown_setting]]
+raw_key = "d"
+value = 1
+value_type = "integer"
+provenance = "shipped-config"
+clue = "Japanese comment says EX-block frequency; the recovered normal special scheduler does not read it, and EX mode is out of scope."
+source = "reference/mechanics-evidence.md#unresolved-normal-mode-tuning-keys"
+validating_experiments = ["BIN-RULES-001"]
+planned_experiments = []
+
+[[unknown_setting]]
+raw_key = "p"
+value = 2000
+value_type = "integer"
+provenance = "shipped-config"
+clue = "No recovered normal-mode call site; retained only as an out-of-scope shipped key, never as a clone input."
+source = "reference/mechanics-evidence.md#unresolved-normal-mode-tuning-keys"
+validating_experiments = ["BIN-RULES-001"]
+planned_experiments = []
+
+# Native mode-0 normal values used by the current clone. Replay header offset
+# 0x10 records mode; zero selects this profile and nonzero selects the separate
+# Metsu-side profile represented by data/doc/irisu.ini.
+
+[[implementation_parameter]]
+key = "tick_seconds"
+value = 0.020
+value_type = "float"
+unit = "seconds_per_normal_step"
+provenance = "binary-derived"
+uncertainty_note = "Exact fixed update shared by both mode parameter tables."
+source = "reference/game-rules-analysis.md#fixed-update-provenstatic"
+validating_experiments = ["BIN-RULES-001", "DLL-STEP-001"]
+planned_experiments = []
+
+[[implementation_parameter]]
+key = "solver_iterations"
+value = 10
+value_type = "integer"
+unit = "solver_iterations"
+provenance = "binary-derived"
+uncertainty_note = "Exact second argument to the normal b2d_step call."
+source = "reference/game-rules-analysis.md#fixed-update-provenstatic"
+validating_experiments = ["BIN-RULES-001", "DLL-STEP-001"]
+planned_experiments = []
+
+[[implementation_parameter]]
+key = "gravity_y"
+value = 160.0
+value_type = "float"
+unit = "display_units_per_second_squared"
+provenance = "binary-derived"
+uncertainty_note = "Exact fifth argument at the v2.03 normal-mode b2d_init call site."
+source = "reference/binary-analysis.md#normal-mode-call-sites"
+validating_experiments = ["BIN-NORMAL-001"]
+planned_experiments = ["GAME-LIFECYCLE-001"]
+
+[[implementation_parameter]]
+key = "world_magnification"
+value = 10.0
+value_type = "float"
+unit = "display_units_per_world_unit"
+provenance = "binary-derived"
+uncertainty_note = "Exact sixth argument at the v2.03 normal-mode b2d_init call site; it is independent of the mode parameter table."
+source = "reference/binary-analysis.md#normal-mode-call-sites"
+validating_experiments = ["BIN-NORMAL-001", "DLL-STEP-001"]
+planned_experiments = []
+
+[[implementation_parameter]]
+key = "linear_damping"
+value = 0.0
+value_type = "float"
+unit = "inverse_second"
+provenance = "binary-derived"
+uncertainty_note = "The wrapper leaves b2BodyDef linear damping at its zero default."
+source = "reference/binary-analysis.md#normal-mode-call-sites"
+validating_experiments = ["BIN-NORMAL-001", "DLL-STEP-001"]
+planned_experiments = []
+
+[[implementation_parameter]]
+key = "angular_damping"
+value = 0.0
+value_type = "float"
+unit = "inverse_second"
+provenance = "binary-derived"
+uncertainty_note = "The wrapper leaves b2BodyDef angular damping at its zero default."
+source = "reference/binary-analysis.md#normal-mode-call-sites"
+validating_experiments = ["BIN-NORMAL-001", "DLL-STEP-001"]
+planned_experiments = []
+
+[[implementation_parameter]]
+key = "scripted_fall_speed"
+value = 0.2
+value_type = "float"
+unit = "display_unit"
+provenance = "binary-derived"
+uncertainty_note = "Exact level-1 scripted displacement per actor update; later levels use the recovered formula."
+source = "reference/game-rules-analysis.md#scripted-descent-and-physics-activation"
+validating_experiments = ["BIN-RULES-001"]
+planned_experiments = []
+
+[[implementation_parameter]]
+key = "field"
+value = [130.0, 120.0, 320.0, 250.0]
+value_type = "float_list"
+unit = "display_unit"
+provenance = "binary-derived"
+uncertainty_note = "Exact mode-0 normal field x, y, width, and height."
+source = "reference/game-rules-analysis.md#mode-selected-parameter-profile"
+validating_experiments = ["BIN-RULES-001", "GAME-SEED41-PROXY-001"]
+planned_experiments = []
+
+[[implementation_parameter]]
+key = "field_blank"
+value = 40.0
+value_type = "float"
+unit = "display_unit"
+provenance = "binary-derived"
+uncertainty_note = "Exact mode-0 normal opening blank."
+source = "reference/game-rules-analysis.md#mode-selected-parameter-profile"
+validating_experiments = ["BIN-RULES-001", "GAME-SEED41-PROXY-001"]
+planned_experiments = []
+
+[[implementation_parameter]]
+key = "field_thickness"
+value = 16.0
+value_type = "float"
+unit = "display_unit"
+provenance = "binary-derived"
+uncertainty_note = "Exact mode-0 normal wall thickness."
+source = "reference/game-rules-analysis.md#mode-selected-parameter-profile"
+validating_experiments = ["BIN-RULES-001", "GAME-SEED41-PROXY-001"]
+planned_experiments = []
+
+[[implementation_parameter]]
+key = "client"
+value = [640.0, 480.0]
+value_type = "float_list"
+unit = "display_unit"
+provenance = "binary-derived"
+uncertainty_note = "Exact replay/live client dimensions."
+source = "reference/game-rules-analysis.md#replay-cadence-and-fast-forward----provenstatic"
+validating_experiments = ["BIN-RULES-001"]
+planned_experiments = []
+
+[[implementation_parameter]]
+key = "side_wall_top"
+value = 120.0
+value_type = "float"
+unit = "display_unit"
+provenance = "binary-derived"
+uncertainty_note = "Exact top edge of both side fixtures."
+source = "reference/game-rules-analysis.md#static-field-geometry"
+validating_experiments = ["BIN-RULES-001"]
+planned_experiments = []
+
+[[implementation_parameter]]
+key = "side_wall_bottom"
+value = 370.0
+value_type = "float"
+unit = "display_unit"
+provenance = "binary-derived"
+uncertainty_note = "Exact bottom edge of both side fixtures."
+source = "reference/game-rules-analysis.md#static-field-geometry"
+validating_experiments = ["BIN-RULES-001"]
+planned_experiments = []
+
+[[implementation_parameter]]
+key = "passive_gauge_decay_per_tick"
+value = 1
+value_type = "integer"
+unit = "gauge_units_per_tick"
+provenance = "placeholder"
+uncertainty_note = "Compatibility/test-only multiplier around the exact drain formula; nominal one is faithful and zero is allowed only for controlled non-nominal tests."
+source = "reference/game-rules-analysis.md#gauge-gains-and-passive-drain"
+validating_experiments = []
+planned_experiments = []
+
+[[implementation_parameter]]
+key = "spawn_interval_ticks"
+value = 100
+value_type = "integer"
+unit = "tick"
+provenance = "binary-derived"
+uncertainty_note = "Base of the recovered I=100-10*(L%10) formula; level 1 interval is 90."
+source = "reference/game-rules-analysis.md#level-parameters"
+validating_experiments = ["BIN-RULES-001"]
+planned_experiments = []
+
+[[implementation_parameter]]
+key = "bonus_interval_spawns"
+value = 0
+value_type = "integer"
+unit = "spawn"
+provenance = "placeholder"
+uncertainty_note = "Compatibility-only ignored field; the faithful scheduler always uses qualifying clears plus 40+GetRand(12)."
+source = "clone/include/irisu/config.hpp"
+validating_experiments = []
+planned_experiments = []
+
+[[implementation_parameter]]
+key = "starting_colors"
+value = 3
+value_type = "integer"
+unit = "color_count"
+provenance = "binary-derived"
+uncertainty_note = "Exact level-1 color count: recovered C is inclusive maximum ID 2."
+source = "reference/game-rules-analysis.md#level-parameters"
+validating_experiments = ["BIN-RULES-001"]
+planned_experiments = []
+
+[[implementation_parameter]]
+key = "maximum_colors"
+value = 6
+value_type = "integer"
+unit = "color_count"
+provenance = "binary-derived"
+uncertainty_note = "Exact maximum count for inclusive color IDs 0 through 5."
+source = "reference/game-rules-analysis.md#level-parameters"
+validating_experiments = ["BIN-RULES-001"]
+planned_experiments = []
+
+[[implementation_parameter]]
+key = "score_per_level"
+value = 1000
+value_type = "integer"
+unit = "score_point"
+provenance = "placeholder"
+uncertainty_note = "Deprecated compatibility field. Nominal mode-0 level progression uses qualifying_clears/10+1 and ignores this value."
+source = "clone/include/irisu/config.hpp"
+validating_experiments = []
+planned_experiments = []
+
+[[implementation_parameter]]
+key = "size_score_values"
+value = [20, 28, 40]
+value_type = "int_list"
+unit = "score_point"
+provenance = "placeholder"
+uncertainty_note = "Deprecated compatibility field. The recovered normal scoring path ignores this array."
+source = "clone/include/irisu/config.hpp"
+validating_experiments = []
+planned_experiments = []
+
+[[implementation_parameter]]
+key = "chain_score_exponent"
+value = 2.0
+value_type = "float"
+unit = "dimensionless"
+provenance = "placeholder"
+uncertainty_note = "Deprecated compatibility field. The recovered normal score uses the exact group formula and ignores this value."
+source = "clone/include/irisu/config.hpp"
+validating_experiments = []
+planned_experiments = []
+
+[[implementation_parameter]]
+key = "click_cooldown_ticks"
+value = 0
+value_type = "integer"
+unit = "tick"
+provenance = "binary-derived"
+uncertainty_note = "Normal mode fires on each fresh left/right button edge with no additional game-side cooldown."
+source = "reference/binary-analysis.md#normal-mode-call-sites"
+validating_experiments = ["BIN-NORMAL-001"]
+planned_experiments = ["GAME-CADENCE-001"]
+
+[[implementation_parameter]]
+key = "max_episode_ticks"
+value = 1000000
+value_type = "integer"
+unit = "tick"
+provenance = "placeholder"
+uncertainty_note = "Clone safety/training horizon, not an original-game mechanic."
+source = "clone/include/irisu/config.hpp"
+validating_experiments = []
+planned_experiments = []
+
+[[implementation_parameter]]
+key = "cleanup_margin_x"
+value = 0.0
+value_type = "float"
+unit = "display_unit"
+provenance = "placeholder"
+uncertainty_note = "Compatibility-only ignored field; faithful OOB uses the four recovered explicit limits."
+source = "clone/include/irisu/config.hpp"
+validating_experiments = []
+planned_experiments = []
+
+[[implementation_parameter]]
+key = "cleanup_margin_y"
+value = 0.0
+value_type = "float"
+unit = "display_unit"
+provenance = "placeholder"
+uncertainty_note = "Compatibility-only ignored field; faithful OOB uses the four recovered explicit limits."
+source = "clone/include/irisu/config.hpp"
+validating_experiments = []
+planned_experiments = []
+
+[[implementation_parameter]]
+key = "floor_contact_tolerance"
+value = 1.0
+value_type = "float"
+unit = "display_unit"
+provenance = "placeholder"
+uncertainty_note = "Compatibility-only ignored field; boundary identity comes from the native fixture user-data mapping, not a geometric tolerance."
+source = "clone/include/irisu/config.hpp"
+validating_experiments = []
+planned_experiments = []
+
+[[implementation_parameter]]
+key = "piece_sizes"
+value = [32.0, 46.0, 54.0, 60.0, 72.0, 90.0, 140.0, 5.0, 5.0, 5.0]
+value_type = "float_list"
+unit = "display_unit"
+provenance = "binary-derived"
+uncertainty_note = "Exact ten-slot mode-0 normal full sizes; slots seven through nine have zero weight."
+source = "reference/game-rules-analysis.md#cadence-and-size"
+validating_experiments = ["BIN-RULES-001", "DLL-SHAPE-001"]
+planned_experiments = []
+
+[[implementation_parameter]]
+key = "piece_material"
+value = [1.0, 1.0, 0.0]
+value_type = "float_list"
+unit = "legacy_material_triplet"
+provenance = "binary-derived"
+uncertainty_note = "Exact ordinary box/triangle density, friction, and restitution."
+source = "reference/game-rules-analysis.md#position-rotation-color-and-shape--provenstatic"
+validating_experiments = ["BIN-RULES-001", "DLL-MATERIAL-001"]
+planned_experiments = []
+
+[[implementation_parameter]]
+key = "piece_size_weights"
+value = [20, 28, 28, 14, 5, 3, 1, 0, 0, 0]
+value_type = "int_list"
+unit = "relative_weight"
+provenance = "binary-derived"
+uncertainty_note = "Exact mode-0 normal 99-ticket size distribution."
+source = "reference/game-rules-analysis.md#mode-selected-parameter-profile"
+validating_experiments = ["BIN-RULES-001", "GAME-SEED41-PROXY-001"]
+planned_experiments = []
+
+[[implementation_parameter]]
+key = "piece_life_ticks"
+value = 100000
+value_type = "integer"
+unit = "tick"
+provenance = "binary-derived"
+uncertainty_note = "Exact actor-update lifetime; creation frame is update one."
+source = "reference/game-rules-analysis.md#lifetimes-and-deletion"
+validating_experiments = ["BIN-RULES-001"]
+planned_experiments = []
+
+[[implementation_parameter]]
+key = "deletion_delay_ticks"
+value = 0
+value_type = "integer"
+unit = "tick"
+provenance = "placeholder"
+uncertainty_note = "Compatibility-only ignored field; native destroy-list timing is causal state, while shipped 120 is the rot threshold."
+source = "clone/include/irisu/config.hpp"
+validating_experiments = []
+planned_experiments = []
+
+[[implementation_parameter]]
+key = "projectile_size"
+value = 24.0
+value_type = "float"
+unit = "display_unit"
+provenance = "binary-derived"
+uncertainty_note = "Exact full width and full height of the projectile box."
+source = "reference/game-rules-analysis.md#shots"
+validating_experiments = ["BIN-RULES-001"]
+planned_experiments = []
+
+[[implementation_parameter]]
+key = "projectile_material"
+value = [8.0, 1.0, 0.0]
+value_type = "float_list"
+unit = "legacy_material_triplet"
+provenance = "binary-derived"
+uncertainty_note = "Exact projectile density, friction, and restitution."
+source = "reference/game-rules-analysis.md#shots"
+validating_experiments = ["BIN-RULES-001", "DLL-PROJECTILE-001"]
+planned_experiments = []
+
+[[implementation_parameter]]
+key = "projectile_life_ticks"
+value = 3000
+value_type = "integer"
+unit = "tick"
+provenance = "binary-derived"
+uncertainty_note = "Exact actor-update lifetime; creation frame is update one."
+source = "reference/game-rules-analysis.md#lifetimes-and-deletion"
+validating_experiments = ["BIN-RULES-001"]
+planned_experiments = []
+
+[[implementation_parameter]]
+key = "weak_projectile_vy"
+value = -250.0
+value_type = "float"
+unit = "display_units_per_second"
+provenance = "binary-derived"
+uncertainty_note = "Exact left fresh-edge display velocity before wrapper scaling."
+source = "reference/game-rules-analysis.md#shots"
+validating_experiments = ["BIN-RULES-001"]
+planned_experiments = []
+
+[[implementation_parameter]]
+key = "strong_projectile_vy"
+value = -500.0
+value_type = "float"
+unit = "display_units_per_second"
+provenance = "binary-derived"
+uncertainty_note = "Exact right fresh-edge display velocity before wrapper scaling."
+source = "reference/game-rules-analysis.md#shots"
+validating_experiments = ["BIN-RULES-001"]
+planned_experiments = []
+
+[[implementation_parameter]]
+key = "bonus_size"
+value = 24.0
+value_type = "float"
+unit = "display_unit"
+provenance = "binary-derived"
+uncertainty_note = "Exact full diameter: special circle radius is 12."
+source = "reference/game-rules-analysis.md#special-orb-schedule"
+validating_experiments = ["BIN-RULES-001"]
+planned_experiments = []
+
+[[implementation_parameter]]
+key = "bonus_material"
+value = [50.0, 0.1, 0.6]
+value_type = "float_list"
+unit = "legacy_material_triplet"
+provenance = "binary-derived"
+uncertainty_note = "Exact special-circle density, friction, and restitution."
+source = "reference/game-rules-analysis.md#special-orb-schedule"
+validating_experiments = ["BIN-RULES-001", "DLL-MATERIAL-001"]
+planned_experiments = []
+
+[[implementation_parameter]]
+key = "gauge_max"
+value = 40000
+value_type = "integer"
+unit = "gauge_unit"
+provenance = "binary-derived"
+uncertainty_note = "Exact mode-0 normal gauge clamp maximum."
+source = "reference/game-rules-analysis.md#mode-selected-parameter-profile"
+validating_experiments = ["BIN-RULES-001", "GAME-SEED41-PROXY-001"]
+planned_experiments = []
+
+[[implementation_parameter]]
+key = "gauge_initial"
+value = 3000
+value_type = "integer"
+unit = "gauge_unit"
+provenance = "binary-derived"
+uncertainty_note = "Exact mode-0 normal reset gauge before the first passive drain."
+source = "reference/game-rules-analysis.md#mode-selected-parameter-profile"
+validating_experiments = ["BIN-RULES-001", "GAME-SEED41-PROXY-001"]
+planned_experiments = []
+
+[[implementation_parameter]]
+key = "color_level_stride"
+value = 10
+value_type = "integer"
+unit = "dimensionless"
+provenance = "placeholder"
+uncertainty_note = "Compatibility-only ignored field; nominal colors use the recovered non-linear inclusive-ID formula."
+source = "clone/include/irisu/config.hpp"
+validating_experiments = []
+planned_experiments = []
+
+[[implementation_parameter]]
+key = "maximum_level"
+value = 100
+value_type = "integer"
+unit = "dimensionless"
+provenance = "binary-derived"
+uncertainty_note = "Exact ScenePlay setter cap and ending threshold."
+source = "reference/game-rules-analysis.md#level-progression"
+validating_experiments = ["BIN-RULES-001"]
+planned_experiments = []
+
+[[implementation_parameter]]
+key = "spawn_acceleration_level_stride"
+value = 4
+value_type = "integer"
+unit = "dimensionless"
+provenance = "placeholder"
+uncertainty_note = "Compatibility-only ignored field; nominal cadence uses the recovered level formula and special cases."
+source = "clone/include/irisu/config.hpp"
+validating_experiments = []
+planned_experiments = []
+
+[[implementation_parameter]]
+key = "world_min_x"
+value = 0.0
+value_type = "float"
+unit = "display_unit"
+provenance = "binary-derived"
+uncertainty_note = "Exact first b2d_init bound."
+source = "reference/game-rules-analysis.md#world-initialization-provenstatic-and-provenprobe"
+validating_experiments = ["BIN-RULES-001", "DLL-STEP-001"]
+planned_experiments = []
+
+[[implementation_parameter]]
+key = "world_min_y"
+value = -200.0
+value_type = "float"
+unit = "display_unit"
+provenance = "binary-derived"
+uncertainty_note = "Exact second b2d_init bound."
+source = "reference/game-rules-analysis.md#world-initialization-provenstatic-and-provenprobe"
+validating_experiments = ["BIN-RULES-001", "DLL-STEP-001"]
+planned_experiments = []
+
+[[implementation_parameter]]
+key = "world_max_x"
+value = 640.0
+value_type = "float"
+unit = "display_unit"
+provenance = "binary-derived"
+uncertainty_note = "Exact third b2d_init bound."
+source = "reference/game-rules-analysis.md#world-initialization-provenstatic-and-provenprobe"
+validating_experiments = ["BIN-RULES-001", "DLL-STEP-001"]
+planned_experiments = []
+
+[[implementation_parameter]]
+key = "world_max_y"
+value = 480.0
+value_type = "float"
+unit = "display_unit"
+provenance = "binary-derived"
+uncertainty_note = "Exact fourth b2d_init bound."
+source = "reference/game-rules-analysis.md#world-initialization-provenstatic-and-provenprobe"
+validating_experiments = ["BIN-RULES-001", "DLL-STEP-001"]
+planned_experiments = []
+
+[[implementation_parameter]]
+key = "field_top"
+value = -140.0
+value_type = "float"
+unit = "display_unit"
+provenance = "shipped-config"
+uncertainty_note = "Exact top fixture center Y."
+source = "reference/game-rules-analysis.md#static-field-geometry"
+validating_experiments = ["BIN-RULES-001"]
+planned_experiments = []
+
+[[implementation_parameter]]
+key = "field_top_width"
+value = 320.0
+value_type = "float"
+unit = "display_unit"
+provenance = "binary-derived"
+uncertainty_note = "Exact mode-0 normal top fixture full width."
+source = "reference/game-rules-analysis.md#static-field-geometry"
+validating_experiments = ["BIN-RULES-001"]
+planned_experiments = []
+
+[[implementation_parameter]]
+key = "field_top_height"
+value = 300.0
+value_type = "float"
+unit = "display_unit"
+provenance = "shipped-config"
+uncertainty_note = "Exact top fixture full height."
+source = "reference/game-rules-analysis.md#static-field-geometry"
+validating_experiments = ["BIN-RULES-001"]
+planned_experiments = []
+
+[[implementation_parameter]]
+key = "field_bottom_height"
+value = 16.0
+value_type = "float"
+unit = "display_unit"
+provenance = "binary-derived"
+uncertainty_note = "Exact mode-0 normal bottom fixture full height."
+source = "reference/game-rules-analysis.md#static-field-geometry"
+validating_experiments = ["BIN-RULES-001"]
+planned_experiments = []
+
+[[implementation_parameter]]
+key = "out_of_bounds_min_x"
+value = 0.0
+value_type = "float"
+unit = "display_unit"
+provenance = "binary-derived"
+uncertainty_note = "Exact strict lower X actor test."
+source = "reference/game-rules-analysis.md#lifetimes-and-deletion"
+validating_experiments = ["BIN-RULES-001"]
+planned_experiments = []
+
+[[implementation_parameter]]
+key = "out_of_bounds_max_x"
+value = 640.0
+value_type = "float"
+unit = "display_unit"
+provenance = "binary-derived"
+uncertainty_note = "Exact strict upper X actor test."
+source = "reference/game-rules-analysis.md#lifetimes-and-deletion"
+validating_experiments = ["BIN-RULES-001"]
+planned_experiments = []
+
+[[implementation_parameter]]
+key = "out_of_bounds_min_y"
+value = -30.0
+value_type = "float"
+unit = "display_unit"
+provenance = "binary-derived"
+uncertainty_note = "Exact strict lower Y actor test."
+source = "reference/game-rules-analysis.md#lifetimes-and-deletion"
+validating_experiments = ["BIN-RULES-001"]
+planned_experiments = []
+
+[[implementation_parameter]]
+key = "out_of_bounds_max_y"
+value = 560.0
+value_type = "float"
+unit = "display_unit"
+provenance = "binary-derived"
+uncertainty_note = "Exact strict upper Y actor test."
+source = "reference/game-rules-analysis.md#lifetimes-and-deletion"
+validating_experiments = ["BIN-RULES-001"]
+planned_experiments = []
+
+[[implementation_parameter]]
+key = "rot_delay_ticks"
+value = 40
+value_type = "integer"
+unit = "tick"
+provenance = "binary-derived"
+uncertainty_note = "Exact mode-0 normal strict rot_timer > 40 threshold for class-4 blocks."
+source = "reference/game-rules-analysis.md#rot"
+validating_experiments = ["BIN-RULES-001"]
+planned_experiments = []
+
+[[implementation_parameter]]
+key = "gauge_clear_unit"
+value = 700
+value_type = "integer"
+unit = "gauge_unit"
+provenance = "binary-derived"
+uncertainty_note = "Exact normal clear reward unit."
+source = "reference/game-rules-analysis.md#gauge-gains-and-passive-drain"
+validating_experiments = ["BIN-RULES-001"]
+planned_experiments = []
+
+[[implementation_parameter]]
+key = "rotten_penalty"
+value = 1800
+value_type = "integer"
+unit = "gauge_unit"
+provenance = "binary-derived"
+uncertainty_note = "Base of exact P=1800+20*L rot penalty."
+source = "reference/game-rules-analysis.md#level-parameters"
+validating_experiments = ["BIN-RULES-001"]
+planned_experiments = []
+
+[[implementation_parameter]]
+key = "qualifying_clears_per_level"
+value = 10
+value_type = "integer"
+unit = "dimensionless"
+provenance = "binary-derived"
+uncertainty_note = "Exact mode-0 normal divisor after the recovered burst eligibility predicates; the nonzero-mode/Metsu-side table uses 6."
+source = "reference/game-rules-analysis.md#level-progression"
+validating_experiments = ["BIN-RULES-001"]
+planned_experiments = []
+
+[[implementation_parameter]]
+key = "special_clear_base"
+value = 40
+value_type = "integer"
+unit = "dimensionless"
+provenance = "binary-derived"
+uncertainty_note = "Exact special scheduler base offset."
+source = "reference/game-rules-analysis.md#special-orb-schedule"
+validating_experiments = ["BIN-RULES-001"]
+planned_experiments = []
+
+[[implementation_parameter]]
+key = "special_clear_random_max"
+value = 12
+value_type = "integer"
+unit = "dimensionless"
+provenance = "binary-derived"
+uncertainty_note = "Inclusive GetRand maximum for each special threshold offset."
+source = "reference/game-rules-analysis.md#special-orb-schedule"
+validating_experiments = ["BIN-RULES-001", "DLL-RNG-001"]
+planned_experiments = []
+
+[[implementation_parameter]]
+key = "initial_rotten_count"
+value = 10
+value_type = "integer"
+unit = "spawn"
+provenance = "binary-derived"
+uncertainty_note = "Exact normal constructor count at 0x4053b5–0x4053f7."
+source = "reference/game-rules-analysis.md#reset-prefill-and-pre-word-actor-pass--provenstatic"
+validating_experiments = ["BIN-RULES-001"]
+planned_experiments = []
+
+[[implementation_parameter]]
+key = "initial_falling_count"
+value = 10
+value_type = "integer"
+unit = "spawn"
+provenance = "binary-derived"
+uncertainty_note = "Exact constructor count at 0x4053f9–0x40540c."
+source = "reference/game-rules-analysis.md#reset-prefill-and-pre-word-actor-pass--provenstatic"
+validating_experiments = ["BIN-RULES-001"]
+planned_experiments = []
+
+[[implementation_parameter]]
+key = "initial_rotten_y"
+value = 200.0
+value_type = "float"
+unit = "display_unit"
+provenance = "binary-derived"
+uncertainty_note = "Exact normal rotten-prefill center Y argument."
+source = "reference/game-rules-analysis.md#reset-prefill-and-pre-word-actor-pass--provenstatic"
+validating_experiments = ["BIN-RULES-001"]
+planned_experiments = []
+
+[[implementation_parameter]]
+key = "initial_falling_y"
+value = 60.0
+value_type = "float"
+unit = "display_unit"
+provenance = "binary-derived"
+uncertainty_note = "Exact scripted-prefill center Y before the hidden level-1 actor displacement."
+source = "reference/game-rules-analysis.md#reset-prefill-and-pre-word-actor-pass--provenstatic"
+validating_experiments = ["BIN-RULES-001"]
+planned_experiments = []
+
+[[implementation_parameter]]
+key = "spawn_y"
+value = -50.0
+value_type = "float"
+unit = "display_unit"
+provenance = "binary-derived"
+uncertainty_note = "Exact ordinary and chosen-special spawn center Y."
+source = "reference/game-rules-analysis.md#position-rotation-color-and-shape"
+validating_experiments = ["BIN-RULES-001"]
+planned_experiments = []
+
+[[implementation_parameter]]
+key = "rotation_random_max"
+value = 1000
+value_type = "integer"
+unit = "dimensionless"
+provenance = "binary-derived"
+uncertainty_note = "Inclusive GetRand maximum before scaling by 2*pi/1000."
+source = "reference/game-rules-analysis.md#position-rotation-color-and-shape"
+validating_experiments = ["BIN-RULES-001", "DLL-RNG-001"]
+planned_experiments = []
+
+[[implementation_parameter]]
+key = "shape_random_max"
+value = 100
+value_type = "integer"
+unit = "dimensionless"
+provenance = "binary-derived"
+uncertainty_note = "Inclusive ordinary shape-roll maximum."
+source = "reference/game-rules-analysis.md#position-rotation-color-and-shape"
+validating_experiments = ["BIN-RULES-001", "DLL-RNG-001"]
+planned_experiments = []

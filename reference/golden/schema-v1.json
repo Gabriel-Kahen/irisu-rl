@@ -1,0 +1,201 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:irisu-clone:golden-scenario-manifest:v1",
+  "title": "IriSu v2.03 normal golden scenario manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "threshold_percent", "target", "scenarios"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "threshold_percent": {"const": 95},
+    "target": {"$ref": "#/$defs/target"},
+    "scenarios": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/scenario"}
+    }
+  },
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "profile",
+        "game_version",
+        "executable_sha256",
+        "dat_dxa_sha256",
+        "config_sha256",
+        "box2d_sha256",
+        "clone_config_u64"
+      ],
+      "properties": {
+        "profile": {"const": "v2.03-normal"},
+        "game_version": {"const": "v2.03 with English-patched data"},
+        "executable_sha256": {"const": "0636d3e44439d88807d0c00aeb1bb072316c69fc13a21f79d67e53affad28255"},
+        "dat_dxa_sha256": {"const": "b36ef6864bf2d0e626d5087edb5b571ef548ebd5dde9fbc9b87f7b4ac3e89d4a"},
+        "config_sha256": {"const": "1e29431fe8209c25784d4741f7972737561281169bbb5a56f62e3e0f0b63de35"},
+        "box2d_sha256": {"const": "34f1387cbe51fb09a3e7cd868236ed3c0b73be2f70fcf5b09ae6c48187d14fcd"},
+        "clone_config_u64": {"const": "0xec0e8463feaf2670"}
+      }
+    },
+    "scenario": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "category", "evidence", "replay", "expected"],
+      "properties": {
+        "id": {"$ref": "#/$defs/identifier"},
+        "category": {
+          "enum": ["match", "rot", "chain", "ejection", "orb"]
+        },
+        "evidence": {"$ref": "#/$defs/evidence"},
+        "replay": {"$ref": "#/$defs/replay"},
+        "expected": {"$ref": "#/$defs/expected"}
+      }
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "experiment_id", "measurement_id", "bundle", "files"],
+      "properties": {
+        "status": {"const": "observed"},
+        "experiment_id": {"$ref": "#/$defs/identifier"},
+        "measurement_id": {"$ref": "#/$defs/identifier"},
+        "bundle": {"type": "string", "minLength": 1},
+        "files": {
+          "type": "array",
+          "minItems": 6,
+          "items": {"$ref": "#/$defs/evidence_file"}
+        }
+      }
+    },
+    "evidence_file": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["role", "path", "sha256"],
+      "properties": {
+        "role": {
+          "enum": [
+            "metadata",
+            "actions",
+            "measurements",
+            "replay",
+            "frame",
+            "video",
+            "notes"
+          ]
+        },
+        "path": {"type": "string", "minLength": 1},
+        "sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "replay": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256", "layout", "first_frame", "last_frame"],
+      "properties": {
+        "path": {"type": "string", "minLength": 1},
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "layout": {"enum": ["legacy", "padded"]},
+        "first_frame": {"type": "integer", "minimum": 0},
+        "last_frame": {"type": "integer", "minimum": 0}
+      }
+    },
+    "expected": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["events", "scalar_transition"],
+      "properties": {
+        "events": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"$ref": "#/$defs/event"}
+        },
+        "scalar_transition": {"$ref": "#/$defs/scalar_transition"},
+        "trajectories": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"$ref": "#/$defs/trajectory"}
+        }
+      }
+    },
+    "event": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "min_count", "max_count"],
+      "properties": {
+        "kind": {
+          "enum": [
+            "invalid_action",
+            "spawned",
+            "shot_fired",
+            "activated",
+            "contact",
+            "confirmed",
+            "chain_joined",
+            "cleared",
+            "rotten",
+            "ejected",
+            "destroyed",
+            "gauge_changed",
+            "score_changed",
+            "level_changed",
+            "game_over",
+            "projectile_hit",
+            "projectile_contact",
+            "held_input_ignored",
+            "level_completed"
+          ]
+        },
+        "min_count": {"type": "integer", "minimum": 0},
+        "max_count": {"type": "integer", "minimum": 0},
+        "first_frame": {"type": "integer"},
+        "last_frame": {"type": "integer"},
+        "a": {"type": "integer"},
+        "b": {"type": "integer"},
+        "value": {"type": "integer"},
+        "detail": {"type": "string"}
+      }
+    },
+    "scalar_transition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["from_frame", "to_frame", "score", "gauge", "level"],
+      "properties": {
+        "from_frame": {"type": "integer"},
+        "to_frame": {"type": "integer"},
+        "score": {"$ref": "#/$defs/scalar"},
+        "gauge": {"$ref": "#/$defs/scalar"},
+        "level": {"$ref": "#/$defs/scalar"}
+      }
+    },
+    "scalar": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["before", "after", "delta"],
+      "properties": {
+        "before": {"type": "integer"},
+        "after": {"type": "integer"},
+        "delta": {"type": "integer"}
+      }
+    },
+    "trajectory": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["frame", "body_id", "x", "y", "tolerance"],
+      "properties": {
+        "frame": {"type": "integer", "minimum": 0},
+        "body_id": {"type": "integer", "minimum": 1},
+        "x": {"type": "number"},
+        "y": {"type": "number"},
+        "tolerance": {"type": "number", "minimum": 0, "maximum": 15}
+      }
+    }
+  }
+}
