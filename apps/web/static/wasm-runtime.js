@@ -29,7 +29,7 @@ export class BrowserGame {
     this.queue = [];
     this.events = [];
     this.timer = 0;
-    this.restart(this.seed, false);
+    this.restart(this.seed, true);
     this.loop();
   }
 

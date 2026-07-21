@@ -56,8 +56,6 @@ kbd { margin-left: 4px; color: #858c8c; font-size: 7px; }
 .modal h1 { margin: 7px 0; font: italic 700 28px Georgia, serif; }
 .modal p { margin: 8px 0 18px; color: #929898; font-size: 12px; line-height: 1.5; }
 .primary { min-width: 120px; padding: 10px 18px; border: 1px solid #ebdfcf; background: #e8dfd1; color: #171414; font-weight: 800; text-transform: uppercase; font-size: 10px; letter-spacing: .12em; }
-.start-modal { width: auto; padding: 0; border: 0; background: transparent; box-shadow: none; }
-.start-modal .primary { min-width: 140px; font-size: 14px; letter-spacing: 0; text-transform: none; }
 .pause-mark { position: absolute; inset: 0; display: grid; place-items: center; background: #05080988; color: #e7d9cd; letter-spacing: .32em; font-weight: 800; pointer-events: none; }
 .toast { position: fixed; bottom: 24px; left: 50%; transform: translate(-50%, 12px); opacity: 0; padding: 8px 13px; border: 1px solid #755861; background: #151011; color: #eadce0; font-size: 10px; transition: .18s; pointer-events: none; }
 .toast.show { transform: translate(-50%, 0); opacity: 1; }

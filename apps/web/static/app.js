@@ -4,8 +4,8 @@ const canvas = document.querySelector("#game");
 const ctx = canvas.getContext("2d");
 const $ = (selector) => document.querySelector(selector);
 const ui = {
-  connection: $("#connection"), start: $("#startCard"), startButton: $("#startButton"),
-  over: $("#gameOver"), again: $("#againButton"), finalTitle: $("#finalTitle"), finalScore: $("#finalScore"),
+  connection: $("#connection"), over: $("#gameOver"), again: $("#againButton"),
+  finalTitle: $("#finalTitle"), finalScore: $("#finalScore"),
   paused: $("#paused"), pause: $("#pauseButton"), restart: $("#restartButton"),
   toast: $("#toast"),
 };
@@ -64,7 +64,6 @@ function canvasPoint(event) {
 function shoot(kind = "weak") {
   if (!snapshot || snapshot.observation.terminated || snapshot.observation.truncated) return;
   started = true;
-  ui.start.hidden = true;
   try { game?.shoot(kind, aim.x, aim.y); }
   catch (error) { showToast(error.message); }
 }
@@ -156,17 +155,6 @@ function drawHud(state) {
   ctx.fillStyle = "#ffffff18";
   ctx.fillRect(trackX, trackY, trackW, 3);
 
-  const digits = String(state.score).padStart(8, "0");
-  ctx.save();
-  ctx.textAlign = "center";
-  ctx.textBaseline = "middle";
-  ctx.font = "900 26px Georgia, serif";
-  ctx.strokeStyle = "#681a38";
-  ctx.lineWidth = 5;
-  ctx.strokeText(digits, 320, 462);
-  ctx.fillStyle = "#eee0a4";
-  ctx.fillText(digits, 320, 462);
-  ctx.restore();
 }
 
 function drawWalls(state) {
@@ -233,7 +221,6 @@ function processEvents(events) {
     if (event.sequence <= lastEvent) continue;
     lastEvent = event.sequence;
     if (event.kind_name === "level_changed") showToast(`LEVEL ${event.value}`);
-    if (event.kind_name === "score_changed" && event.value > 0) showToast(`+${event.value}`);
   }
 }
 
@@ -241,7 +228,6 @@ function syncUi() {
   if (!snapshot) return;
   const state = snapshot.observation;
   started ||= snapshot.running || state.tick > 0;
-  ui.start.hidden = started;
   ui.pause.firstChild.textContent = snapshot.running ? "pause " : "resume ";
   ui.paused.hidden = !started || snapshot.running || state.terminated || state.truncated;
   ui.over.hidden = !(state.terminated || state.truncated);
@@ -279,7 +265,6 @@ canvas.addEventListener("wheel", (event) => {
   if (event.deltaY > 0) continueFastForward();
   else if (event.deltaY < 0) stopFastForward();
 }, {passive: false});
-ui.startButton.addEventListener("click", () => setRunning(true));
 ui.pause.addEventListener("click", () => setRunning(!snapshot?.running));
 ui.restart.addEventListener("click", restart);
 ui.again.addEventListener("click", restart);
