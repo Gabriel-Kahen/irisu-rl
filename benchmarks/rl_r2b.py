@@ -92,6 +92,11 @@ def acceptance_predicates(result: dict[str, object]) -> dict[str, bool]:
         if isinstance(value, float)
     )
     return {
+        "clean_source_tree": result["source"]["dirty"] is False,
+        "exact_worker_hash_matches_runtime": result["exact_runtime_build_info"][
+            "worker_executable_sha256"
+        ]
+        == result["runtime_files"]["exact_worker_sha256"],
         "bc_validation_at_least_90_percent": result["behavioral_cloning"][
             "validation"
         ]["hit_rate"]
@@ -116,11 +121,13 @@ def summarize_result(result: dict[str, object]) -> dict[str, object]:
         "source": result["source"],
         "runtime": result["runtime"],
         "runtime_files": result["runtime_files"],
+        "reproduction": result["reproduction"],
         "exact_runtime_build_info": result["exact_runtime_build_info"],
         "seed_manifest_sha256": result["seed_manifest_sha256"],
         "task": result["task"],
         "model": result["model"],
         "budgets": result["budgets"],
+        "allocator_keys": result["allocator_keys"],
         "learning_rate_candidates": result["learning_rate_candidates"],
         "behavioral_cloning": result["behavioral_cloning"],
         "random_validation": result["random_validation"],
@@ -462,6 +469,17 @@ def main() -> None:
                 else None
             ),
         },
+        "reproduction": {
+            "command": (
+                "PYTHONPATH=python uv run --extra training python "
+                "benchmarks/rl_r2b.py --summary"
+            ),
+            "output": "benchmarks/results/rl-r2b-one-body-2026-07-22.json",
+        },
+        "allocator_keys": {
+            "validation": VALIDATION_ALLOCATOR_KEY,
+            "final_test": FINAL_TEST_ALLOCATOR_KEY,
+        },
         "deployable": False,
         "observation_provenance": "privileged_simulator",
         "transfer_gate": "R4 causal tracker and real input calibration pending",
@@ -590,7 +608,9 @@ def main() -> None:
             spec=spec,
         )
         stack.callback(test.close)
-        result["exact_runtime_build_info"] = test.tasks[0].env.envs[0].build_info()
+        exact_build_info = test.tasks[0].env.envs[0].build_info()
+        exact_build_info.pop("worker_pid", None)
+        result["exact_runtime_build_info"] = exact_build_info
         result["task"]["mechanics_config_hashes"]["test"] = test.config_hashes()
         test_runs = []
         for model_seed, state in zip(MODEL_SEEDS, states[selected]):
