@@ -9,7 +9,6 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
-#include <cstdlib>
 #include <cstring>
 #include <exception>
 #include <iostream>
@@ -47,6 +46,7 @@ constexpr std::size_t kMaximumBranchAddressBytes =
     sizeof(sockaddr_un{}.sun_path);
 constexpr std::uint32_t kBodyCapacity =
     irisu::MechanicsConfig::actor_pool_capacity - 4U;
+constexpr std::uint16_t kCanonicalX87ControlWord = 0x027fU;
 using FastToken = std::array<std::byte, kFastTokenBytes>;
 
 enum class Opcode : std::uint16_t {
@@ -169,17 +169,17 @@ bool tokens_equal(const FastToken& first, const FastToken& second) noexcept {
   return difference == 0;
 }
 
-std::uint16_t requested_control_word() {
-  const char* text = std::getenv("IRISU_EXACT_CW");
-  if (text == nullptr) return 0x027fU;
-  char* end{};
-  errno = 0;
-  const unsigned long value = std::strtoul(text, &end, 0);
-  if (errno != 0 || end == text || *end != '\0' ||
-      value > std::numeric_limits<std::uint16_t>::max()) {
-    throw std::invalid_argument("IRISU_EXACT_CW must fit in uint16");
+std::uint16_t install_and_verify_canonical_x87_control_word() {
+  __asm__ __volatile__("fldcw %0" : : "m"(kCanonicalX87ControlWord)
+                       : "memory");
+  std::uint16_t actual{};
+  __asm__ __volatile__("fnstcw %0" : "=m"(actual) : : "memory");
+  if (actual != kCanonicalX87ControlWord) {
+    throw std::runtime_error(
+        "canonical x87 control-word readback mismatch: expected 639, got " +
+        std::to_string(actual));
   }
-  return static_cast<std::uint16_t>(value);
+  return actual;
 }
 
 #ifndef IRISU_EXACT_LIBRARY_SHA256
@@ -1159,8 +1159,8 @@ int run() {
                 "the exact worker protocol currently requires little endian");
   static_assert(sizeof(double) == 8 && sizeof(std::uint64_t) == 8);
   irisu::detail::install_canonical_floating_point_environment();
-  const std::uint16_t control_word = requested_control_word();
-  __asm__ __volatile__("fldcw %0" : : "m"(control_word));
+  const std::uint16_t control_word =
+      install_and_verify_canonical_x87_control_word();
   if (::signal(SIGPIPE, SIG_IGN) == SIG_ERR) {
     throw std::runtime_error("failed to ignore SIGPIPE");
   }

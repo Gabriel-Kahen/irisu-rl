@@ -115,8 +115,21 @@ def _plain_scalar(value: Any) -> Any:
 
 def _action(value: Action | Mapping[str, Any]) -> tuple[ActionKind, float, float, int]:
     if isinstance(value, Action):
-        kind = ActionKind.parse(_plain_scalar(value.kind))
         x, y, wait_ticks = value.cursor_x, value.cursor_y, value.wait_ticks
+        # Policies overwhelmingly return an Action containing the canonical
+        # enum and builtin scalar types.  Preserve the generic NumPy/mapping
+        # path below, but avoid its repeated abstract-number and shape probes
+        # for that already-canonical representation.
+        if (
+            isinstance(value.kind, ActionKind)
+            and type(x) in (int, float)
+            and type(y) in (int, float)
+            and type(wait_ticks) is int
+        ):
+            if not 0 <= wait_ticks <= 0xFFFFFFFF:
+                raise ValueError("wait_ticks must fit in uint32")
+            return value.kind, float(x), float(y), wait_ticks
+        kind = ActionKind.parse(_plain_scalar(value.kind))
     elif isinstance(value, Mapping):
         if "kind" not in value:
             raise ValueError("action mapping requires kind")

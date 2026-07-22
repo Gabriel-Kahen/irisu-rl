@@ -1,0 +1,258 @@
+{
+  "artifact": "exact_core_solver_source_optimizations",
+  "conclusion": {
+    "integration_threshold_percent": 3.0,
+    "land_static_position_skip": false,
+    "land_velocity_anchor_cache": false,
+    "reasons": [
+      "The static-body position-update skip improved median canonical dense throughput by only 0.647814908%, with a 0.661908000% median of paired improvements.",
+      "The velocity-anchor cache improved median canonical dense throughput by only 0.471555992%, with a 0.449375000% median of paired improvements.",
+      "Both candidates passed the available exact replay, wrapper-trace, and trigonometry gates, but neither approaches the predeclared 3% integration threshold.",
+      "The candidates add branches or contact-constraint state and maintenance burden without materially closing the RL throughput gap."
+    ],
+    "status": "rejected"
+  },
+  "environment": {
+    "architecture": "ELF32 i386 exact host on x86_64 Linux",
+    "cpu": "AMD Ryzen 7 3700X 8-Core Processor",
+    "kernel": "Linux 7.1.2-3-cachyos x86_64 GNU/Linux",
+    "performance_cpu": 0,
+    "x87_control_word": "0x027f"
+  },
+  "generated_utc": "2026-07-22T00:03:18Z",
+  "inputs": {
+    "baseline": {
+      "engine_object": {
+        "path": ".tmp/exact-range-host-final-20260720/box2d-msvc-combined-local.o",
+        "sha256": "790dbea807b2e782e2f4413725a8809fdc491c4809b5f6e3d29130935be34b40"
+      },
+      "host": {
+        "path": ".tmp/exact-range-host-symbolic-20260721/libirisu_box2d_msvc_exact_multiworld.so",
+        "sha256": "ce14d1cab9ce4331bf494fe92bf657029487aec9f7435e7479b3c7cb579fafb5"
+      }
+    },
+    "compiler": {
+      "flags": [
+        "/nologo",
+        "/c",
+        "/O2",
+        "/fp:precise",
+        "/MT",
+        "/D",
+        "NDEBUG",
+        "/EHs-c-",
+        "/GR-",
+        "/GS-"
+      ],
+      "identity": "Microsoft (R) 32-bit C/C++ Optimizing Compiler Version 15.00.21022.08 for 80x86"
+    },
+    "executables": {
+      "exact_replay": {
+        "path": "build-physics-integration-exact-multiworld-2/irisu-exact-replay",
+        "sha256": "d06e1ff08811b21047b827bebb27ea39295445b64d3b56c772617befb1bc22f9"
+      },
+      "exact_trig_runtime_tests": {
+        "path": "build-physics-integration-exact-multiworld-2/irisu-exact-trig-runtime-tests",
+        "sha256": "8ab7d0d1f0097ae92063e15cd165744b440d1670064dcfa49a8bbc9da420876e"
+      },
+      "physics_benchmark": {
+        "path": "build-physics-integration-exact-multiworld-2/irisu-physics-benchmark",
+        "sha256": "719adc014fc78516065c9efb7bb3ae479c88d2f5bc78f503b4f14a15be36a990"
+      }
+    },
+    "replay": {
+      "path": "reference/replays/raw/internet/irisu_00041449_20100725_182435_7.rpy",
+      "sha256": "73bf5b5d4a478c9bf73b62a6df98f16a01fde2cf97eb751438cd0ae857e3362d"
+    },
+    "runtime_source": {
+      "path": "reference/native-box2d/msvc-runtime.S",
+      "sha256": "6f702907fa64050aaa97cffb90514fabe2709616a32a71ce8fcc04acf8c1fb70"
+    },
+    "shared_bridge_object_sha256": "ea40051fcef66910013d4d5ac258d34ca55551265683b7763306d1249d356481"
+  },
+  "profile_context": {
+    "all_samples": 2087,
+    "msvc_CIcos_percent": 16.770483948,
+    "solve_position_constraints_percent": 24.197412554,
+    "solve_velocity_constraints_percent": 34.163871586,
+    "source_artifact": {
+      "path": "benchmarks/results/exact-core-trig-cache-investigation-2026-07-21.json",
+      "sha256": "13f4d6b26d5bde00fd900e2c48317b1336bb5918b9209117e1b279214b8ba9b0"
+    }
+  },
+  "static_position_skip": {
+    "candidate": {
+      "engine_object": {
+        "path": "/home/gabe/irisu-static-position-host/box2d-msvc-combined-local.o",
+        "sha256": "42a3d46155dd5337c884c25280ab5806d78c08eafbe354d1c33a2036191980c7"
+      },
+      "host": {
+        "path": ".tmp/exact-core-perf-20260721/static-position-current/libirisu_box2d_msvc_exact_multiworld.so",
+        "sha256": "14be52f2ca0ab72f2bd719389ac4bdd2b5eb2ac7d950e0b89b0c3d3d2c982b63"
+      },
+      "source": {
+        "added_lines": 16,
+        "description": "Under MSVC 9 only, guard each body's original position, rotation, and rotation-matrix update with invMass != 0.0f. Dynamic-body operation and store order remains unchanged; a true static body has invMass == invI == +0.",
+        "path": "/home/gabe/irisu-r58-static-position-src/Source/Dynamics/Contacts/b2ContactSolver.cpp",
+        "pristine_sha256": "af85bda67513bb0489cd0d765d060ff2125a2646e04735ad4d0d53dc33db3c99",
+        "removed_lines": 0,
+        "sha256": "8fabb1978f336d7c882686a1e6be3f4722704b4554bb8785d9ee3b4e3ae950d2"
+      }
+    },
+    "machine_code_audit": {
+      "baseline_solve_position_symbol_span_bytes_including_alignment": 976,
+      "candidate_solve_position_symbol_span_bytes_including_alignment": 1040,
+      "skip_branch": "MSVC9 emitted an x87 zero comparison for each inverse mass and branches around only that body's original state-update block.",
+      "skippable_body_1_block": {
+        "body_state_stores": 7,
+        "helper_calls": 2,
+        "instructions": 47,
+        "stack_stores": 9,
+        "x87_instructions": 45
+      },
+      "skippable_body_2_block": {
+        "body_state_stores": 7,
+        "helper_calls": 2,
+        "instructions": 43,
+        "stack_stores": 9,
+        "x87_instructions": 41
+      },
+      "skipped_helpers_per_static_side_and_position_point": [
+        "msvc_CIcos",
+        "msvc_CIsin"
+      ]
+    },
+    "workload_coverage": {
+      "boundary_contact_fraction": 0.70450713704,
+      "boundary_contact_percent": 70.450713704,
+      "boundary_contacts": 404075,
+      "dynamic_dynamic_contacts": 169482,
+      "public_contact_records": 573557
+    },
+    "ceiling_estimate": {
+      "calculation": "24.197412554% SolvePosition profile share * 70.450713704% boundary-contact fraction * an optimistic one-half side share",
+      "optimistic_percent_before_branch_overhead": 8.523624921,
+      "warning": "This is deliberately generous: shared contact math remains, positive-zero trigonometry already has a fast path, and the new comparisons and x87 stack cleanup execute on every point."
+    },
+    "performance": {
+      "benchmark": "simulator_random_policy_one_tick_v1",
+      "decision_steps_per_sample": 3000,
+      "pairs": [
+        {"pair": 1, "order": "baseline,candidate", "baseline_dps": 1445.20504633, "candidate_dps": 1456.17754257, "baseline_core_seconds": 2.020372808, "candidate_core_seconds": 2.004861881, "improvement_percent": 0.759234565},
+        {"pair": 2, "order": "candidate,baseline", "baseline_dps": 1447.14603025, "candidate_dps": 1457.27423783, "baseline_core_seconds": 2.017814978, "candidate_core_seconds": 2.003292167, "improvement_percent": 0.699874606},
+        {"pair": 3, "order": "baseline,candidate", "baseline_dps": 1448.2034525, "candidate_dps": 1457.55406309, "baseline_core_seconds": 2.016264157, "candidate_core_seconds": 2.002975065, "improvement_percent": 0.645669679},
+        {"pair": 4, "order": "candidate,baseline", "baseline_dps": 1448.17258519, "candidate_dps": 1457.75815916, "baseline_core_seconds": 2.016235116, "candidate_core_seconds": 2.002607773, "improvement_percent": 0.661908261},
+        {"pair": 5, "order": "baseline,candidate", "baseline_dps": 1442.13449265, "candidate_dps": 1455.79907931, "baseline_core_seconds": 2.024779445, "candidate_core_seconds": 2.00541759, "improvement_percent": 0.947525125},
+        {"pair": 6, "order": "candidate,baseline", "baseline_dps": 1449.28601282, "candidate_dps": 1458.80519684, "baseline_core_seconds": 2.014802283, "candidate_core_seconds": 2.001131342, "improvement_percent": 0.656818871},
+        {"pair": 7, "order": "baseline,candidate", "baseline_dps": 1449.59363356, "candidate_dps": 1459.00825769, "baseline_core_seconds": 2.01421921, "candidate_core_seconds": 2.000878511, "improvement_percent": 0.649466437}
+      ],
+      "summary": {
+        "baseline_median_wall_decisions_per_second": 1448.17258519,
+        "candidate_median_wall_decisions_per_second": 1457.55406309,
+        "improvement_from_medians_percent": 0.647814908,
+        "median_pairwise_improvement_percent": 0.661908,
+        "result": "rejected_below_3_percent"
+      },
+      "warmup_decisions_per_host": 300
+    }
+  },
+  "velocity_anchor_cache": {
+    "candidate": {
+      "engine_object": {
+        "path": "/home/gabe/irisu-velocity-cache-guard-host/box2d-msvc-combined-local.o",
+        "sha256": "9ec948c0aa4f48faccd86c23782b690fd77d0d0173044e4b9cc037608575b2b0"
+      },
+      "host": {
+        "path": ".tmp/exact-core-perf-20260721/velocity-cache-current/libirisu_box2d_msvc_exact_multiworld.so",
+        "sha256": "689a27677957d9c6492b92b6c7e2fcf21d8741066887e16701d3b3488f320381"
+      },
+      "source": {
+        "cpp_added_lines": 18,
+        "cpp_path": "/home/gabe/irisu-r58-velocity-cache-src/Source/Dynamics/Contacts/b2ContactSolver.cpp",
+        "cpp_sha256": "e9e168010f1443bbda968735917c674b6d7088cf683fe583e547e65708ba401b",
+        "description": "Under MSVC 9 only, add two binary32 b2Vec2 fields to each constraint point, populate them in PreSolve, and reference them from both velocity loops instead of recomputing unchanged rotated anchors.",
+        "header_added_lines": 4,
+        "header_path": "/home/gabe/irisu-r58-velocity-cache-src/Source/Dynamics/Contacts/b2ContactSolver.h",
+        "header_sha256": "9596ee29af0284085616206785b43d341a49e6703ab82d75791e9ddb2c55d39b",
+        "pristine_cpp_sha256": "af85bda67513bb0489cd0d765d060ff2125a2646e04735ad4d0d53dc33db3c99",
+        "pristine_header_sha256": "779319f101e609b4be772aa979d56400f31504c203e93203f7f88f70f321108e"
+      }
+    },
+    "machine_code_audit": {
+      "baseline_presolve": {"symbol_span_bytes": 544, "instructions": 182, "x87_instructions": 125, "calls": 0},
+      "candidate_presolve": {"symbol_span_bytes": 688, "instructions": 216, "x87_instructions": 149, "calls": 0},
+      "baseline_solve_velocity": {"symbol_span_bytes": 1360, "instructions": 396, "x87_instructions": 338, "calls": 0},
+      "candidate_solve_velocity": {"symbol_span_bytes": 1168, "instructions": 340, "x87_instructions": 274, "calls": 0},
+      "source_level_effect": "Removes four b2Mul anchor transforms per contact point per velocity iteration. With the default 10 iterations, this removes 40 transforms when warm starting already computed the two cached values, or nets 38 removed transforms when the non-warm-starting PreSolve branch must compute two once."
+    },
+    "ceiling_estimate": {
+      "calculation": "34.163871586% SolveVelocity profile share * the optimistic static x87-instruction reduction of 64/338",
+      "optimistic_percent_before_presolve_and_cache_cost": 6.468898762,
+      "warning": "Static instruction count is not a dynamic cost model; the larger PreSolve, 16 extra bytes per constraint point, extra stores, and cache traffic reduce the attainable gain."
+    },
+    "performance": {
+      "benchmark": "simulator_random_policy_one_tick_v1",
+      "decision_steps_per_sample": 3000,
+      "pairs": [
+        {"pair": 1, "order": "baseline,candidate", "baseline_dps": 1449.38497153, "candidate_dps": 1455.89813815, "baseline_core_seconds": 2.014645045, "candidate_core_seconds": 2.005338843, "improvement_percent": 0.44937451},
+        {"pair": 2, "order": "candidate,baseline", "baseline_dps": 1449.06498538, "candidate_dps": 1455.017585, "baseline_core_seconds": 2.015011712, "candidate_core_seconds": 2.006465886, "improvement_percent": 0.410789004},
+        {"pair": 3, "order": "baseline,candidate", "baseline_dps": 1449.09253234, "candidate_dps": 1454.85983477, "baseline_core_seconds": 2.015088317, "candidate_core_seconds": 2.006585124, "improvement_percent": 0.397994076},
+        {"pair": 4, "order": "candidate,baseline", "baseline_dps": 1448.05587751, "candidate_dps": 1453.69685363, "baseline_core_seconds": 2.016369918, "candidate_core_seconds": 2.008281117, "improvement_percent": 0.389555141},
+        {"pair": 5, "order": "baseline,candidate", "baseline_dps": 1449.24613796, "candidate_dps": 1459.64099225, "baseline_core_seconds": 2.014683674, "candidate_core_seconds": 2.000167387, "improvement_percent": 0.717259409},
+        {"pair": 6, "order": "candidate,baseline", "baseline_dps": 1448.68294128, "candidate_dps": 1455.98471291, "baseline_core_seconds": 2.015567154, "candidate_core_seconds": 2.005228094, "improvement_percent": 0.504028274},
+        {"pair": 7, "order": "baseline,candidate", "baseline_dps": 1448.19871612, "candidate_dps": 1457.30416702, "baseline_core_seconds": 2.016229205, "candidate_core_seconds": 2.003320789, "improvement_percent": 0.628743197}
+      ],
+      "summary": {
+        "baseline_median_wall_decisions_per_second": 1449.06498538,
+        "candidate_median_wall_decisions_per_second": 1455.89813815,
+        "improvement_from_medians_percent": 0.471555992,
+        "median_pairwise_improvement_percent": 0.449375,
+        "result": "rejected_below_3_percent"
+      },
+      "warmup_decisions_per_host": 300
+    }
+  },
+  "shared_parity_evidence": {
+    "benchmark_samples": {
+      "action_trace_hash": "0xce87de1d75705d2a",
+      "event_trace_hash": "0xa30d32f84b6a6957",
+      "final_gauge": 3474,
+      "final_score": 48,
+      "final_tick": 926,
+      "result": "Both candidates and every paired baseline sample matched."
+    },
+    "exact_replay": {
+      "result": "Both candidates matched the attested exact stdout byte-for-byte.",
+      "stdout_bytes": 993804,
+      "stdout_sha256": "bb8a81554cfc03bbfa186fdba6ee080f691eaabb451e1f562627050ed2fdf236",
+      "ticks": 47019
+    },
+    "exact_trig_runtime": {
+      "candidate_exit_codes": [0, 0],
+      "result": "Both candidate hosts passed the boundary and 100,000-full-raw-bit randomized runtime gate."
+    },
+    "linkage": {
+      "dynamic_R_386_relocations_naming_msvc_b2d": 0,
+      "soname": "libirisu_box2d_msvc_exact_multiworld.so"
+    },
+    "wrapper_trace": {
+      "bytes": 13757907,
+      "records": 813508,
+      "result": "Both candidate traces were byte-identical to the attested current exact trace.",
+      "sha256": "cde35ca60b5511678edf128ed8f3ae09c8cf00e240696325c4acc8681f829eb0"
+    }
+  },
+  "commands": {
+    "benchmark": "env LD_LIBRARY_PATH=<host-directory> taskset -c 0 build-physics-integration-exact-multiworld-2/irisu-physics-benchmark --simulator-decisions 3000 --seed 41 --policy-seed 1381450071",
+    "disassembly": "objdump -drw -Mintel --start-address=<symbol-start> --stop-address=<next-symbol> <combined-local-object>",
+    "exact_replay": "env LD_LIBRARY_PATH=<host-directory> build-physics-integration-exact-multiworld-2/irisu-exact-replay reference/replays/raw/internet/irisu_00041449_20100725_182435_7.rpy",
+    "exact_trig_runtime": "env LD_LIBRARY_PATH=<host-directory> build-physics-integration-exact-multiworld-2/irisu-exact-trig-runtime-tests",
+    "link_candidate": "gcc -m32 -shared -Wl,-z,notext -Wl,--allow-multiple-definition -Wl,-Bsymbolic-functions -Wl,--build-id=none -Wl,-soname,libirisu_box2d_msvc_exact_multiworld.so <candidate-combined-local.o> <msvc-bridge.o> <current-msvc-runtime.o> -lm -o <candidate-host>",
+    "source_diff": "git diff --no-index --ignore-space-at-eol --ignore-cr-at-eol -- <pristine-source> <candidate-source>",
+    "wrapper_trace": "env LD_LIBRARY_PATH=<host-directory> IRISU_EXACT_TRACE=<trace.jsonl> build-physics-integration-exact-multiworld-2/irisu-exact-replay reference/replays/raw/internet/irisu_00041449_20100725_182435_7.rpy"
+  },
+  "not_run": {
+    "full_10777297_command_getter_contact_replay": "Both candidates failed the required 3% performance gate, so the 1.5 GB full getter replay was intentionally not spent on rejected variants.",
+    "tracked_runtime_or_engine_change": "No candidate source, object, or host was integrated."
+  }
+}

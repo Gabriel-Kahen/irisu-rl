@@ -9,6 +9,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -77,8 +78,10 @@ print(json.dumps({'tick': frames, 'score': score + seed - 1, 'level': level,
             oracle_replay = oracle / "replay" / "target.rpy"
             oracle_replay.write_bytes(exact.read_bytes())
             events = (
-                '{"event":"score","tick":3,"delta":30,"score":30}\n'
-                '{"event":"rot_penalty","tick":2,"delta":-10,"gauge":2990}\n'
+                '{"event":"score","tick":3,"delta":30,"score":30,'
+                '"gauge":2990,"level":2,"clears":1}\n'
+                '{"event":"rot_penalty","tick":2,"delta":-10,"score":0,'
+                '"gauge":2990,"level":2,"clears":1}\n'
             ).encode()
             (oracle / "events.jsonl").write_bytes(events)
             events_sha = hashlib.sha256(events).hexdigest()
@@ -169,6 +172,10 @@ print(json.dumps({'tick': frames, 'score': score + seed - 1, 'level': level,
             "gauge": 1766,
             "score_timeline": [[12, 88, 88]],
             "gauge_timeline": [[8, -10, 1766, 5, 1]],
+            "score_checkpoints": [[12, 88, 88, 1766, 1, 6]],
+            "rot_checkpoints": [[8, -10, 0, 1766, 1, 6]],
+            "clear_checkpoints": [[7, 1, 0, 1776, 1, 6]],
+            "level_checkpoints": [],
         }
         oracle = {
             "frame_count": 12,
@@ -184,17 +191,73 @@ print(json.dumps({'tick': frames, 'score': score + seed - 1, 'level': level,
             },
             "score_timeline": [[12, 88, 88]],
             "rot_timeline": [[8, -10, 1766]],
+            "score_checkpoints": [[12, 88, 88, 1766, 1, 6]],
+            "rot_checkpoints": [[8, -10, 0, 1766, 1, 6]],
+            "clear_checkpoints": [[7, 1, 0, 1776, 1, 6]],
+            "level_checkpoints": [],
             "evidence": {},
         }
 
         comparison = evaluator._compare_oracle(raw, oracle)
 
         self.assertTrue(comparison["full_scoring_parity"])
+        self.assertTrue(comparison["available_state_checkpoints_exact"])
         self.assertEqual(comparison["checkpoint"]["kind"], "replay_exhaustion")
         self.assertTrue(comparison["checkpoint"]["all_replay_frames_consumed"])
         self.assertTrue(
             comparison["checkpoint"]["no_natural_terminal_before_exhaustion"]
         )
+
+    def test_worker_mode_uses_production_irisu_env_result_and_records_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "exact.rpy"
+            path.write_bytes(
+                replay(seed=1, level=2, score=30, chain=4, frames=3, padded=True)
+            )
+            worker = root / "worker"
+            worker.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            worker.chmod(worker.stat().st_mode | stat.S_IXUSR)
+            raw = {
+                "tick": 3,
+                "score": 30,
+                "gauge": 2990,
+                "level": 2,
+                "highest_chain": 4,
+                "clears": 1,
+                "score_calls": 1,
+                "confirmed": 1,
+                "terminal_frame": 2,
+                "score_timeline": [[3, 30, 30]],
+                "gauge_timeline": [[2, -10, 2990, 5, 1]],
+                "score_checkpoints": [[3, 30, 30, 2990, 2, 1]],
+                "rot_checkpoints": [[2, -10, 0, 2990, 2, 1]],
+                "clear_checkpoints": [[1, 1, 0, 3000, 2, 1]],
+                "level_checkpoints": [[1, 2, 0, 3000, 1]],
+            }
+            runtime = {
+                "clone_build": {"physics_backend": "exact-msvc9-r58-worker"},
+                "exact_runtime_provenance": {"sha256": "a" * 64},
+            }
+            with mock.patch.object(
+                evaluator, "_worker_result", return_value=(raw, runtime)
+            ) as call:
+                report = evaluator.evaluate([path], worker=worker)
+
+        call.assert_called_once()
+        self.assertEqual(report["runner"]["mode"], "production_irisu_env_worker")
+        self.assertIsNotNone(report["runner"]["production_replay_adapter"])
+        self.assertEqual(
+            report["runner"]["corpus_evaluator"]["sha256"],
+            hashlib.sha256(evaluator.THIS_SCRIPT.read_bytes()).hexdigest(),
+        )
+        evaluation = report["inventory"][0]["evaluation"]
+        self.assertEqual(evaluation["runtime"], runtime)
+        self.assertEqual(report["summary"]["evaluated"], 1)
+
+    def test_runner_and_worker_are_mutually_exclusive(self) -> None:
+        with self.assertRaisesRegex(ValueError, "exactly one"):
+            evaluator.evaluate([], runner=Path("runner"), worker=Path("worker"))
 
 
 if __name__ == "__main__":

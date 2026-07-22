@@ -20,8 +20,10 @@ from typing import Any, Iterable
 
 
 ROOT = Path(__file__).resolve().parents[1]
+THIS_SCRIPT = Path(__file__).resolve()
 DEFAULT_CORPUS = ROOT / "reference" / "replays" / "raw" / "internet"
 DEFAULT_ORACLE_ROOT = ROOT / "reference" / "runs"
+EVALUATE_RPY = ROOT / "tools" / "evaluate-rpy.py"
 DEFAULT_CONTROL_WORD = 0x027F
 CANONICAL_EXE_SHA256 = (
     "0636d3e44439d88807d0c00aeb1bb072316c69fc13a21f79d67e53affad28255"
@@ -117,6 +119,57 @@ def _runner_result(
         if type(result.get(key)) is not int:
             raise RuntimeError(f"runner field {key!r} must be an integer")
     return result
+
+
+def _worker_result(
+    worker: Path, replay: Path, *, timeout: float
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(EVALUATE_RPY),
+            str(replay),
+            "--layout",
+            "padded",
+            "--worker",
+            str(worker),
+            "--timelines",
+            "--compact",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+    )
+    if completed.returncode != 0:
+        detail = completed.stderr.strip() or completed.stdout.strip()
+        raise RuntimeError(
+            f"production IrisuEnv replay exited {completed.returncode}: {detail}"
+        )
+    try:
+        report = json.loads(completed.stdout)
+    except json.JSONDecodeError as error:
+        raise RuntimeError(
+            f"production IrisuEnv replay did not emit one JSON object: {error}"
+        ) from error
+    if not isinstance(report, dict):
+        raise RuntimeError("production IrisuEnv replay JSON must be an object")
+    result = report.get("oracle_output")
+    provenance = report.get("exact_runtime_provenance")
+    build = report.get("clone_build")
+    if not isinstance(result, dict):
+        raise RuntimeError("production IrisuEnv replay omitted oracle_output")
+    if not isinstance(provenance, dict):
+        raise RuntimeError("production IrisuEnv replay omitted runtime provenance")
+    if not isinstance(build, dict) or build.get("physics_backend") != (
+        "exact-msvc9-r58-worker"
+    ):
+        raise RuntimeError("production IrisuEnv replay did not use the exact backend")
+    required = ("tick", "score", "level", "highest_chain", "terminal_frame")
+    for key in required:
+        if type(result.get(key)) is not int:
+            raise RuntimeError(f"production IrisuEnv field {key!r} must be an integer")
+    return result, {"clone_build": build, "exact_runtime_provenance": provenance}
 
 
 def _comparison(expected: int, actual: int) -> dict[str, Any]:
@@ -234,6 +287,10 @@ def _load_oracle(path: Path) -> dict[str, Any]:
     events_bytes_hash = hashlib.sha256()
     score_timeline: list[list[int]] = []
     rot_timeline: list[list[int]] = []
+    score_checkpoints: list[list[int]] = []
+    rot_checkpoints: list[list[int]] = []
+    clear_checkpoints: list[list[int]] = []
+    level_checkpoints: list[list[int]] = []
     try:
         with events_path.open("rb") as stream:
             for line_number, raw in enumerate(stream, 1):
@@ -242,19 +299,46 @@ def _load_oracle(path: Path) -> dict[str, Any]:
                     json.loads(raw), f"{events_path}:{line_number}"
                 )
                 if event.get("event") == "score":
-                    score_timeline.append(
-                        [
-                            _integer(event.get("tick"), "score tick"),
-                            _integer(event.get("delta"), "score delta"),
-                            _integer(event.get("score"), "score total"),
-                        ]
+                    tick = _integer(event.get("tick"), "score tick")
+                    delta = _integer(event.get("delta"), "score delta")
+                    score = _integer(event.get("score"), "score total")
+                    gauge = _integer(event.get("gauge"), "score gauge")
+                    level = _integer(event.get("level"), "score level")
+                    clears = _integer(event.get("clears"), "score clears")
+                    score_timeline.append([tick, delta, score])
+                    score_checkpoints.append(
+                        [tick, delta, score, gauge, level, clears]
                     )
                 elif event.get("event") == "rot_penalty":
-                    rot_timeline.append(
+                    tick = _integer(event.get("tick"), "rot tick")
+                    delta = _integer(event.get("delta"), "rot delta")
+                    score = _integer(event.get("score"), "rot score")
+                    gauge = _integer(event.get("gauge"), "rot gauge")
+                    level = _integer(event.get("level"), "rot level")
+                    clears = _integer(event.get("clears"), "rot clears")
+                    rot_timeline.append([tick, delta, gauge])
+                    rot_checkpoints.append(
+                        [tick, delta, score, gauge, level, clears]
+                    )
+                elif event.get("event") == "qualifying_clear":
+                    clear_checkpoints.append(
                         [
-                            _integer(event.get("tick"), "rot tick"),
-                            _integer(event.get("delta"), "rot delta"),
-                            _integer(event.get("gauge"), "rot gauge"),
+                            _integer(event.get("tick"), "clear tick"),
+                            _integer(event.get("group_num"), "clear group_num"),
+                            _integer(event.get("score"), "clear score"),
+                            _integer(event.get("gauge"), "clear gauge"),
+                            _integer(event.get("level"), "clear level"),
+                            _integer(event.get("clears"), "clear count"),
+                        ]
+                    )
+                elif event.get("event") == "level_committed":
+                    level_checkpoints.append(
+                        [
+                            _integer(event.get("tick"), "level tick"),
+                            _integer(event.get("level"), "committed level"),
+                            _integer(event.get("score"), "level score"),
+                            _integer(event.get("gauge"), "level gauge"),
+                            _integer(event.get("clears"), "level clears"),
                         ]
                     )
     except (OSError, UnicodeError, json.JSONDecodeError) as error:
@@ -317,6 +401,10 @@ def _load_oracle(path: Path) -> dict[str, Any]:
         "terminal": terminal,
         "score_timeline": score_timeline,
         "rot_timeline": rot_timeline,
+        "score_checkpoints": score_checkpoints,
+        "rot_checkpoints": rot_checkpoints,
+        "clear_checkpoints": clear_checkpoints,
+        "level_checkpoints": level_checkpoints,
         "evidence": {
             "authority": "observed_bundled_v203_playback",
             "metadata_path": str(path),
@@ -407,6 +495,30 @@ def _compare_oracle(raw: dict[str, Any], oracle: dict[str, Any]) -> dict[str, An
     rot = [row[:3] for row in gauge if row[4] == 1]
     score_comparison = _timeline_comparison(oracle["score_timeline"], scores)
     rot_comparison = _timeline_comparison(oracle["rot_timeline"], rot)
+    checkpoint_widths = {
+        "score_checkpoints": 6,
+        "rot_checkpoints": 6,
+        "clear_checkpoints": 6,
+        "level_checkpoints": 5,
+    }
+    present = [name in raw for name in checkpoint_widths]
+    if any(present) and not all(present):
+        raise ValueError("runner must emit either all or no state checkpoint streams")
+    state_checkpoints = (
+        {
+            name: _timeline_comparison(
+                oracle[name], _timeline(raw.get(name), width, f"runner {name}")
+            )
+            for name, width in checkpoint_widths.items()
+        }
+        if all(present)
+        else None
+    )
+    state_checkpoint_exact = (
+        None
+        if state_checkpoints is None
+        else all(value["matches"] for value in state_checkpoints.values())
+    )
     terminal_exact = (
         all(value["matches"] for value in terminal.values())
         and checkpoint["matches"]
@@ -418,10 +530,13 @@ def _compare_oracle(raw: dict[str, Any], oracle: dict[str, Any]) -> dict[str, An
         "terminal_state_exact": terminal_exact,
         "score_timeline": score_comparison,
         "rot_penalty_timeline": rot_comparison,
+        "available_state_checkpoints": state_checkpoints,
+        "available_state_checkpoints_exact": state_checkpoint_exact,
         "full_scoring_parity": (
             terminal_exact
             and score_comparison["matches"]
             and rot_comparison["matches"]
+            and state_checkpoint_exact is not False
         ),
     }
 
@@ -429,14 +544,26 @@ def _compare_oracle(raw: dict[str, Any], oracle: dict[str, Any]) -> dict[str, An
 def evaluate(
     paths: Iterable[Path],
     *,
-    runner: Path,
+    runner: Path | None = None,
+    worker: Path | None = None,
     oracle_paths: Iterable[Path] = (),
     control_word: int = DEFAULT_CONTROL_WORD,
     timeout: float = 300.0,
 ) -> dict[str, Any]:
-    runner = runner.resolve()
-    if not runner.is_file() or not os.access(runner, os.X_OK):
-        raise ValueError(f"runner is not an executable file: {runner}")
+    if (runner is None) == (worker is None):
+        raise ValueError("exactly one of runner or worker is required")
+    selected = runner if runner is not None else worker
+    assert selected is not None
+    executable = selected.resolve()
+    if not executable.is_file() or not os.access(executable, os.X_OK):
+        raise ValueError(f"exact executable is not an executable file: {executable}")
+    if worker is not None and control_word != DEFAULT_CONTROL_WORD:
+        raise ValueError("the production exact worker requires control word 0x027f")
+    mode = (
+        "direct_exact_replay_runner"
+        if runner is not None
+        else "production_irisu_env_worker"
+    )
     entries = inventory(paths)
     oracles = load_oracles(oracle_paths)
     errors = 0
@@ -445,12 +572,18 @@ def evaluate(
             entry["evaluation"] = None
             continue
         try:
-            raw = _runner_result(
-                runner,
-                Path(entry["path"]),
-                control_word=control_word,
-                timeout=timeout,
-            )
+            runtime: dict[str, Any] | None = None
+            if runner is not None:
+                raw = _runner_result(
+                    executable,
+                    Path(entry["path"]),
+                    control_word=control_word,
+                    timeout=timeout,
+                )
+            else:
+                raw, runtime = _worker_result(
+                    executable, Path(entry["path"]), timeout=timeout
+                )
             frames = int(entry["frame_count"])
             terminal_frame = int(raw["terminal_frame"])
             terminal_tick = terminal_frame + 1 if 0 <= terminal_frame < frames else None
@@ -473,6 +606,7 @@ def evaluate(
             entry["evaluation"] = {
                 "status": "ok",
                 "runner_output": _compact_runner_output(raw),
+                "runtime": runtime,
                 "unverified_header_diagnostic": {
                     "authority": "unverified_replay_header",
                     "comparisons": comparisons,
@@ -485,7 +619,7 @@ def evaluate(
                     None if oracle is None else _compare_oracle(raw, oracle)
                 ),
             }
-        except (OSError, RuntimeError, subprocess.TimeoutExpired) as error:
+        except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired) as error:
             errors += 1
             entry["evaluation"] = {"status": "error", "error": str(error)}
 
@@ -532,9 +666,22 @@ def evaluate(
             "eligibility": "mode 0 and padded offset-52 layout",
         },
         "runner": {
-            "path": str(runner),
-            "sha256": _sha256(runner.read_bytes()),
+            "mode": mode,
+            "path": str(executable),
+            "sha256": _sha256(executable.read_bytes()),
             "control_word": f"0x{control_word:04x}",
+            "corpus_evaluator": {
+                "path": str(THIS_SCRIPT),
+                "sha256": _sha256(THIS_SCRIPT.read_bytes()),
+            },
+            "production_replay_adapter": (
+                None
+                if runner is not None
+                else {
+                    "path": str(EVALUATE_RPY),
+                    "sha256": _sha256(EVALUATE_RPY.read_bytes()),
+                }
+            ),
         },
         "inventory": entries,
         "summary": {
@@ -553,6 +700,14 @@ def evaluate(
                 ),
                 "rot_penalty_timeline_exact": sum(
                     value["rot_penalty_timeline"]["matches"] for value in observed
+                ),
+                "available_state_checkpoint_streams": sum(
+                    value["available_state_checkpoints_exact"] is not None
+                    for value in observed
+                ),
+                "available_state_checkpoints_exact": sum(
+                    value["available_state_checkpoints_exact"] is True
+                    for value in observed
                 ),
                 "full_scoring_parity": sum(
                     value["full_scoring_parity"] for value in observed
@@ -592,7 +747,13 @@ def evaluate(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--runner", required=True, type=Path)
+    execution = parser.add_mutually_exclusive_group(required=True)
+    execution.add_argument("--runner", type=Path)
+    execution.add_argument(
+        "--worker",
+        type=Path,
+        help="run through the production Python IrisuEnv exact-worker backend",
+    )
     parser.add_argument("--corpus", type=Path, default=DEFAULT_CORPUS)
     parser.add_argument(
         "--oracle-root",
@@ -622,6 +783,7 @@ def main() -> None:
         report = evaluate(
             paths,
             runner=args.runner,
+            worker=args.worker,
             oracle_paths=(
                 []
                 if args.no_oracles
@@ -649,6 +811,11 @@ def main() -> None:
             "score_timeline_exact",
             "terminal_state_exact",
         )
+        if args.worker is not None:
+            required += (
+                "available_state_checkpoint_streams",
+                "available_state_checkpoints_exact",
+            )
         failed = [key for key in required if observed[key] != available]
         if failed:
             raise SystemExit(

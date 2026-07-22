@@ -183,10 +183,15 @@ def evaluate_bytes(
     source: str = "<memory>",
     layout: str = "auto",
     library_path: str | None = None,
+    worker_path: str | None = None,
+    include_timelines: bool = False,
     env_factory: Callable[..., Any] = IrisuEnv,
     support_both_shots: bool | None = None,
 ) -> dict[str, object]:
     """Evaluate replay bytes and return a stable, machine-readable report."""
+
+    if library_path is not None and worker_path is not None:
+        raise ValueError("library_path and worker_path are mutually exclusive")
 
     replay = INSPECT_RPY.parse_replay(data, layout)
     if replay.header.mode != 0:
@@ -204,15 +209,36 @@ def evaluate_bytes(
     terminal_frame: int | None = None
     clone_observation: dict[str, Any]
     step_diagnostics: dict[str, Any] = {}
+    score_timeline: list[list[int]] = []
+    gauge_timeline: list[list[int]] = []
+    score_checkpoints: list[list[int]] = []
+    rot_checkpoints: list[list[int]] = []
+    clear_checkpoints: list[list[int]] = []
+    level_checkpoints: list[list[int]] = []
+    confirmed = 0
+    runtime_provenance: dict[str, Any] | None = None
 
-    kwargs = {"library_path": library_path} if library_path is not None else {}
+    if worker_path is not None:
+        kwargs = {"physics_backend": "exact", "worker_path": worker_path}
+    elif library_path is not None:
+        kwargs = {"library_path": library_path}
+    else:
+        kwargs = {}
     with env_factory(**kwargs) as env:
+        if worker_path is not None:
+            if getattr(env, "physics_backend", None) != "exact":
+                raise RuntimeError("worker evaluation did not create an exact backend")
+            runtime_provenance = dict(env.exact_library_provenance())
         # A signed header field is serialized as 32 raw bits.  Zero-extension
         # preserves those bits for the clone's uint64 reset API.
         seed_u32 = int(replay.header.seed) & 0xFFFFFFFF
         initial_observation, _ = env.reset(seed=seed_u32)
         initial_state_hash = int(env.state_hash())
         initial_tick = int(initial_observation["tick"])
+        timeline_score = int(initial_observation["score"])
+        timeline_gauge = int(initial_observation.get("gauge", 0))
+        timeline_level = int(initial_observation["level"])
+        timeline_clears = int(initial_observation.get("qualifying_clear_count", 0))
         for frame in mapped:
             clone_observation, _, terminated, truncated, info = env.step(_env_action(frame))
             raw_diagnostics = info.get("diagnostics", {})
@@ -224,6 +250,86 @@ def evaluate_bytes(
                     event.get("kind_name", f"kind_{event.get('kind', 'unknown')}")
                 )
                 event_counts[name] += 1
+                if include_timelines and name == "score_changed":
+                    delta = int(event.get("value", 0))
+                    timeline_score += delta
+                    score_timeline.append(
+                        [int(event.get("tick", frame.index + 1)), delta, timeline_score]
+                    )
+                    score_checkpoints.append(
+                        [
+                            int(event.get("tick", frame.index + 1)),
+                            delta,
+                            timeline_score,
+                            timeline_gauge,
+                            timeline_level,
+                            timeline_clears,
+                        ]
+                    )
+                elif include_timelines and name == "gauge_changed":
+                    delta = int(event.get("value", 0))
+                    timeline_gauge += delta
+                    detail = str(event.get("detail", ""))
+                    kind = (
+                        1
+                        if detail == "normal rot penalty"
+                        else 0
+                        if detail == "scene clamp and passive drain"
+                        else 2
+                    )
+                    gauge_timeline.append(
+                        [
+                            int(event.get("tick", frame.index + 1)),
+                            delta,
+                            timeline_gauge,
+                            int(event.get("a", 0)),
+                            kind,
+                        ]
+                    )
+                    if detail == "normal rot penalty":
+                        rot_checkpoints.append(
+                            [
+                                int(event.get("tick", frame.index + 1)),
+                                delta,
+                                timeline_score,
+                                timeline_gauge,
+                                timeline_level,
+                                timeline_clears,
+                            ]
+                        )
+                elif include_timelines and name == "confirmed":
+                    confirmed += 1
+                    timeline_clears += 1
+                    clear_checkpoints.append(
+                        [
+                            int(event.get("tick", frame.index + 1)),
+                            int(event.get("value", 0)),
+                            timeline_score,
+                            timeline_gauge,
+                            timeline_level,
+                            timeline_clears,
+                        ]
+                    )
+                elif include_timelines and name == "level_changed":
+                    timeline_level = int(event.get("value", timeline_level))
+                    level_checkpoints.append(
+                        [
+                            int(event.get("tick", frame.index + 1)),
+                            timeline_level,
+                            timeline_score,
+                            timeline_gauge,
+                            timeline_clears,
+                        ]
+                    )
+                    # Confirmed is emitted immediately before the level setter,
+                    # while the original clear hook observes the committed level.
+                    if (
+                        clear_checkpoints
+                        and clear_checkpoints[-1][0]
+                        == int(event.get("tick", frame.index + 1))
+                        and clear_checkpoints[-1][5] == timeline_clears
+                    ):
+                        clear_checkpoints[-1][4] = timeline_level
                 if name not in first_event_occurrences:
                     first_event_occurrences[name] = {
                         "frame": frame.index,
@@ -233,6 +339,17 @@ def evaluate_bytes(
                         "value": int(event.get("value", 0)),
                         "detail": str(event.get("detail", "")),
                     }
+            if include_timelines:
+                if timeline_score != int(clone_observation["score"]):
+                    raise RuntimeError("score events do not reconstruct observation")
+                if timeline_gauge != int(clone_observation["gauge"]):
+                    raise RuntimeError("gauge events do not reconstruct observation")
+                if timeline_level != int(clone_observation["level"]):
+                    raise RuntimeError("level events do not reconstruct observation")
+                if timeline_clears != int(
+                    clone_observation["qualifying_clear_count"]
+                ):
+                    raise RuntimeError("clear events do not reconstruct observation")
             if info.get("invalid_action"):
                 invalid_action_frames.append(frame.index)
             if terminal_frame is None and (terminated or truncated):
@@ -243,6 +360,10 @@ def evaluate_bytes(
         final_state_hash = int(env.state_hash())
         config_hash = int(env.config_hash())
         build_info = dict(env.build_info)
+        if worker_path is not None:
+            final_provenance = dict(env.exact_library_provenance())
+            if final_provenance != runtime_provenance:
+                raise RuntimeError("exact library provenance changed during replay")
 
     final_tick = int(clone_observation["tick"])
     live_score = int(clone_observation["score"])
@@ -261,6 +382,8 @@ def evaluate_bytes(
         step_diagnostics.get("recorded_final_highest_chain", live_highest_chain)
         if recorded else live_highest_chain
     )
+    live_gauge = int(clone_observation.get("gauge", 0))
+    live_clears = int(clone_observation.get("qualifying_clear_count", 0))
     unrepresented = [frame.index for frame in mapped if frame.unrepresented_right_edge]
     simultaneous_edges = [
         frame.index for frame in mapped if frame.left_edge and frame.right_edge
@@ -278,7 +401,7 @@ def evaluate_bytes(
 
     expected_score = int(replay.header.final_score)
     expected_level = int(replay.header.highest_level)
-    return {
+    report: dict[str, object] = {
         "schema_version": 1,
         "status": {
             "purpose": "diagnostic replay-to-clone comparison",
@@ -397,6 +520,29 @@ def evaluate_bytes(
         },
         "clone_build": build_info,
     }
+    if runtime_provenance is not None:
+        report["exact_runtime_provenance"] = runtime_provenance
+    if include_timelines:
+        report["oracle_output"] = {
+            "tick": final_tick,
+            "score": live_score,
+            "gauge": live_gauge,
+            "level": live_level,
+            "highest_chain": live_highest_chain,
+            "clears": live_clears,
+            "score_calls": len(score_timeline),
+            "confirmed": confirmed,
+            "terminal_frame": (
+                len(mapped) if terminal_frame is None else terminal_frame
+            ),
+            "score_timeline": score_timeline,
+            "gauge_timeline": gauge_timeline,
+            "score_checkpoints": score_checkpoints,
+            "rot_checkpoints": rot_checkpoints,
+            "clear_checkpoints": clear_checkpoints,
+            "level_checkpoints": level_checkpoints,
+        }
+    return report
 
 
 def evaluate_path(
@@ -404,9 +550,16 @@ def evaluate_path(
     *,
     layout: str = "auto",
     library_path: str | None = None,
+    worker_path: str | None = None,
+    include_timelines: bool = False,
 ) -> dict[str, object]:
     return evaluate_bytes(
-        path.read_bytes(), source=str(path), layout=layout, library_path=library_path
+        path.read_bytes(),
+        source=str(path),
+        layout=layout,
+        library_path=library_path,
+        worker_path=worker_path,
+        include_timelines=include_timelines,
     )
 
 
@@ -416,12 +569,25 @@ def main() -> None:
     )
     parser.add_argument("replay", type=Path)
     parser.add_argument("--layout", choices=("auto", "legacy", "padded"), default="auto")
-    parser.add_argument("--library", help="explicit libirisu_clone shared-library path")
+    backend = parser.add_mutually_exclusive_group()
+    backend.add_argument("--library", help="explicit portable libirisu_clone path")
+    backend.add_argument("--worker", help="explicit exact-physics worker executable")
+    parser.add_argument(
+        "--timelines",
+        action="store_true",
+        help="include runner-compatible score and gauge event timelines",
+    )
     parser.add_argument("--compact", action="store_true", help="emit compact JSON")
     args = parser.parse_args()
 
     try:
-        report = evaluate_path(args.replay, layout=args.layout, library_path=args.library)
+        report = evaluate_path(
+            args.replay,
+            layout=args.layout,
+            library_path=args.library,
+            worker_path=args.worker,
+            include_timelines=args.timelines,
+        )
     except (OSError, ValueError, RuntimeError, NativeError) as exc:
         parser.error(str(exc))
     print(json.dumps(report, indent=None if args.compact else 2, sort_keys=True))

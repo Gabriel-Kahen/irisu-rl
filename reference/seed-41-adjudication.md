@@ -102,19 +102,23 @@ reward remains `score_after - score_before`.
 
 ## Claim boundary
 
-Seed 41 is currently the only replay in the workspace with an instrumented,
-fresh-process original playback outcome. External replay headers are useful
-diagnostics, but they are not equivalent to observing those bytes on the
-supported executable. Their generating build may differ, and the 214,453-point
-legacy replay predates v2.00.
+Seed 41 remains a controlled, non-golden adjudication of one score transition.
+Subsequent fresh-process instrumentation produced observed bundled-v2.03
+oracles for all four eligible padded external replays. The exact worker matches
+all four on terminal/checkpoint state and every one of their 536 score calls
+across 57,921 ticks, including the longest replay's scoring/terminal oracle
+through all 47,019 ticks. Their
+replay headers remain diagnostic rather than authoritative: only the 41,449
+header describes the observed v2.03 outcome, and the 214,453-point legacy replay
+still predates v2.00.
 
-Current mode-0 clone diagnostics are directionally improved but do not match
-all external headers: the 40- and 56-point files complete at 48 and 114, while
-the 41,449- and 43,791-point files reach 1,563 and 1,553 before terminal at
-ticks 8,228 and 7,962. Those long-run gaps remain high priority, but they
-must be localized to causal trajectory/event differences rather than “fixed”
-by changing the now-observed score formula.
+The old 48/114/1,563/1,553 clone outcomes were portable-backend diagnostics from
+before exact-physics integration and are historical, not current exact-backend
+claims. Portable GNU physics can still diverge over long horizons; the exact
+worker is required for replay parity. No score constant, multiplier, or
+replay-specific branch was introduced.
 
-This result resolves the seed-41 discrepancy. It does not by itself satisfy the
-five-category controlled golden gate, prove long-horizon replay identity, or
+This result resolves the seed-41 discrepancy but does not populate the empty
+five-category controlled manifest, statistically validate original-game
+spawn/difficulty distributions, meet the exact-backend throughput gate, or
 demonstrate policy transfer.

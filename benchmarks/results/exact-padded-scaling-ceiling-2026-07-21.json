@@ -1,0 +1,211 @@
+{
+  "schema_version": 1,
+  "schema_description": "One deterministic warmup, equal-width scaling samples, a 64-lane worker-cap sweep, and scheduling-affinity probes with captured workload and process accounting.",
+  "artifact_kind": "exact_padded_scaling_and_scheduling_probe",
+  "status": "supplemental-scaling-evidence-not-the-full-performance-gate",
+  "recorded_at": "2026-07-21T19:59:19-04:00",
+  "experiment_time": {
+    "local_date": "2026-07-21",
+    "timezone": "America/New_York",
+    "exact_start": "unavailable",
+    "exact_end": "unavailable"
+  },
+  "host": {
+    "cpu": "AMD Ryzen 7 3700X 8-Core Processor",
+    "physical_cores": 8,
+    "logical_cpus": 16,
+    "smt_siblings": [[0, 8], [1, 9], [2, 10], [3, 11], [4, 12], [5, 13], [6, 14], [7, 15]],
+    "l3_groups": [[0, 1, 2, 3, 8, 9, 10, 11], [4, 5, 6, 7, 12, 13, 14, 15]],
+    "inherited_affinity": "0-15",
+    "pre_run_idle_percent_samples": [95, 96],
+    "pre_run_load_average": [1.96, 3.55, 4.71],
+    "python": "3.14.6",
+    "platform": "Linux-7.1.2-3-cachyos-x86_64-with-glibc2.43"
+  },
+  "runtime": {
+    "worker": "/home/gabe/Documents/irisu/build-physics-integration-exact-multiworld-2/irisu-exact-worker",
+    "worker_sha256": "4faa4508a89df3e1e62b80e2871b6a35b5913f220d53fe5de43408ad6512c261",
+    "exact_library_sha256": "ce14d1cab9ce4331bf494fe92bf657029487aec9f7435e7479b3c7cb579fafb5",
+    "x87_control_word": 639,
+    "config_hash": 17009678407634462320
+  },
+  "sources": {
+    "measurement_worktree": {
+      "python/irisu_env/exact_ipc.py": "ac7a4b5c7e589eefa07c58b12d9c33c50cd04b14396a912eaafd879cfb3e7a3b",
+      "python/irisu_env/padded.py": "46f1c849b81af60873e28e1220abecb9a10ad7859802b9813c2f58c2f50d1f16",
+      "benchmarks/exact_pipeline.py": "db0cf3332f4965dd16cec0661158eb1febd2c83cc0b687a0114694fc88c0fc3c"
+    },
+    "post_measurement_adaptive_default": {
+      "python/irisu_env/padded.py": "4c18220965fee5663a0e70422f42cb63ddfdfc534adfdce46e6a073e36985b5c"
+    }
+  },
+  "invocation": {
+    "cwd": "/home/gabe/Documents/irisu",
+    "shell_command": "PYTHONPATH=python python -",
+    "stdin_transport": "bash heredoc",
+    "stdin_script_sha256": "unavailable; the inline driver was not persisted contemporaneously",
+    "primary_matrix": {
+      "warmup": {"lanes": 8, "workers": 8, "iterations": 300},
+      "equal_lanes_and_workers": [8, 12, 16, 24, 32, 48, 64],
+      "lane_64_worker_caps": [16, 24, 32, 48, 64],
+      "affinity_probes": [
+        "8 lanes/workers: workers fixed to CPUs 0-7, parent allowed on CPUs 8-15",
+        "16 lanes/workers: worker lane fixed to lane_index modulo 16, parent unrestricted",
+        "32 lanes/workers: worker lane fixed to lane_index modulo 16, parent unrestricted",
+        "32 lanes/workers: parent fixed to CPU 15, workers allowed on CPUs 0-14"
+      ],
+      "final_repeat": {"lanes": 32, "workers": 32, "iterations": 1200}
+    },
+    "secondary_default_cap_sample": {
+      "shell_command": "PYTHONPATH=python python -",
+      "lanes": 64,
+      "workers": 8,
+      "iterations": 1200,
+      "reason": "Measure the pre-change implicit exact default against the primary 64-worker sample on the same deterministic workload."
+    },
+    "benchmark_loop": "PaddedVectorEnv reset(seed=41), then 1,200 rounds of per-lane RandomPolicy actions; terminal lanes reset_at with the documented deterministic seed formulas.",
+    "cpu_accounting": "Parent getrusage delta plus reaped-child getrusage and /proc CPU-tick deltas for surviving workers; baseline worker ticks are subtracted.",
+    "coordination": "Root and the other performance agent withheld CPU-heavy IriSu commands for the coordinated window; two immediate pre-run vmstat samples reported 95% and 96% idle."
+  },
+  "workload": {
+    "iterations_per_sample": 1200,
+    "policy": "RandomPolicy(max_wait_ticks=1)",
+    "environment_seed": "41 + lane_index",
+    "policy_seed": "0x52574157 + lane_index",
+    "episode_seed": "41 + lane_index + episode_index * lane_count",
+    "wire_mode": "STEP_PADDED with live bodies and lazy event counts",
+    "events_materialized": false,
+    "response_size_formula": "224 + 100 * body_count",
+    "response_size_mismatches_all_samples": 0
+  },
+  "scale_equal_lanes_and_workers": [
+    {
+      "lanes": 8, "workers": 8, "decisions": 9600,
+      "elapsed_seconds": 2.053479345, "decisions_per_second": 4674.9922385998,
+      "action_counts": {"0": 7144, "1": 1198, "2": 1258}, "episode_resets": 6,
+      "body_count": {"min": 11, "mean": 92.4846875, "max": 196},
+      "event_count": {"min": 1, "mean": 132.65104166666666, "max": 469},
+      "response_frame_bytes": {"min": 1324, "mean": 9472.46875, "max": 19824},
+      "state_hashes_sha256": "a3e631034c01b352acfe20b3562baae51f7567ebb0a89f3fffa0dd72bea3005a",
+      "final_observations_sha256": "a588b2a17c91cea5a60a278ed6c3f05cad5f6f18894a87cd73b317e3da5f8482",
+      "workload_equivalence_sha256": "07c81d0c032ef547ac0e951448006e7be411d7c0564cbeadd075ae016648e4ef",
+      "cpu": {"parent_cores": 0.15923413147357465, "worker_cores": 3.9076263511187155, "total_cores": 4.06686048259229, "machine_percent": 25.41787801620181},
+      "scheduling": {"parent_voluntary": 6443, "parent_involuntary": 62, "worker_voluntary": 9624, "worker_involuntary": 1113, "surviving_worker_migrations": 1320, "global_context_switches": 82348}
+    },
+    {
+      "lanes": 12, "workers": 12, "decisions": 14400,
+      "elapsed_seconds": 2.338910199, "decisions_per_second": 6156.713501081279,
+      "action_counts": {"0": 10696, "1": 1843, "2": 1861}, "episode_resets": 11,
+      "body_count": {"min": 11, "mean": 91.48708333333333, "max": 196},
+      "event_count": {"min": 1, "mean": 130.5545138888889, "max": 469},
+      "response_frame_bytes": {"min": 1324, "mean": 9372.708333333334, "max": 19824},
+      "state_hashes_sha256": "e7c161d93178c0427d71e5ba4dccef1c0c45b15b3069d4ab60e4290c756d5669",
+      "final_observations_sha256": "80ebdcb57f58dc52474b247485cecfcfca6d25fffe7e53c9f0345f498303960e",
+      "workload_equivalence_sha256": "1e12149ad1866308d02dddb510e9af848874fc15c23be7595975934d9a90e9de",
+      "cpu": {"parent_cores": 0.2258637378322023, "worker_cores": 5.468867939208983, "total_cores": 5.694731677041186, "machine_percent": 35.59207298150741},
+      "scheduling": {"parent_voluntary": 7107, "parent_involuntary": 247, "worker_voluntary": 14443, "worker_involuntary": 2929, "surviving_worker_migrations": 2189, "global_context_switches": 108318}
+    },
+    {
+      "lanes": 16, "workers": 16, "decisions": 19200,
+      "elapsed_seconds": 2.812384123, "decisions_per_second": 6826.947941776586,
+      "action_counts": {"0": 14285, "1": 2432, "2": 2483}, "episode_resets": 14,
+      "body_count": {"min": 11, "mean": 93.03697916666667, "max": 196},
+      "event_count": {"min": 1, "mean": 134.35489583333333, "max": 469},
+      "response_frame_bytes": {"min": 1324, "mean": 9527.697916666666, "max": 19824},
+      "state_hashes_sha256": "5f1813841f04efdc5ec2f0ddc9e63e25a418f28f7d980faa97b0fea3836394cb",
+      "final_observations_sha256": "8b1653f873e6c49a40da7c068519be628968872ea041149dcd9a2d33fb303835",
+      "workload_equivalence_sha256": "c1238e814de72687c758143c1205559ea02ec8588492f0423d151a2a31f285c7",
+      "cpu": {"parent_cores": 0.23585078388667888, "worker_cores": 6.313823867366499, "total_cores": 6.549674651253177, "machine_percent": 40.93546657033236},
+      "scheduling": {"parent_voluntary": 7867, "parent_involuntary": 396, "worker_voluntary": 19256, "worker_involuntary": 3568, "surviving_worker_migrations": 3355, "global_context_switches": 123793}
+    },
+    {
+      "lanes": 24, "workers": 24, "decisions": 28800,
+      "elapsed_seconds": 3.422687247, "decisions_per_second": 8414.44102882708,
+      "action_counts": {"0": 21534, "1": 3624, "2": 3642}, "episode_resets": 21,
+      "body_count": {"min": 11, "mean": 92.73055555555555, "max": 196},
+      "event_count": {"min": 1, "mean": 133.80677083333333, "max": 484},
+      "response_frame_bytes": {"min": 1324, "mean": 9497.055555555555, "max": 19824},
+      "state_hashes_sha256": "60f438f4fc8cf80df25ecbc2be483e2999db922d066e5d1a4878438d4b199b58",
+      "final_observations_sha256": "c82aa97b1b11e79ccadca257f4ef7dadde79bcc5a1cb0e72b86b5bc34b5daccb",
+      "workload_equivalence_sha256": "beb84d1feb2a6308b47b263dab40b9d1bb730bdc28099b91ca019f54291995db",
+      "cpu": {"parent_cores": 0.2848136360850501, "worker_cores": 8.052743067353942, "total_cores": 8.337556703438993, "machine_percent": 52.109729396493705},
+      "scheduling": {"parent_voluntary": 9270, "parent_involuntary": 648, "worker_voluntary": 28884, "worker_involuntary": 7259, "surviving_worker_migrations": 5524, "global_context_switches": 147356}
+    },
+    {
+      "lanes": 32, "workers": 32, "decisions": 38400,
+      "elapsed_seconds": 4.079980607, "decisions_per_second": 9411.80944196581,
+      "action_counts": {"0": 28634, "1": 4853, "2": 4913}, "episode_resets": 26,
+      "body_count": {"min": 11, "mean": 92.19348958333333, "max": 196},
+      "event_count": {"min": 1, "mean": 132.63515625, "max": 486},
+      "response_frame_bytes": {"min": 1324, "mean": 9443.348958333334, "max": 19824},
+      "state_hashes_sha256": "f78dda033ad2a9e758362f46a4f909a25836e1f0b9958d9bec3c8387a784dbe0",
+      "final_observations_sha256": "2f8a403e02ae149f3675b8b7ec82474f5aa343381db75fab9af2a8401d433327",
+      "workload_equivalence_sha256": "b139906a8b5ec25ad0705cd831eec94ccea7ba329c3812d2eae6567c182a6b94",
+      "cpu": {"parent_cores": 0.322223835511481, "worker_cores": 9.130111044177328, "total_cores": 9.452334879688808, "machine_percent": 59.07709299805505},
+      "scheduling": {"parent_voluntary": 10469, "parent_involuntary": 1092, "worker_voluntary": 38504, "worker_involuntary": 13540, "surviving_worker_migrations": 8351, "global_context_switches": 179877}
+    },
+    {
+      "lanes": 48, "workers": 48, "decisions": 57600,
+      "elapsed_seconds": 5.615708132, "decisions_per_second": 10256.943317936666,
+      "action_counts": {"0": 43054, "1": 7227, "2": 7319}, "episode_resets": 45,
+      "body_count": {"min": 11, "mean": 90.50053819444445, "max": 196},
+      "event_count": {"min": 1, "mean": 128.79083333333332, "max": 486},
+      "response_frame_bytes": {"min": 1324, "mean": 9274.053819444445, "max": 19824},
+      "state_hashes_sha256": "54aefa49c3bcd06dbd44454615ff69ababffed135bcbb72aee2f117bd91583d3",
+      "final_observations_sha256": "55baa518c701fc971a20cddaf1d085d04a655ff4a0eef5adbac52e89e00572b9",
+      "workload_equivalence_sha256": "5184b4c4b9284a35458d147d984e092881524b4aa3f268c931419ba5d94f7321",
+      "cpu": {"parent_cores": 0.34595832873317145, "worker_cores": 9.876403419891982, "total_cores": 10.222361748625154, "machine_percent": 63.889760928907215},
+      "scheduling": {"parent_voluntary": 10900, "parent_involuntary": 1968, "worker_voluntary": 57780, "worker_involuntary": 30723, "surviving_worker_migrations": 11390, "global_context_switches": 271548}
+    },
+    {
+      "lanes": 64, "workers": 64, "decisions": 76800,
+      "elapsed_seconds": 6.997497643, "decisions_per_second": 10975.352035570524,
+      "action_counts": {"0": 57400, "1": 9686, "2": 9714}, "episode_resets": 61,
+      "body_count": {"min": 11, "mean": 89.39229166666667, "max": 196},
+      "event_count": {"min": 1, "mean": 125.86790364583334, "max": 496},
+      "response_frame_bytes": {"min": 1324, "mean": 9163.229166666666, "max": 19824},
+      "state_hashes_sha256": "4e5876b4e0d607445f17c59223dd01e3ba2a21185ffe1a065b841a5bf04a4e85",
+      "final_observations_sha256": "614d1f25a376372dec9dc86571b81989449e9b69250fcd9456838acd0ee37896",
+      "workload_equivalence_sha256": "5eab84ca309a25888b77ea3e3d3fa1436f342bc7ed2947a37475a4bb398b314b",
+      "cpu": {"parent_cores": 0.36303149062739887, "worker_cores": 10.474917854859795, "total_cores": 10.837949345487194, "machine_percent": 67.73718340929497},
+      "scheduling": {"parent_voluntary": 10790, "parent_involuntary": 3089, "worker_voluntary": 77044, "worker_involuntary": 46676, "surviving_worker_migrations": 13364, "global_context_switches": 309272}
+    }
+  ],
+  "lane_64_worker_cap_probe": {
+    "workload_equivalence_sha256_workers_16_to_64": "5eab84ca309a25888b77ea3e3d3fa1436f342bc7ed2947a37475a4bb398b314b",
+    "workers_8_full_workload_equivalence_sha256": "unavailable",
+    "workers_8_captured_action_reset_distribution_and_state_fields_match": true,
+    "state_hashes_sha256": "4e5876b4e0d607445f17c59223dd01e3ba2a21185ffe1a065b841a5bf04a4e85",
+    "final_observations_sha256": "614d1f25a376372dec9dc86571b81989449e9b69250fcd9456838acd0ee37896",
+    "samples": [
+      {"workers": 8, "elapsed_seconds": 16.671319826, "decisions_per_second": 4606.713853586171, "cpu": "unavailable", "scheduling": "unavailable", "final_observations_sha256": "unavailable"},
+      {"workers": 16, "elapsed_seconds": 11.045651068, "decisions_per_second": 6952.962711496003, "average_total_cores": 6.583667956946181, "machine_percent": 41.14792473091363, "parent_context_switches": [33100, 1516], "worker_context_switches": [77044, 13765], "surviving_worker_migrations": 13011},
+      {"workers": 24, "elapsed_seconds": 9.692199236, "decisions_per_second": 7923.898191727184, "average_total_cores": 7.635948683876188, "machine_percent": 47.724679274226176, "parent_context_switches": [27567, 1699], "worker_context_switches": [77044, 17580], "surviving_worker_migrations": 13883},
+      {"workers": 32, "elapsed_seconds": 8.379388435, "decisions_per_second": 9165.34668320338, "average_total_cores": 8.985156922135214, "machine_percent": 56.15723076334509, "parent_context_switches": [20623, 2563], "worker_context_switches": [77044, 28838], "surviving_worker_migrations": 14412},
+      {"workers": 48, "elapsed_seconds": 8.37026427, "decisions_per_second": 9175.337542837224, "average_total_cores": 8.976808446694362, "machine_percent": 56.10505279183976, "parent_context_switches": [19467, 2352], "worker_context_switches": [77044, 34684], "surviving_worker_migrations": 13693},
+      {"workers": 64, "elapsed_seconds": 6.997497643, "decisions_per_second": 10975.352035570524, "average_total_cores": 10.837949345487194, "machine_percent": 67.73718340929497, "parent_context_switches": [10790, 3089], "worker_context_switches": [77044, 46676], "surviving_worker_migrations": 13364}
+    ],
+    "adaptive_64_over_old_default_8_ratio": 2.3824688019262545,
+    "adaptive_64_improvement_percent": 138.24688019262544
+  },
+  "affinity_probe": [
+    {"lanes": 8, "mode": "one worker on each primary thread; parent on sibling threads", "decisions_per_second": 4831.903573485375, "baseline": 4674.9922385998, "ratio": 1.0335639776233236, "worker_migrations": 8, "baseline_worker_migrations": 1320, "workload_equivalence_sha256": "07c81d0c032ef547ac0e951448006e7be411d7c0564cbeadd075ae016648e4ef"},
+    {"lanes": 16, "mode": "one worker fixed to each logical CPU; parent unrestricted", "decisions_per_second": 7291.381449122553, "baseline": 6826.947941776586, "ratio": 1.068029449075469, "worker_migrations": 25, "baseline_worker_migrations": 3355, "workload_equivalence_sha256": "c1238e814de72687c758143c1205559ea02ec8588492f0423d151a2a31f285c7"},
+    {"lanes": 32, "mode": "two workers fixed to each logical CPU; parent unrestricted", "decisions_per_second": 7762.887167318658, "baseline": 9411.80944196581, "ratio": 0.8248028410674294, "worker_migrations": 44, "baseline_worker_migrations": 8351, "workload_equivalence_sha256": "b139906a8b5ec25ad0705cd831eec94ccea7ba329c3812d2eae6567c182a6b94"},
+    {"lanes": 32, "mode": "parent fixed to CPU 15; workers allowed on CPUs 0-14", "decisions_per_second": 9405.422295367256, "baseline_repeat": 9233.716217912688, "ratio": 1.0185955549642594, "worker_migrations": 4355, "baseline_repeat_worker_migrations": 8251, "workload_equivalence_sha256": "b139906a8b5ec25ad0705cd831eec94ccea7ba329c3812d2eae6567c182a6b94"}
+  ],
+  "interpretation": {
+    "observed_ceiling": "not reached by 64 lanes",
+    "highest_rate_decisions_per_second": 10975.352035570524,
+    "highest_rate_lanes": 64,
+    "highest_rate_workers": 64,
+    "hard_affinity_recommendation": "do not enable by default; it helps at one worker per CPU but loses 17.5% when two workers share a pinned CPU",
+    "implemented_change": "For exact PaddedVectorEnv only, workers=None now resolves to min(num_envs, 4 * process-visible logical CPUs). Explicit workers remains authoritative and portable vectors retain their eight-thread ceiling."
+  },
+  "measurement_limits": {
+    "surviving_worker_migrations": "Excludes workers reaped during episode reset.",
+    "global_context_switches": "Host-global and therefore contextual, not attributable solely to the benchmark.",
+    "cpu_accounting": "Combines parent rusage, reaped-child rusage, and /proc tick deltas for surviving workers; clock-tick quantization applies.",
+    "sample_count": "One source-current sample per configuration; use the full performance gate for release claims."
+  }
+}

@@ -47,11 +47,12 @@ re-serialize the complete configuration merely to report the same identity.
 `SyncVectorEnv` (sequential JSON), `ThreadVectorEnv` (thread-pool JSON), and
 `PaddedVectorEnv` (typed native batch) aggregate throughput are measured.
 Finished vector lanes reset independently; a terminal lane never resets or
-advances another lane. Use `--thread-workers N` to cap parallel execution. The
-typed path defaults to at most eight workers, and portable vectors remain
-capped at eight. Exact `PaddedVectorEnv` lanes are separate worker processes, so
-an explicit `workers=N` may exceed eight; the exact pipeline deliberately sets
-`workers` equal to every requested `--vector-lanes` width.
+advances another lane. Use `--thread-workers N` to cap parallel execution.
+Portable typed vectors remain capped at eight workers. Exact `PaddedVectorEnv`
+lanes are separate worker processes, so `workers=None` selects
+`min(num_envs, 4 * process-visible logical CPUs)` and an explicit `workers=N`
+remains authoritative. The exact pipeline deliberately sets `workers` equal to
+every requested `--vector-lanes` width.
 
 `PaddedVectorEnv` removes JSON from the training hot path without changing the
 canonical Gym API. It supports both `physics_backend="portable"` and
@@ -102,9 +103,10 @@ the same actions and resets across eager raw IPC, packed raw IPC,
 capped wave and drains response-ready descriptors instead of waiting in lane
 order; every sent lane is still drained and failures are reported by the lowest
 lane deterministically. The current explicit
-1/4/8/16/32-lane packed/lazy rates are
-1,334.810/1,933.338/3,292.397/5,391.293/7,199.041 decisions/s. Raw packed IPC
-reaches 7,995.455/s at 32 lanes. At eight lanes the board averages 110.865 live
+1/4/8/16/32/48/64-lane packed/lazy rates are
+1,370.539/1,988.302/3,569.759/5,679.407/7,977.156/8,917.207/9,685.170
+decisions/s. Raw packed IPC reaches 10,333.568/s at 64 lanes. At eight lanes the
+board averages 110.865 live
 bodies and 172.954 events per decision, with maxima of 196 and 484. Packed
 response content averages 11,291 bytes and peaks at 19,804; the
 `PaddedVectorEnv` frame is exactly `224 + 100 * body_count` bytes and averages
@@ -143,27 +145,100 @@ packed/lazy vector rates for 1/4/8 lanes moved from
 (+14.50%/+16.93%/+13.50%). These 30,000-tick physics figures remain the direct
 pre/post-pair comparison. Solver work remains dominant.
 
-[`results/exact-pipeline-range-safe-wide-2026-07-20.json`](results/exact-pipeline-range-safe-wide-2026-07-20.json)
-is the current checked-in 3,000-decision-per-lane wide source-manifested run.
-Its explicit 32-lane packed/lazy rate is 35.995% of the 20,000
-aggregate-decision/s target, or 2.778x short. Its
+[`results/exact-pipeline-adaptive-wide-perf-2026-07-21.json`](results/exact-pipeline-adaptive-wide-perf-2026-07-21.json)
+is the current checked-in 3,000-decision-per-lane adaptive-wide
+source-manifested run. Its 64-lane packed/lazy rate is 48.426% of the 20,000
+aggregate-decision/s target, or 2.065x short. Its
 SHA-256 is
-`91c8db5feb9d3c8339d101940f05a42d93a4490641745964a0ca427553b8b8e9`.
-It records 37/37 current source hashes, exact worker SHA-256
-`aa7ba4a6998b6dfeb59d1ea80cd1690cd0e7b727cf9968c38f362e60835e6d57`,
+`4067fdff9360989adb696bdc5ad7d98983729f9fa424271fbd7e3e1fb9164eef`.
+It records 38/38 current runtime-source hashes, exact worker SHA-256
+`4faa4508a89df3e1e62b80e2871b6a35b5913f220d53fe5de43408ad6512c261`,
 host SHA-256
-`bf46953217a7bcd49f382d44cb05dd58db373fb9f86dc1e42eb531c12c71908a`,
-and 64/64 true workload-equivalence leaves. It measures 1,498.136 dense native
-decisions/s and 75,819.177 ticks/s on the directly comparable 30,000-tick
-48-body physics workload.
+`ce14d1cab9ce4331bf494fe92bf657029487aec9f7435e7479b3c7cb579fafb5`,
+and 88/88 true workload-equivalence leaves. It measures 1,447.881 dense native
+wall decisions/s (1,485.277/s for step plus observation) and 74,853.849 ticks/s
+on the directly comparable 30,000-tick 48-body physics workload.
+The artifact continues to report the numerical 20,000-decision/s gate as
+false. On 2026-07-21 the project owner explicitly accepted this measured
+throughput as sufficient for RL, satisfying the separate readiness alternative
+in `clone.md`; the benchmark result itself has not been rewritten as a pass.
 
-The prior
+[`results/exact-padded-python-hot-path-ab-2026-07-21.json`](results/exact-padded-python-hot-path-ab-2026-07-21.json)
+isolates the canonical action-packing and packed-transition suffix changes. Six
+interleaved 80,000-decision samples move the 32-lane median from 7,610.288 to
+8,066.670 decisions/s (+5.997%) with identical captured body/event
+distributions. The attribution artifact SHA-256 is
+`0f7a5c6820cd002d190f177f45ba0f0db44c7cf7387c4527d154c8a30299fbbd`;
+it is not itself the full performance gate.
+
+[`results/exact-padded-scaling-ceiling-2026-07-21.json`](results/exact-padded-scaling-ceiling-2026-07-21.json)
+is a supplemental scaling/scheduling probe, not the full performance gate. On
+the 8-core/16-thread host, equal lane/worker rates rise from 4,674.992/s at 8 to
+10,975.352/s at 64 without reaching a measured ceiling. At 64 lanes the old
+eight-worker behavior reaches 4,606.714/s, so the implemented adaptive default
+is 2.382x faster in this probe. Hard affinity is not enabled: pinning two workers
+per logical CPU loses 17.5%. The artifact SHA-256 is
+`2938d3e072ee99e39ba408f0dd934e5e5caa82993e8e1d7472a6b3322d4f4657`.
+This is one sample per configuration, the old eight-worker comparator lacks the
+full equivalence digest retained for 16-to-64 workers, and `4 * CPUs` is an
+implemented heuristic rather than a proven optimum.
+
+[`results/exact-actor-rollout-ab-2026-07-21.json`](results/exact-actor-rollout-ab-2026-07-21.json)
+compares the synchronous per-decision barrier with the experimental
+`irisu_env.rollout.ExactActorRolloutPool`. Each worker thread runs its lane's
+independent policy for a 64-decision horizon and retains every packed payload;
+this is not centralized batched policy inference. Three repeats use 128 warmup
+and 1,500 timed steps per lane at 16/32/64 lanes. All 9 pairs match trajectory
+digests, final state hashes, and event counts. Median synchronous rates are
+4,781.824/5,481.509/5,707.713 decisions/s; actor rates are
+5,747.609/5,960.250/6,032.712/s, for median paired speedups of
+1.211x/1.097x/1.057x. The focused A/B supplements rather than replaces the
+formal gate. Artifact SHA-256:
+`2f247f1222f0423475bdcffc185ea893c0b31eb204a7fb6df55030c396d6fc4f`.
+Policies run concurrently and must keep mutable/RNG state lane-private or
+thread-safe. Policy failures may leave successful sibling lanes advanced;
+worker transport/protocol failures require pool recreation.
+
+Reproduce that focused actor comparison with:
+
+```bash
+PYTHONPATH=python python3 benchmarks/exact_actor_rollout.py \
+  --worker build-exact/irisu-exact-worker \
+  --lanes 16,32,64 --warmup 128 --steps 1500 \
+  --rollout-horizon 64 --repeats 3 \
+  --output benchmarks/results/exact-actor-rollout-local.json
+```
+
+[`results/exact-core-trig-cache-investigation-2026-07-21.json`](results/exact-core-trig-cache-investigation-2026-07-21.json)
+records why no broader angle memoization was retained. Of 13,096,069 canonical
+cosine inputs, 10,080,004 are unique; a 4,096-entry direct cache hits only
+9.747% of nonzero inputs and improves a controlled dense median by about 1.04%.
+The artifact SHA-256 is
+`13f4d6b26d5bde00fd900e2c48317b1336bb5918b9209117e1b279214b8ba9b0`.
+Its fresh profile places 58.36% of samples in the immutable exact contact
+solver, so the cache's process-global complexity is rejected.
+
+[`results/exact-core-solver-source-optimizations-2026-07-21.json`](results/exact-core-solver-source-optimizations-2026-07-21.json)
+rejects two further MSVC9-only candidates below the predeclared 3% integration
+threshold. Static-body position-update skipping improves the dense median by
+0.648%; a velocity-anchor cache improves it by 0.472%. Both match the full
+47,019-step replay, 813,508-record wrapper trace, and trig runtime gate. Neither
+was retained, and the full 10,777,297-command getter replay was not spent on
+already rejected candidates. Artifact SHA-256:
+`6fe2b8c482e8764ff64577261d839d552ae7c4a5a996c538bbead2a135ffcb71`.
+The candidate source/object/host inputs are local and unarchived. The report
+preserves their hashes and audits but is not a clean-checkout rebuild bundle.
+
+The July 20
 [`results/exact-pipeline-paired-trig-2026-07-20.json`](results/exact-pipeline-paired-trig-2026-07-20.json)
-is retained as the directly comparable post-pair artifact, and
+is retained as the historical directly comparable post-pair artifact, and
 [`results/exact-pipeline-final-2026-07-20.json`](results/exact-pipeline-final-2026-07-20.json)
-is its directly comparable pre-trig baseline. Final validation is 10/10 exact
-CTest targets, 8/8 portable Release targets, 8/8 portable ASAN/UBSAN targets,
-and 159 passing Python tests with two optional Gym skips.
+is its directly comparable pre-trig baseline. Final validation is 14/14 exact
+Release CTest targets, 14/14 exact ASAN/UBSAN targets, 8/8 portable Release
+targets, 8/8 portable ASAN/UBSAN targets, and 204 passing Python tests with
+three expected normal-build skips. Sanitized hostile-preload fixtures put the
+worker-linked ELF32 `libasan` first. The GNU layers are instrumented; immutable
+MSVC9 host instructions are explicitly verified as uninstrumented.
 
 [`results/exact-pipeline-zero-fastpath-wide-2026-07-20.json`](results/exact-pipeline-zero-fastpath-wide-2026-07-20.json)
 is retained only as the intermediate pre-range-guard wide run. Its source
@@ -197,13 +272,14 @@ cmake --build build-exact --target irisu-exact-worker irisu-physics-benchmark
 PYTHONPATH=python python3 benchmarks/exact_pipeline.py \
   --worker build-exact/irisu-exact-worker \
   --physics-benchmark build-exact/irisu-physics-benchmark \
-  --vector-lanes 1,4,8,16,32 \
-  --output benchmarks/results/exact-pipeline-local.json
+  --vector-lanes 1,4,8,16,32,48,64 \
+  --output benchmarks/results/exact-pipeline-adaptive-wide-local.json
 ```
 
-The command above explicitly opts exact `PaddedVectorEnv` into 16 and 32
-workers. The profiler's default lane list remains `1,4,8`, matching the public
-environment's conservative eight-worker default.
+The command above explicitly fixes exact `PaddedVectorEnv` at each requested
+width, making the benchmark independent of host topology. The profiler's
+default lane list remains `1,4,8`; this is a benchmark duration choice, not the
+public exact worker default.
 
 The profiler records artifact and source SHA-256 identities. It includes both a
 sparse `wait(1)` diagnostic and a representative seeded
@@ -213,9 +289,10 @@ packed raw send/drain, fully decoded `ThreadVectorEnv`, and packed/lazy
 The report records those equivalence checks plus response-size and body/event-
 density distributions. It also compares a reusable Linux fast checkpoint with
 durable action-log restore. At 1,000 history actions, local measurements put
-checkpoint creation at 187.828 us, median branch creation at 479.742 us
-(2,056.212/s), and durable restore at 95.933 ms (10.413/s), a 199.968x median
-advantage. This matters because eager exact transition payloads can contain
+checkpoint creation at 171.215 us, median branch creation at 283.931 us
+(3,521.982/s), and median durable restore at 95.479 ms (10.474/s), a 336.274x
+median advantage. The durable snapshot is 28,104 bytes. This matters because
+eager exact transition payloads can contain
 hundreds of contact
 events and tens of kilobytes even though a sparse wait benchmark looks fast. A
 raw physics rate or sparse worker rate must not be presented as the
@@ -274,7 +351,11 @@ failed result is recorded as failed, not silently accepted. It records observed
 body-count minimum, mean, and maximum so a sparse-board result cannot masquerade
 as typical training throughput. Native physics-only performance remains a
 separate metric. Passing this engineering gate does not open bulk training while
-the fidelity/transfer gate remains open.
+the fidelity/transfer gate remains open. The tracked five-category controlled
+manifest is empty and `not_evaluable`; there is no hashed original-game
+spawn/difficulty distribution comparison and no demonstrated qualitative policy
+transfer. Four exact replay oracles therefore do not by themselves authorize
+bulk RL.
 
 ```python
 from irisu_env import Action, PaddedVectorEnv

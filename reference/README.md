@@ -33,12 +33,19 @@ the full getter oracle first differs in initial actor 10's rotation after step
 caller state; native regressions cover both single-handle and eight-lane
 execution. A separate 32-bit native host for user-built exact MSVC9 objects is
 documented under [`native-box2d/`](./native-box2d/). Its forward-only adapter
-supports exact replay research but is not yet the normal Python backend.
+is the opt-in production physics backend for `IrisuEnv` and the worker-backed
+vector APIs. It matches the four observed v2.03 replay oracles and the active
+mutation/step/contact wrapper stream through all 47,019 steps; the default
+portable GNU backend is not claimed to preserve those long horizons bit-for-bit.
 
 [`golden/`](./golden/) contains the strict scenario manifest, schema, and
 scoring contract. Its manifest remains empty until a capture bundle has valid
 observed mechanics measurements; diagnostic replay headers and blocked or
 invalid captures are rejected rather than counted toward the 95% gate.
+Replay parity does not pass that formal gate: the manifest is still empty and
+`not_evaluable`, no hashed original-game spawn/difficulty distribution
+comparison exists, and no scripted policy has demonstrated qualitative
+transfer.
 
 ## Launching the workspace copy
 

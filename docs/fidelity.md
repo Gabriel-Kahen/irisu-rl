@@ -20,7 +20,27 @@ v2.03 outcome of 1,794 points at tick 8,368. Two short external traces have
 also been replayed in the original: one is exact outright, while the other is
 exact after reproducing the loader's documented suppression of fresh click
 edges on replay frames zero and one. The four-replay exact gate, including the
-complete 47,019-step physics stream, remains passing.
+active mutation/step/contact stream through all 47,019 physics steps, remains
+passing.
+
+That replay gate now has a second execution path through the production Python
+surface: `IrisuEnv(physics_backend="exact")` launches and attests the same
+worker/host pair, consumes all four action streams, and matches all 1,111
+available original state checkpoints. Those are 536 score, 103 rot, 431
+qualifying-clear, and 41 level events; each hard row includes every score,
+gauge, level, and clear-count scalar that the public event stream can
+reconstruct at that point. Terminal score, gauge, level, highest chain, clears,
+tick, and terminal frame are also exact. The preserved
+[`exact-production-replay-parity-2026-07-21.json`](../benchmarks/results/exact-production-replay-parity-2026-07-21.json)
+report has SHA-256
+`b0e5def9d05eab34f76a43c0bdc23a2ecb83e414223a5ad06bb1d06c500d1848`.
+
+That stream result compares 813,412 active mutation, step, and contact records,
+including 573,557 contact results. The original trace also contains 9,810,360
+getter-only records. A separate global-call-order replay sends every recorded
+wrapper operation to the exact host and compares every getter result as raw
+binary32. All 12,262,950 returned words and all 573,557 contact results match
+through step 47,019; the first mismatch is null.
 
 The clone is suitable for deterministic research and replay diagnostics. The
 portable GNU physics build used by the default C/Python API is still not
@@ -40,18 +60,20 @@ evidence for each required outcome is:
 |---:|---|---|
 | 1 | Met | A native end-to-end regression runs the nominal no-input episode from its seeded 20-block reset state through game over. The CLI and Python API use the same core. |
 | 2 | Met for the supported clone build | Same-seed action traces and raw replay-level inputs are deterministic. Portable and exact Sync/Thread/Padded/Fast vectors have isolation/equivalence regressions, including an enforced exact-worker concurrency cap. Randomized ordinary `Step` versus packed `StepPadded` testing matched 1,906 steps and all 190,501 events. A scoped canonical floating-point environment isolates execution from hostile caller rounding state. Cross-build bitwise identity is not claimed. |
-| 3 | Met as an engineering gate | Portable object/wire snapshots branch exactly through randomized futures, dense and swept contacts, deferred contact replacement, out-of-range/frozen proxies, allocator churn, and terminal states. Exact durable snapshots reproduce hidden futures by reset/action replay and reject corruption or incompatible configuration atomically. Production Linux fork/COW checkpoints create reusable independent branches in approximately constant time; source reset/restore refuses while a checkpoint is live, while branch reset/restore safely detaches it. Durable restore remains O(history). |
+| 3 | Met as an engineering gate | Portable object/wire snapshots branch exactly through randomized futures, dense and swept contacts, deferred contact replacement, out-of-range/frozen proxies, allocator churn, and terminal states. Exact durable snapshots reproduce hidden futures by reset/action replay and reject corruption or incompatible configuration atomically. Four-lane serial, threaded, and padded vectors now match snapshot bytes, state hashes, contact/scoring futures, terminal truncation, and transactional rollback. Production Linux fork/COW checkpoints create reusable independent branches in approximately constant time; source reset/restore refuses while a checkpoint is live, while branch reset/restore safely detaches it. Durable restore remains O(history). |
 | 4 | Met | Native rule tests cover scoring, gauge, lifecycle, spawning, actor allocation, contacts, difficulty progression, and terminal ordering. |
-| 5 | Not met as the formal golden gate | Four external padded replays now have instrumented original v2.03 playbacks. The exact-forward path matches all 536 observed score calls across the four traces (521 in the two long traces). The scorer now accepts the exact worker with `--worker` and records its executed worker plus live mapped host, but the strict manifest remains empty because these replay bundles do not supply the complete five-category controlled-scenario schema; the result is `not_evaluable`, and policy transfer is still unevaluated. |
+| 5 | Not met as the formal golden gate | Four external padded replays now have instrumented original v2.03 playbacks. Both the native runner and production `IrisuEnv` worker path match all 1,111 available score/rot/clear/level checkpoints. The strict manifest remains empty because these replay bundles do not supply the complete five-category controlled-scenario schema; the result is `not_evaluable`, and policy transfer is still unevaluated. |
 | 6 | Met | The score formula was exonerated. Causal fixes covered mode selection, exact level descent stores, reentrant level-transition field updates, replay startup edge suppression, and the original's stale actor-pool gauge rewards. No replay-specific score tuning was introduced. |
-| 7 | Not met | The current wide source-manifested profile measures 7,199.041 decisions/s for 32 explicit exact packed/lazy-event lanes. That is 35.995% of the 20,000 decision/s target, or 2.778x short. The default and portable concurrency cap remains eight; more than eight exact workers must be requested explicitly. |
+| 7 | Met by explicit acceptance | The current formal adaptive-wide source-manifested profile measures 9,685.170 decisions/s for 64 exact packed/lazy-event lanes. That remains 48.426% of the 20,000 decision/s target, or 2.065x short; the numerical gate is still false. All 88 cross-path equivalence leaves pass. On 2026-07-21 the project owner explicitly accepted this measured throughput as sufficient for RL, which satisfies `clone.md`'s alternative acceptance criterion. Exact padded vectors default to up to four workers per process-visible logical CPU; portable concurrency remains capped at eight. |
 | 8 | Met | The simulator and normal test suite are asset-free; the original executable, DLL, replays, and presentation data are optional ignored reference inputs. The raw fast-branch replay test skips cleanly when its optional oracle is absent, while its lifecycle/security coverage still runs. |
 | 9 | Not met | `MatcherShotPolicy` is a nontrivial causal baseline in the clone, but it has not been run successfully in controlled original-game trials. |
 | 10 | Partially met | Repository instructions reproduce the clean build, tests, bounded oracles, exact-host generator, replay evaluators, and opt-in exact Python worker. Original-playback evidence is preserved with hashes, but the authorized original-game path still lacks a complete admissible scenario bundle. |
 
-Outcomes 5, 7, and 9 remain release blockers for bulk training. Outcome 10
+Outcomes 5 and 9 remain release blockers for bulk training. Outcome 10
 remains partial because the authorized original-game path has not yet produced
-a complete admissible scenario bundle.
+a complete admissible scenario bundle. The original-game spawn/difficulty
+distribution comparison required by the fidelity standard is also absent; four
+replay-exact episodes cannot substitute for that statistical gate.
 
 ## Evidence-backed implementation
 
@@ -111,13 +133,31 @@ paths. A normal worker's `/proc/<pid>/exe` is hashed only after a valid Hello
 proves `exec` completed. The client locates the one exact library in the live
 worker maps and verifies its resolved path, device, inode, required ELF
 segments, worker and client mount identities, stable file metadata, and bytes
-against the handshake hash. Before constructing a simulator, the worker
-attests that all 15 resolved `b2d_*` targets are unique executable addresses
-owned by that one host; Python requires the opcode-13 device/inode result to
-match its independent map capture. Fork/COW branch connection authenticates the
-keeper, direct parentage, and inherited worker/library file identities before
-accepting the inherited launch provenance; an explicit provenance call
-rehashes the branch's live mapped library.
+against the handshake hash. The production client launches from working
+directory `/`, removes every inherited `LD_*` variable and `GLIBC_TUNABLES`,
+and forces x87 control word `0x027f`. Before constructing a simulator, the
+forward wrapper resolves and stores 15 typed `b2d_*` pointers, uses them as the
+actual physics call path, and attests that their unique executable targets
+belong to that one host. Each target's `dladdr1` name and exact symbol-start
+address must equal the requested entrypoint, and its global binding must equal
+the stored pointer. Regressions reject an ordinary `b2d_*` preload and an
+interposed-`dlsym` same-host X/Y permutation. Worker opcode 13 reports the
+target count and device/inode; Python requires that identity to match its
+independent live-map capture. The generated host binds its internal
+`msvc_b2d_*` bridge calls with `-Bsymbolic-functions`, while generation and
+exact configuration reject every `R_386_*` relocation naming those helpers.
+These checks are fail-closed provenance against the tested loader attacks, not
+a general sandbox for arbitrary in-process code. Fork/COW branch connection
+authenticates the keeper, direct parentage, and inherited worker/library file
+identities before accepting the inherited launch provenance; an explicit
+provenance call rehashes the branch's live mapped library.
+
+The generated host's stable `DT_SONAME` becomes a retained `DT_NEEDED`
+dependency and is reopened only with `RTLD_NOLOAD`. Exact post-link verification
+requires a nonempty `RPATH`/`RUNPATH` containing only absolute or
+`$ORIGIN`-relative components. Empty/current-directory and bare relative
+components fail the build; installed exact executables use origin-relative
+lookup for the host installed in the same relocatable tree.
 
 Durable exact snapshots store the seed and accepted action history and
 atomically restore into a fresh configured worker by replaying that history.
@@ -128,9 +168,9 @@ action history. Production Linux exact workers additionally expose reusable
 fork/COW checkpoints through `ExactSimulator.fast_checkpoint()` and
 `IrisuEnv.fast_checkpoint()`. A source refuses reset/restore while it owns a
 live checkpoint; resetting/restoring a branch detaches it from the keeper. At a
-1,000-action history, local measurements put checkpoint creation at 0.188 ms,
-median branch creation at 0.480 ms, and durable restore at 95.933 ms, a 200.0x
-median advantage for local branching.
+1,000-action history, current local measurements put checkpoint creation at
+0.171 ms, median branch creation at 0.284 ms, and median durable restore at
+95.479 ms, a 336.274x median advantage for local branching.
 
 The native `Simulator` validates its mechanics configuration at construction,
 after which that configuration is immutable. Its configuration hash is now
@@ -147,13 +187,13 @@ sent first and then drained in descriptor-readiness order, avoiding
 head-of-line blocking by a slow low-numbered lane while preserving full-drain
 and deterministic lowest-lane failure behavior. On the dense eight-lane
 workload this cuts average/max response content from 23,558/54,559 bytes to
-11,291/19,804 bytes. The current wide run measures
-1,334.810/1,933.338/3,292.397/5,391.293/7,199.041 decisions/s at
-1/4/8/16/32 exact packed/lazy lanes; raw packed IPC reaches 7,995.455/s at 32
-lanes. Wider-than-eight concurrency is opt-in with, for example,
-`PaddedVectorEnv(32, physics_backend="exact", workers=32)`. Omitting `workers=`
-and every portable configuration remain capped at eight concurrent workers. A
-combined body-state getter experiment was rejected: its
+11,291/19,804 bytes. The current adaptive-wide run measures
+1,370.539/1,988.302/3,569.759/5,679.407/7,977.156/8,917.207/9,685.170
+decisions/s at 1/4/8/16/32/48/64 exact packed/lazy lanes; raw packed IPC reaches
+10,333.568/s at 64 lanes. With exact physics, omitting `workers=` selects
+`min(num_envs, 4 * process-visible logical CPUs)`; an explicit value remains
+authoritative. Every portable configuration remains capped at eight concurrent
+workers. A combined body-state getter experiment was rejected: its
 representative and dense deltas were only +0.009% and +0.187%, within noise,
 and the final host does not export it.
 
@@ -179,26 +219,64 @@ operation ordering changed. The earlier controlled pinned seven-run comparison
 moved from 1,246.873 to 1,448.173 decisions/s (+16.14%) when pairing trig.
 Solver work remains the dominant optimization target after both trig reductions.
 
-The current wide exact pipeline artifact records 37/37 current source hashes,
-exact host SHA-256
-`bf46953217a7bcd49f382d44cb05dd58db373fb9f86dc1e42eb531c12c71908a`,
+A supplemental
+[scheduling probe](../benchmarks/results/exact-padded-scaling-ceiling-2026-07-21.json)
+scales equal exact lanes/workers from 4,674.992/s at 8 to 10,975.352/s at 64 on
+the 8-core/16-thread development host; the measured ceiling was not reached. At
+64 lanes, the old eight-worker behavior measured 4,606.714/s. Hard pinning is
+not retained because it helped at one worker per logical CPU but lost 17.5%
+when two workers shared each pinned CPU. This focused workload is not the formal
+performance gate, uses one sample per configuration, and supports the default
+as a heuristic rather than a universal optimum.
+
+The experimental `ExactActorRolloutPool` removes the per-decision cross-lane
+barrier by running each independent policy for a configurable horizon in its
+lane task. A
+[three-repeat 16/32/64-lane A/B](../benchmarks/results/exact-actor-rollout-ab-2026-07-21.json)
+with 64-decision horizons matched trajectory payloads, final state hashes, and
+event counts in all 9 paired samples; median paired speedups were
+1.211x/1.097x/1.057x. This does not yet provide batched policy inference or
+replace the formal gate. Policies execute concurrently and therefore require
+lane-private or thread-safe mutable state; a transport/protocol failure requires
+pool recreation.
+
+Two candidates in the
+[solver-source artifact](../benchmarks/results/exact-core-solver-source-optimizations-2026-07-21.json)
+remain exact on the full 47,019-step replay and 813,508-record wrapper trace but
+miss the predeclared 3% integration threshold: static-body position-update
+skipping improves the dense median 0.648%, and a velocity-anchor cache improves
+it 0.472%. Neither change was retained. Because both were already rejected, the
+10,777,297-command full getter replay was not run for them.
+Their candidate sources and binaries were local, unarchived inputs, so the
+artifact preserves hashes and descriptions but cannot rebuild them from a clean
+checkout.
+
+The current adaptive-wide exact pipeline artifact records 38/38 current
+runtime-source hashes, exact host SHA-256
+`ce14d1cab9ce4331bf494fe92bf657029487aec9f7435e7479b3c7cb579fafb5`,
 worker SHA-256
-`aa7ba4a6998b6dfeb59d1ea80cd1690cd0e7b727cf9968c38f362e60835e6d57`,
-and 64/64 true cross-path equivalence leaves. Its SHA-256 is
-`91c8db5feb9d3c8339d101940f05a42d93a4490641745964a0ca427553b8b8e9`;
+`4faa4508a89df3e1e62b80e2871b6a35b5913f220d53fe5de43408ad6512c261`,
+and 88/88 true cross-path equivalence leaves. Its SHA-256 is
+`4067fdff9360989adb696bdc5ad7d98983729f9fa424271fbd7e3e1fb9164eef`;
 see
-[`exact-pipeline-range-safe-wide-2026-07-20.json`](../benchmarks/results/exact-pipeline-range-safe-wide-2026-07-20.json).
-It measures 1,498.136 dense native decisions/s and 75,819.177 ticks/s on the
-directly comparable 30,000-tick 48-body physics workload. The prior
+[`exact-pipeline-adaptive-wide-perf-2026-07-21.json`](../benchmarks/results/exact-pipeline-adaptive-wide-perf-2026-07-21.json).
+It measures 1,447.881 dense native wall decisions/s (1,485.277/s for step plus
+observation) and 74,853.849 ticks/s on the directly comparable 30,000-tick
+48-body physics workload. The July 20
 [`exact-pipeline-paired-trig-2026-07-20.json`](../benchmarks/results/exact-pipeline-paired-trig-2026-07-20.json)
-is retained as the comparable post-trig artifact, while
+is retained as the historical comparable post-trig artifact, while
 [`exact-pipeline-final-2026-07-20.json`](../benchmarks/results/exact-pipeline-final-2026-07-20.json)
 is its pre-trig baseline.
 
-Final validation passes 10/10 exact CTest targets, 8/8 portable Release CTest
-targets, 8/8 portable ASAN/UBSAN targets, and 159 Python tests with two optional
-Gym skips. The exact corpus remains 4/4, including the full 47,019-step replay
-stream.
+Final validation passes 14/14 exact Release and 14/14 exact ASAN/UBSAN CTest
+targets, plus 8/8 portable Release and 8/8 portable ASAN/UBSAN targets. Hostile
+preload fixtures now run with the worker-linked ELF32 `libasan` first. The GNU
+worker/wrapper/API and fixtures are instrumented; immutable MSVC9 host
+instructions are explicitly verified as uninstrumented. The Python suite
+passes 204 tests with three expected skips: two optional Gym checks and the
+sanitizer-only topology assertion in a normal build.
+The exact corpus remains 4/4, with replay-level scoring/terminal parity and the
+active mutation/step/contact stream matching through all 47,019 steps.
 
 The corrected seed-123 reset regression pins the 20-block constructor state:
 10 rotten blocks at Y=200, 10 scripted blocks beginning at Y=60, RNG index 102,
@@ -293,6 +371,12 @@ two-record suppression makes the complete score timeline (`0 -> 88`), gauge
 events, creates, contacts, destroys, and transforms exact. The original replay
 wrapper additionally forces scene finish when records are exhausted; that
 loader-specific finish is not a normal RL episode rule.
+
+CTest runs both the standalone native replay runner and the public production
+`IrisuEnv` exact-worker path against these bundles. The production gate records
+the executed worker hash, canonical x87 control word, and live mapped exact
+library identity for every replay; it is integration evidence for the RL-facing
+backend rather than an inference from the native runner.
 
 The controlled seed-41 adjudication remains a smaller independent regression:
 original and clone both score `+8,+8` at tick 304 and finish the 520-record
@@ -411,6 +495,7 @@ Still not claimed:
 - fidelity for Metsu, EX-specific paths, menus, story, saves, or endings;
 - the 95% controlled discrete-probe fidelity threshold or qualitative
   scripted-policy transfer before controlled original-game evaluation;
+- statistically validated original-game spawn/difficulty distributions;
 - correctness of deprecated compatibility knobs as original mechanics.
 
 Long-horizon replay disagreement in the portable backend remains useful
@@ -421,4 +506,8 @@ The July 18/19 display attempts remain historical. July 20 produced four
 fresh-process external replay oracles plus the controlled seed-41 trace, but
 the bundles still lack the complete formal golden artifact set and
 five-category controlled coverage. The golden manifest therefore remains
-empty. No scripted policy has yet demonstrated qualitative transfer.
+empty. No scripted policy has yet demonstrated qualitative transfer. The
+representative exact backend remains below the numerical 20,000-decision/s
+engineering target, but that measured limitation was explicitly accepted as
+sufficient for RL on 2026-07-21; throughput is no longer a release blocker.
+Replay parity therefore still does not by itself authorize bulk RL.

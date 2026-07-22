@@ -332,11 +332,15 @@ deferred contacts, divergent actor/native state, and deferred-destruction/proxy
 churn; malformed object and wire snapshots are rejected without changing the
 live simulator.
 
-Remaining uncertainty is concentrated in long-horizon legacy Box2D numerical
-drift, the necessarily finite coverage of rare allocator/contact combinations,
-and modes or EX/Metsu states outside normal mode. Placeholder compatibility
-knobs are not nominal gameplay formulas and are identified as deprecated in the
-profile/configuration metadata.
+Remaining physics uncertainty is concentrated in the portable GNU backend's
+long-horizon numerical drift, unproven cross-machine identity, the necessarily
+finite coverage of rare allocator/contact combinations, and modes or EX/Metsu
+states outside normal mode. The opt-in exact worker matches the four observed
+v2.03 replay oracles and active mutation/step/contact stream through all 47,019
+steps; that bounded evidence does not prove
+unseen policy-generated states. Placeholder compatibility knobs are not nominal
+gameplay formulas and are identified as deprecated in the profile/configuration
+metadata.
 
 The retained compatibility-only fields are `cleanup_margin_x/y`,
 `floor_contact_tolerance`, `deletion_delay_ticks`, `bonus_interval_spawns`,

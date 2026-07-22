@@ -114,6 +114,78 @@ class TerminalCauseEnv(FakeEnv):
         return observation, reward, terminated, truncated, info
 
 
+class TimelineEnv(FakeEnv):
+    last_kwargs: dict[str, object] = {}
+
+    def __init__(self, **kwargs: object) -> None:
+        super().__init__()
+        type(self).last_kwargs = kwargs
+        self.gauge = 100
+        self.clears = 0
+        self.highest_chain = 0
+        self.physics_backend = "exact"
+
+    def exact_library_provenance(self) -> dict[str, object]:
+        return {"sha256": "a" * 64, "mapped_path": "/verified/exact.so"}
+
+    def _observation(self) -> dict[str, object]:
+        result = super()._observation()
+        result.update(
+            {
+                "gauge": self.gauge,
+                "qualifying_clear_count": self.clears,
+                "highest_chain": self.highest_chain,
+            }
+        )
+        return result
+
+    def step(self, action: object) -> tuple[dict[str, object], int, bool, bool, dict[str, object]]:
+        del action
+        self.tick += 1
+        self.gauge += 9
+        self.clears += 1
+        self.level = 2
+        self.score += 8
+        self.highest_chain = 2
+        events = [
+            {
+                "tick": self.tick,
+                "kind_name": "gauge_changed",
+                "a": 7,
+                "value": 10,
+                "detail": "normal burst landing",
+            },
+            {
+                "tick": self.tick,
+                "kind_name": "confirmed",
+                "value": 2,
+                "detail": "normal burst qualified",
+            },
+            {
+                "tick": self.tick,
+                "kind_name": "level_changed",
+                "value": 2,
+                "detail": "qualifying normal clears",
+            },
+            {
+                "tick": self.tick,
+                "kind_name": "score_changed",
+                "value": 8,
+                "detail": "normal burst block",
+            },
+            {
+                "tick": self.tick,
+                "kind_name": "gauge_changed",
+                "value": -1,
+                "detail": "scene clamp and passive drain",
+            },
+        ]
+        return self._observation(), 8, False, False, {
+            "events": events,
+            "invalid_action": False,
+        }
+
+
 class ReplayEvaluatorTests(unittest.TestCase):
     def setUp(self) -> None:
         self.frames = (
@@ -248,6 +320,42 @@ class ReplayEvaluatorTests(unittest.TestCase):
         self.assertEqual(occurrences["game_over"]["frame"], 1)
         self.assertEqual(report["cadence"]["terminal_frame"], 1)
         self.assertEqual(report["cadence"]["post_terminal_record_count"], 1)
+
+    def test_worker_mode_emits_reconstructible_oracle_streams_and_provenance(self) -> None:
+        data = struct.pack("<5i", 1, 2, 8, 2, 0) + bytes(32)
+        data += struct.pack("<I", evaluate_rpy.INSPECT_RPY.encode_frame(x=1, y=2))
+
+        report = evaluate_rpy.evaluate_bytes(
+            data,
+            layout="padded",
+            worker_path="/tmp/exact-worker",
+            include_timelines=True,
+            env_factory=TimelineEnv,
+            support_both_shots=False,
+        )
+
+        self.assertEqual(
+            TimelineEnv.last_kwargs,
+            {"physics_backend": "exact", "worker_path": "/tmp/exact-worker"},
+        )
+        self.assertEqual(report["exact_runtime_provenance"]["sha256"], "a" * 64)
+        output = report["oracle_output"]
+        self.assertEqual(output["score_timeline"], [[1, 8, 8]])
+        self.assertEqual(output["score_checkpoints"], [[1, 8, 8, 110, 2, 1]])
+        self.assertEqual(output["clear_checkpoints"], [[1, 2, 0, 110, 2, 1]])
+        self.assertEqual(output["level_checkpoints"], [[1, 2, 0, 110, 1]])
+        self.assertEqual(output["terminal_frame"], 1)
+
+    def test_library_and_worker_paths_are_mutually_exclusive(self) -> None:
+        data = struct.pack("<5i", 1, 1, 0, 0, 0) + bytes(32)
+        with self.assertRaisesRegex(ValueError, "mutually exclusive"):
+            evaluate_rpy.evaluate_bytes(
+                data,
+                layout="padded",
+                library_path="portable.so",
+                worker_path="exact-worker",
+                env_factory=FakeEnv,
+            )
 
 
 if __name__ == "__main__":

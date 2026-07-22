@@ -1,0 +1,56 @@
+{
+  "comparison": {
+    "all_contact_records_exact": true,
+    "all_getter_records_exact": true,
+    "all_recorded_commands_replayed": true,
+    "canonical_x87": true,
+    "commands": 10777297,
+    "contact_mismatches": 0,
+    "contacts": 573557,
+    "final_step": 47019,
+    "first_mismatch": null,
+    "getter_record_mismatches": 0,
+    "getter_records": 9810360,
+    "getter_value_mismatches": 0,
+    "getter_values": 12262950,
+    "method": "single-pass global-call-order replay; raw binary32 equality",
+    "scalar_getters": 7357770,
+    "schema": 1,
+    "status": "exact",
+    "velocity_getters": 2452590,
+    "x87_cw": "027f"
+  },
+  "exact_backend": {
+    "compiler": "cc (GCC) 16.1.1 20260625",
+    "helper_sha256": "f62019a75e3261f0eb5234a38ea958c45c0c0024cca3f287846ccc9923b4a8f8",
+    "helper_source": "/home/gabe/Documents/irisu/tools/exact-physics-prototype/getter_trace_replay.c",
+    "helper_source_sha256": "951e3635badfa6fe734db3a23b66893e671563778393bf20c43146a2d1a1fb6f",
+    "helper_supplied": false,
+    "library_device": "23",
+    "library_inode": 3967566,
+    "library_path": "/home/gabe/Documents/irisu/.tmp/exact-range-host-symbolic-20260721/libirisu_box2d_msvc_exact_multiworld.so",
+    "library_sha256": "ce14d1cab9ce4331bf494fe92bf657029487aec9f7435e7479b3c7cb579fafb5"
+  },
+  "original": {
+    "final_physics_step": 47019,
+    "path": "/home/gabe/Documents/irisu/reference/runs/replay-41449-getters-gdb-20260720-005/data/dll/box2d-trace.jsonl",
+    "records": 10777298,
+    "sha256": "e57730cbf284cdd8d369d17a7a3fe2bb9760014e74543efe6d9b09be217c827f",
+    "type_counts": {
+      "contact": 573557,
+      "create": 2368,
+      "destroy": 2368,
+      "dispose": 1,
+      "get_scalar": 7357770,
+      "get_v": 2452590,
+      "init": 1,
+      "proxy_loaded": 1,
+      "set_position": 336887,
+      "set_user_data": 2368,
+      "set_v": 2368,
+      "step": 47019
+    }
+  },
+  "schema": 1,
+  "status": "exact_all_getters"
+}

@@ -7,7 +7,6 @@ include(CheckCXXSourceCompiles)
 option(IRISU_BUILD_TESTS "Build native tests" ON)
 option(IRISU_BUILD_SHARED "Build the C ABI shared library" ON)
 option(IRISU_BUILD_BENCHMARKS "Build bounded native benchmark tools" ON)
-option(IRISU_BUILD_WEB "Build the single-threaded Emscripten module" OFF)
 set(IRISU_PHYSICS_BACKEND "portable" CACHE STRING
     "Physics backend: portable or exact-msvc")
 set_property(CACHE IRISU_PHYSICS_BACKEND PROPERTY STRINGS portable exact-msvc)
@@ -102,6 +101,30 @@ if(IRISU_PHYSICS_BACKEND STREQUAL "portable")
   set(irisu_physics_target irisu::box2d_legacy)
   set(irisu_physics_backend_label "portable-gnu-r58")
 elseif(IRISU_PHYSICS_BACKEND STREQUAL "exact-msvc")
+  # CMake's in-place install-RPATH editor pads some build RUNPATHs with an
+  # empty component, which the ELF loader interprets as the current directory.
+  # Relinking on install keeps both build and installed search paths explicit.
+  set(CMAKE_NO_BUILTIN_CHRPATH TRUE)
+  if(CMAKE_INSTALL_LIBDIR STREQUAL "" OR
+     IS_ABSOLUTE "${CMAKE_INSTALL_LIBDIR}" OR
+     CMAKE_INSTALL_LIBDIR MATCHES "[:;]" OR
+     CMAKE_INSTALL_LIBDIR MATCHES "(^|/)\\.\\.?(/|$)")
+    message(FATAL_ERROR
+      "The exact backend requires a normalized relative CMAKE_INSTALL_LIBDIR"
+    )
+  endif()
+  if(CMAKE_INSTALL_BINDIR STREQUAL "" OR
+     IS_ABSOLUTE "${CMAKE_INSTALL_BINDIR}" OR
+     CMAKE_INSTALL_BINDIR MATCHES "[:;]" OR
+     CMAKE_INSTALL_BINDIR MATCHES "(^|/)\\.\\.?(/|$)")
+    message(FATAL_ERROR
+      "The exact backend requires a normalized relative CMAKE_INSTALL_BINDIR"
+    )
+  endif()
+  file(RELATIVE_PATH irisu_install_libdir_from_bindir
+    "/${CMAKE_INSTALL_BINDIR}" "/${CMAKE_INSTALL_LIBDIR}")
+  set(irisu_exact_executable_install_rpath
+      "\$ORIGIN/${irisu_install_libdir_from_bindir}")
   if(NOT CMAKE_SIZEOF_VOID_P EQUAL 4)
     message(FATAL_ERROR
       "IRISU_PHYSICS_BACKEND=exact-msvc requires a 32-bit build (configure with -m32)"
@@ -151,6 +174,19 @@ elseif(IRISU_PHYSICS_BACKEND STREQUAL "exact-msvc")
       "Cannot validate IRISU_EXACT_BOX2D_LIBRARY: readelf was not found"
     )
   endif()
+  function(irisu_verify_exact_runpath target)
+    set(irisu_runpath_verifier
+        "${CMAKE_CURRENT_SOURCE_DIR}/tools/verify-elf-runpath.cmake")
+    set_property(TARGET ${target} APPEND PROPERTY LINK_DEPENDS
+      "${irisu_runpath_verifier}")
+    add_custom_command(TARGET ${target} POST_BUILD
+      COMMAND "${CMAKE_COMMAND}"
+        "-DIRISU_ELF=$<TARGET_FILE:${target}>"
+        "-DIRISU_READELF=${irisu_readelf}"
+        -P "${irisu_runpath_verifier}"
+      VERBATIM
+    )
+  endfunction()
   execute_process(
     COMMAND "${CMAKE_COMMAND}" -E env "LC_ALL=C"
             "${irisu_readelf}" -d "${IRISU_EXACT_BOX2D_LIBRARY}"
@@ -189,7 +225,7 @@ elseif(IRISU_PHYSICS_BACKEND STREQUAL "exact-msvc")
     )
   endif()
   if(irisu_exact_relocations MATCHES
-     "R_386_(JUMP_SLOT|GLOB_DAT)[^\n]*msvc_b2d_")
+     "R_386_[A-Z0-9_]+[^\n]*msvc_b2d_")
     message(FATAL_ERROR
       "IRISU_EXACT_BOX2D_LIBRARY contains preemptable internal msvc_b2d_* "
       "relocations; regenerate it with tools/host-msvc9-box2d-multiworld.py"
@@ -233,10 +269,10 @@ if(IRISU_GNU_X87_CONTROL_WORD_CAPABLE)
     IRISU_GNU_X87_CONTROL_WORD_ENVIRONMENT=1
   )
 endif()
-target_link_libraries(irisu_core PRIVATE ${irisu_physics_target})
-if(NOT EMSCRIPTEN)
-  target_link_libraries(irisu_core PUBLIC Threads::Threads)
-endif()
+target_link_libraries(irisu_core
+  PUBLIC Threads::Threads
+  PRIVATE ${irisu_physics_target}
+)
 if(IRISU_PHYSICS_BACKEND STREQUAL "exact-msvc")
   target_compile_definitions(irisu_core PRIVATE
     IRISU_EXACT_LIBRARY_SONAME="${irisu_exact_box2d_soname}"
@@ -249,51 +285,6 @@ if(IRISU_PHYSICS_BACKEND STREQUAL "exact-msvc")
 endif()
 irisu_enable_warnings(irisu_core)
 
-if(IRISU_BUILD_WEB)
-  if(NOT EMSCRIPTEN)
-    message(FATAL_ERROR "IRISU_BUILD_WEB requires the Emscripten toolchain")
-  endif()
-  if(NOT IRISU_PHYSICS_BACKEND STREQUAL "portable")
-    message(FATAL_ERROR "IRISU_BUILD_WEB supports only the portable physics backend")
-  endif()
-
-  add_executable(irisu-web-module
-    clone/bindings/c_api.cpp
-    clone/bindings/web_api.cpp
-  )
-  target_link_libraries(irisu-web-module PRIVATE irisu_core)
-  target_include_directories(irisu-web-module PRIVATE clone/include)
-  target_compile_definitions(irisu-web-module PRIVATE
-    IRISU_SINGLE_THREADED_C_API=1
-    IRISU_CXX_COMPILER_ID="${CMAKE_CXX_COMPILER_ID}"
-    IRISU_CXX_COMPILER_VERSION="${CMAKE_CXX_COMPILER_VERSION}"
-    IRISU_CMAKE_BUILD_TYPE="$<IF:$<BOOL:$<CONFIG>>,$<CONFIG>,unspecified>"
-    IRISU_LEGACY_FP_MODE="${IRISU_LEGACY_FP_MODE}"
-    IRISU_FP_ENVIRONMENT_MODE="${IRISU_FP_ENVIRONMENT_MODE}"
-    IRISU_PHYSICS_BACKEND="${irisu_physics_backend_label}"
-    IRISU_EXACT_LIBRARY_SHA256="${irisu_exact_box2d_sha256}"
-    IRISU_SYSTEM_PROCESSOR="${IRISU_SYSTEM_PROCESSOR}"
-    IRISU_POINTER_BITS=${IRISU_POINTER_BITS}
-  )
-  target_link_options(irisu-web-module PRIVATE
-    --no-entry
-    -sALLOW_MEMORY_GROWTH=1
-    -sDISABLE_EXCEPTION_CATCHING=0
-    -sENVIRONMENT=web
-    -sEXPORT_ES6=1
-    -sEXPORT_NAME=createIrisuModule
-    -sFILESYSTEM=0
-    -sMODULARIZE=1
-    "-sEXPORTED_FUNCTIONS=['_irisu_web_create','_irisu_web_destroy','_irisu_web_reset','_irisu_web_step']"
-    "-sEXPORTED_RUNTIME_METHODS=['cwrap']"
-  )
-  set_target_properties(irisu-web-module PROPERTIES
-    OUTPUT_NAME irisu-wasm
-    SUFFIX .js
-  )
-  irisu_enable_warnings(irisu-web-module)
-endif()
-
 add_executable(irisu-headless clone/cli/main.cpp)
 target_link_libraries(irisu-headless PRIVATE irisu_core)
 irisu_enable_warnings(irisu-headless)
@@ -304,19 +295,22 @@ if(IRISU_BUILD_BENCHMARKS)
   if(IRISU_PHYSICS_BACKEND STREQUAL "exact-msvc")
     target_compile_definitions(irisu-physics-benchmark PRIVATE
       IRISU_EXACT_FORWARD_BENCHMARK=1)
+    irisu_verify_exact_runpath(irisu-physics-benchmark)
   endif()
   irisu_enable_warnings(irisu-physics-benchmark)
 endif()
 
 if(IRISU_PHYSICS_BACKEND STREQUAL "exact-msvc")
   set_target_properties(irisu-headless PROPERTIES
-    INSTALL_RPATH "\$ORIGIN/../${CMAKE_INSTALL_LIBDIR}"
+    INSTALL_RPATH "${irisu_exact_executable_install_rpath}"
   )
+  irisu_verify_exact_runpath(irisu-headless)
 
   add_executable(irisu-exact-replay
     tools/exact-physics-prototype/replay_runner.cpp)
   target_link_libraries(irisu-exact-replay PRIVATE irisu_core)
   irisu_enable_warnings(irisu-exact-replay)
+  irisu_verify_exact_runpath(irisu-exact-replay)
 
   add_executable(irisu-exact-worker
     tools/exact-physics-prototype/ipc_worker.cpp)
@@ -327,9 +321,10 @@ if(IRISU_PHYSICS_BACKEND STREQUAL "exact-msvc")
     IRISU_PHYSICS_BACKEND="${irisu_physics_backend_label}"
   )
   set_target_properties(irisu-exact-worker PROPERTIES
-    INSTALL_RPATH "\$ORIGIN/../${CMAKE_INSTALL_LIBDIR}"
+    INSTALL_RPATH "${irisu_exact_executable_install_rpath}"
   )
   irisu_enable_warnings(irisu-exact-worker)
+  irisu_verify_exact_runpath(irisu-exact-worker)
 endif()
 
 if(IRISU_BUILD_SHARED)
@@ -356,6 +351,7 @@ if(IRISU_BUILD_SHARED)
   )
   if(IRISU_PHYSICS_BACKEND STREQUAL "exact-msvc")
     set_target_properties(irisu_capi PROPERTIES INSTALL_RPATH "\$ORIGIN")
+    irisu_verify_exact_runpath(irisu_capi)
   endif()
   if(UNIX AND NOT APPLE)
     set(irisu_export_map "${CMAKE_CURRENT_SOURCE_DIR}/clone/bindings/irisu_clone.map")
@@ -406,6 +402,13 @@ if(IRISU_BUILD_TESTS)
     set_target_properties(irisu-exact-msvc-interposer-test PROPERTIES
       OUTPUT_NAME irisu_exact_msvc_interposer_test)
     irisu_enable_warnings(irisu-exact-msvc-interposer-test)
+    add_library(irisu-exact-dlsym-interposer-test SHARED
+      tests/native/exact_dlsym_interposer.cpp)
+    set_target_properties(irisu-exact-dlsym-interposer-test PROPERTIES
+      OUTPUT_NAME irisu_exact_dlsym_interposer_test)
+    target_link_libraries(irisu-exact-dlsym-interposer-test PRIVATE
+      ${CMAKE_DL_LIBS})
+    irisu_enable_warnings(irisu-exact-dlsym-interposer-test)
 
     add_executable(irisu-exact-backend-tests
       tests/native/test_exact_backend.cpp)
@@ -433,6 +436,7 @@ if(IRISU_BUILD_TESTS)
           "IRISU_EXACT_WORKER=$<TARGET_FILE:irisu-exact-worker>"
           "IRISU_EXACT_B2D_INTERPOSER=$<TARGET_FILE:irisu-exact-b2d-interposer-test>"
           "IRISU_EXACT_MSVC_INTERPOSER=$<TARGET_FILE:irisu-exact-msvc-interposer-test>"
+          "IRISU_EXACT_DLSYM_INTERPOSER=$<TARGET_FILE:irisu-exact-dlsym-interposer-test>"
           "PYTHONDONTWRITEBYTECODE=1"
           "${Python3_EXECUTABLE}"
           "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_exact_ipc_protocol.py"
@@ -451,6 +455,12 @@ if(IRISU_BUILD_TESTS)
           "${Python3_EXECUTABLE}"
           "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_exact_padded_stress.py"
       )
+      add_test(NAME irisu-exact-padded-fast-path-tests
+        COMMAND "${CMAKE_COMMAND}" -E env
+          "PYTHONDONTWRITEBYTECODE=1"
+          "${Python3_EXECUTABLE}"
+          "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_exact_padded_fast_path.py"
+      )
       add_test(NAME irisu-exact-fast-snapshot-tests
         COMMAND "${CMAKE_COMMAND}" -E env
           "IRISU_EXACT_WORKER=$<TARGET_FILE:irisu-exact-worker>"
@@ -464,6 +474,20 @@ if(IRISU_BUILD_TESTS)
           "PYTHONDONTWRITEBYTECODE=1"
           "${Python3_EXECUTABLE}"
           "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_exact_fast_snapshot_api.py"
+      )
+      add_test(NAME irisu-exact-vector-snapshot-concurrency-tests
+        COMMAND "${CMAKE_COMMAND}" -E env
+          "IRISU_EXACT_WORKER=$<TARGET_FILE:irisu-exact-worker>"
+          "PYTHONDONTWRITEBYTECODE=1"
+          "${Python3_EXECUTABLE}"
+          "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_exact_vector_snapshot_concurrency.py"
+      )
+      add_test(NAME irisu-exact-actor-rollout-tests
+        COMMAND "${CMAKE_COMMAND}" -E env
+          "IRISU_EXACT_WORKER=$<TARGET_FILE:irisu-exact-worker>"
+          "PYTHONDONTWRITEBYTECODE=1"
+          "${Python3_EXECUTABLE}"
+          "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_exact_actor_rollout.py"
       )
 
       set(irisu_exact_corpus_dir
@@ -502,6 +526,18 @@ if(IRISU_BUILD_TESTS)
             --compact
         )
         set_tests_properties(irisu-exact-replay-corpus-tests PROPERTIES
+          TIMEOUT 1200
+        )
+        add_test(NAME irisu-exact-production-replay-corpus-tests
+          COMMAND "${Python3_EXECUTABLE}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/tools/evaluate-exact-replay-corpus.py"
+            --worker "$<TARGET_FILE:irisu-exact-worker>"
+            --corpus "${irisu_exact_corpus_dir}"
+            --oracle-root "${irisu_exact_oracle_root}"
+            --require-observed-parity
+            --compact
+        )
+        set_tests_properties(irisu-exact-production-replay-corpus-tests PROPERTIES
           TIMEOUT 1200
         )
       else()

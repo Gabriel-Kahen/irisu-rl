@@ -144,8 +144,8 @@ evidence and hashes are archived in
 
 The current exact-forward diagnostic compiles the same pristine source with
 MSVC 9 RTM (`/O2 /fp:precise /MT /D NDEBUG`), converts the COFF objects to a
-native ELF32 library, and runs them under control word `0x027f`. Across the
-complete 47,019-step replay it matches every active wrapper-operation stream:
+native ELF32 library, and runs them under control word `0x027f`. Through all
+47,019 steps of the replay it matches every active wrapper-operation stream:
 2,368 creates, 2,368 velocity writes, 2,368 user-data writes, 183,387 transform
 writes, 2,344 gameplay destroys, 47,019 steps, and 573,557 contact-cursor
 results. This resolves compiler/code generation as the cause of the portable
@@ -162,20 +162,53 @@ Its source, construction recipe, comparison method, exact bounds, and hashes
 are recorded in `reference/native-box2d/README.md` and
 `reference/native-box2d/validation.json`.
 
-The forward wrapper resolves a typed table of 15 `b2d_*` entrypoints before
-constructing a simulator. Every target must be a unique executable address
-owned by the genuine exact-library link-map object, all targets must share one
-device/inode mapping, and each global binding must equal the attested call
-target. The worker publishes that count and mapping identity through protocol
-opcode 13; Python requires it to match an independent live-map capture, so a
-mapped genuine SONAME alone cannot conceal call-target interposition.
+The active comparison covers 813,412 mutation, step, and contact records. The
+original trace's other 9,810,360 records are getter-only observations. They are
+now directly compared by a second generic harness that replays all 10,777,297
+recorded commands after the proxy header in original global order against the
+exact host. Its 7,357,770 scalar getters and 2,452,590 velocity getters contain
+12,262,950 returned binary32 words; every word and all 573,557 contact results
+match through step 47,019, with no first mismatch. The harness derives its
+operation stream and expectations from the trace rather than replay-specific
+code. The tracked
+[`getter-parity-2026-07-21.json`](../reference/native-box2d/getter-parity-2026-07-21.json)
+report has SHA-256
+`815e8805ea777fdcecc265ee1a669c4664e993a74f92a05cfe2f134195703ef8`.
 
-Exact `PaddedVectorEnv` concurrency remains capped at eight by default, but an
-explicit `workers=` request may use more independent exact worker processes.
-The portable backend remains capped at eight. Separately, `Simulator` mechanics
-configuration is immutable after validation, so its configuration hash is
-computed once at construction and reused by transitions, diagnostics, and
-snapshot compatibility checks without changing its value.
+The forward wrapper resolves a typed table of 15 `b2d_*` entrypoints before
+constructing a simulator and performs every physics operation through those
+stored pointers. Every target must be a unique executable address owned by the
+genuine exact-library link-map object, all targets must share one device/inode
+mapping, and each process-global binding must equal the attested call target.
+The `dladdr1` name and exact symbol-start address must also equal the requested
+entrypoint. Thus an ordinary preload exporting (for example)
+`b2d_world_step`, and a tested interposed-`dlsym` permutation of the genuine
+host's X/Y getters, are rejected before simulation. Worker opcode 13 publishes
+the count and target mapping identity; Python requires it to equal an
+independently captured live library. Production launch uses working directory
+`/`, removes every inherited `LD_*` variable and `GLIBC_TUNABLES`, and forces
+x87 control word `0x027f`. The generated host also links its private
+`msvc_b2d_*` bridge calls with `-Bsymbolic-functions`. The hosting tool and
+exact CMake configuration reject every `R_386_*` relocation naming those
+helpers. These are fail-closed provenance checks against the tested loader
+attacks, not a sandbox for arbitrary code already executing in the worker.
+
+The generated host carries a stable `DT_SONAME`, is retained by exact consumers
+as a `DT_NEEDED` dependency, and is reopened only with `RTLD_NOLOAD`. Exact
+post-link validation requires a nonempty `RPATH`/`RUNPATH` whose components are
+absolute or `$ORIGIN`-relative; empty/current-directory and bare relative
+components are rejected. Install relinks exact executables with origin-relative
+lookup and places the host in the configured library directory.
+
+Exact `PaddedVectorEnv(workers=None)` now uses
+`min(num_envs, 4 * process-visible logical CPUs)` independent worker processes;
+an explicit `workers=` request remains authoritative. The portable backend
+remains capped at eight. A supplemental 8-to-64-lane scaling probe motivated
+this heuristic default, but one sample per width does not establish a universal
+optimum and the probe is not the formal throughput gate. Separately, `Simulator`
+mechanics configuration is immutable after validation, so its configuration
+hash is computed once at construction and reused by transitions, diagnostics,
+and snapshot compatibility checks without changing its value.
 
 ### Paired and positive-zero exact-runtime trigonometry
 
@@ -219,9 +252,13 @@ floating-point result stream. A pinned seven-run A/B improves the dense core
 from 1,246.873 to 1,448.173 decisions/s (+16.14%). The paired source-manifested
 pipeline records +16.82% for the dense native simulator, +14.37% for the 48-body
 physics workload, and +13.50% for eight exact padded lanes. It remains exact on
-all four replay oracles and the full 47,019-step stream. The retained host
-passes 10/10 exact CTest targets; portable Release and ASAN/UBSAN builds each
-pass 8/8, and the Python suite passes 159 tests with two optional Gym skips.
+all four replay oracles and the active mutation/step/contact stream through all
+47,019 steps. The retained host passes 14/14 exact Release and 14/14 exact
+ASAN/UBSAN CTest targets; portable Release and ASAN/UBSAN builds each pass 8/8.
+Hostile preload fixtures run with the worker-linked ELF32 `libasan` first. The
+GNU worker/wrapper/API and fixtures are instrumented, while a regression
+explicitly verifies that immutable MSVC9 host instructions are not. The Python
+suite passes 204 tests with three expected skips in a normal build.
 
 An additional old-host/new-host differential replay produced byte-identical
 813,508-record wrapper traces (13,757,907 bytes) through tick 47,019, both with
@@ -230,18 +267,43 @@ This covers every traced create, velocity/user-data/transform write, destroy,
 step, and contact-cursor result, not only the terminal score.
 
 The current
-[`exact-pipeline-range-safe-wide-2026-07-20.json`](../benchmarks/results/exact-pipeline-range-safe-wide-2026-07-20.json)
-records 37/37 current source hashes, 64/64 true cross-path equivalence leaves,
-and SHA-256
-`91c8db5feb9d3c8339d101940f05a42d93a4490641745964a0ca427553b8b8e9`.
-It measures 7,199.041 decisions/s at an explicit 32 exact lanes, 35.995% of the
-20,000-decision/s target (2.778x short), plus 1,498.136 dense native decisions/s
-and 75,819.177 ticks/s on the directly comparable 30,000-tick 48-body physics
-workload. The earlier
+[`exact-pipeline-adaptive-wide-perf-2026-07-21.json`](../benchmarks/results/exact-pipeline-adaptive-wide-perf-2026-07-21.json)
+records 38/38 current runtime-source hashes and 88/88 true cross-path equivalence
+leaves, and SHA-256
+`4067fdff9360989adb696bdc5ad7d98983729f9fa424271fbd7e3e1fb9164eef`.
+It records worker SHA-256
+`4faa4508a89df3e1e62b80e2871b6a35b5913f220d53fe5de43408ad6512c261`
+and host SHA-256
+`ce14d1cab9ce4331bf494fe92bf657029487aec9f7435e7479b3c7cb579fafb5`.
+It measures 9,685.170 decisions/s at 64 exact lanes, 48.426% of the
+20,000-decision/s target (2.065x short), plus 1,447.881 dense native wall
+decisions/s (1,485.277/s for step plus observation) and 74,853.849 ticks/s on
+the directly comparable 30,000-tick 48-body physics workload. The July 20
 [`exact-pipeline-paired-trig-2026-07-20.json`](../benchmarks/results/exact-pipeline-paired-trig-2026-07-20.json)
-remains the comparable post-pair artifact, and
+remains the historical comparable post-pair artifact, and
 [`exact-pipeline-final-2026-07-20.json`](../benchmarks/results/exact-pipeline-final-2026-07-20.json)
 is its pre-trig baseline.
+
+The follow-up
+[`exact-core-solver-source-optimizations-2026-07-21.json`](../benchmarks/results/exact-core-solver-source-optimizations-2026-07-21.json)
+evaluates two MSVC9-only exact-preserving source changes against a predeclared
+3% integration threshold. Guarding static-body position/rotation stores improves
+the dense median by 0.648%; caching rotated velocity anchors improves it by
+0.472%. Both variants match the exact 47,019-step replay, the 813,508-record
+wrapper trace, and the runtime trig gate, but neither was retained. Their full
+10,777,297-command getter replay was intentionally not run after they failed the
+performance threshold. The artifact SHA-256 is
+`6fe2b8c482e8764ff64577261d839d552ae7c4a5a996c538bbead2a135ffcb71`.
+Its candidate source/object/host inputs were local and unarchived. The report
+retains their hashes, source-level descriptions, machine-code audit, and parity
+results, but it is not a clean-checkout rebuild recipe.
+
+Scheduling and rollout changes do not alter this physics source. The adaptive
+exact-worker default only changes how many isolated processes are in flight.
+The experimental actor pool keeps the same worker frames and one-world-per-
+process lifecycle, but executes an independent policy for multiple decisions
+inside each lane task before joining results in lane order. Such policies must
+use lane-private or thread-safe mutable state.
 
 Every public simulator and C API operation runs inside a thread-local floating-
 point boundary and restores the caller's complete environment on return or

@@ -68,6 +68,7 @@ _FAST_TOKEN_BYTES = 16
 _MAXIMUM_BRANCH_ADDRESS_BYTES = 108
 _EXACT_ATTESTATION_SCHEMA = 1
 _EXACT_ENTRYPOINT_COUNT = 15
+_CANONICAL_X87_CONTROL_WORD = 0x027F
 
 _BODY_KIND_NAMES = ("piece", "projectile", "bonus")
 _SHAPE_NAMES = ("circle", "box", "triangle")
@@ -84,6 +85,10 @@ _SNAPSHOT_SCHEMA = 0x45580001
 _SNAPSHOT_PREFIX = struct.Struct("<IIQIIQQ32s")
 _SNAPSHOT_CHECKSUM_SIZE = 32
 _STATE_PERSON = b"irisu-xstate-v1"
+
+_BODY_KIND_INVALID = bytes(value > 2 for value in range(256))
+_BODY_LIFECYCLE_INVALID = bytes(value > 4 for value in range(256))
+_BODY_RESERVED_INVALID = bytes(value != 0 for value in range(256))
 
 
 class ExactProtocolError(NativeError):
@@ -605,6 +610,47 @@ def _write_all(stream: BinaryIO, data: bytes) -> None:
     stream.flush()
 
 
+def _pack_step_request(
+    kind: int,
+    x: float,
+    y: float,
+    wait_ticks: int,
+    suppress_fresh_edges: bool = False,
+) -> bytes:
+    """Validate and encode one action exactly once for a worker request."""
+
+    if (
+        type(kind) is int
+        and type(x) is float
+        and type(y) is float
+        and type(wait_ticks) is int
+    ):
+        if not 0 <= kind <= 3:
+            raise ValueError("action kind must be in [0, 3]")
+        if not 0 <= wait_ticks <= 0xFFFFFFFF:
+            raise ValueError("wait_ticks must fit in uint32")
+        return _STEP_REQUEST.pack(
+            kind, x, y, wait_ticks, int(bool(suppress_fresh_edges))
+        )
+
+    if not isinstance(kind, Integral) or isinstance(kind, bool):
+        raise TypeError("action kind must be an integer")
+    if not isinstance(wait_ticks, Integral) or isinstance(wait_ticks, bool):
+        raise TypeError("wait_ticks must be an integer")
+    if not isinstance(x, Real) or isinstance(x, bool):
+        raise TypeError("x must be a real number")
+    if not isinstance(y, Real) or isinstance(y, bool):
+        raise TypeError("y must be a real number")
+    kind, wait_ticks = int(kind), int(wait_ticks)
+    if not 0 <= kind <= 3:
+        raise ValueError("action kind must be in [0, 3]")
+    if not 0 <= wait_ticks <= 0xFFFFFFFF:
+        raise ValueError("wait_ticks must fit in uint32")
+    return _STEP_REQUEST.pack(
+        kind, float(x), float(y), wait_ticks, int(bool(suppress_fresh_edges))
+    )
+
+
 def _decode_exact_attestation(payload: bytes) -> tuple[int, str, int]:
     if len(payload) < _EXACT_ATTESTATION_FIXED.size + 2:
         raise ExactProtocolError("exact call-target attestation is truncated")
@@ -755,10 +801,24 @@ def _validate_raw_observation(payload: bytes) -> tuple[tuple[Any, ...], int]:
     body_end = body_begin + body_count * _BODY.size
     if len(payload) - body_begin < body_count * _BODY.size:
         raise ExactProtocolError("truncated exact observation bodies")
-    for offset in range(body_begin, body_end, _BODY.size):
-        kind, shape, lifecycle, reserved = payload[offset + 96 : offset + 100]
-        if kind > 2 or shape > 2 or lifecycle > 4 or reserved:
-            raise ExactProtocolError("exact observation contains invalid body metadata")
+    # Validate every packed metadata byte while keeping the common path in the
+    # C-level bytes primitives.  A Python loop and four-byte slice per body is
+    # material at dense-board vector widths.
+    if (
+        1 in payload[body_begin + 96 : body_end : _BODY.size].translate(
+            _BODY_KIND_INVALID
+        )
+        or 1 in payload[body_begin + 97 : body_end : _BODY.size].translate(
+            _BODY_KIND_INVALID
+        )
+        or 1 in payload[body_begin + 98 : body_end : _BODY.size].translate(
+            _BODY_LIFECYCLE_INVALID
+        )
+        or 1 in payload[body_begin + 99 : body_end : _BODY.size].translate(
+            _BODY_RESERVED_INVALID
+        )
+    ):
+        raise ExactProtocolError("exact observation contains invalid body metadata")
     return header, body_end
 
 
@@ -883,6 +943,20 @@ def find_exact_worker(explicit: str | os.PathLike[str] | None = None) -> Path:
     )
 
 
+def _exact_worker_launch_environment() -> dict[str, str]:
+    """Return a deterministic environment without dynamic-loader injection."""
+
+    environment = {
+        key: value
+        for key, value in os.environ.items()
+        if not key.startswith("LD_") and key != "GLIBC_TUNABLES"
+    }
+    if trace_path := environment.get("IRISU_EXACT_TRACE"):
+        environment["IRISU_EXACT_TRACE"] = os.path.abspath(trace_path)
+    environment["IRISU_EXACT_CW"] = hex(_CANONICAL_X87_CONTROL_WORD)
+    return environment
+
+
 class ExactWorkerClient:
     """Own one persistent 32-bit exact worker and its single physics world."""
 
@@ -902,6 +976,8 @@ class ExactWorkerClient:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 bufsize=0,
+                cwd=os.sep,
+                env=_exact_worker_launch_environment(),
             )
         except OSError as exc:
             raise ExactWorkerError(f"failed to launch exact worker {self.path}: {exc}") from exc
@@ -982,6 +1058,10 @@ class ExactWorkerClient:
                 or self.info.process_model != 1
             ):
                 raise ExactProtocolError("exact worker exposes an incompatible ABI")
+            if self.info.x87_control_word != _CANONICAL_X87_CONTROL_WORD:
+                raise ExactProtocolError(
+                    "exact worker does not expose the canonical x87 control word"
+                )
             if self.info.backend != _EXACT_BACKEND:
                 raise ExactProtocolError(
                     "exact worker is not the required exact multiworld backend "
@@ -1286,23 +1366,12 @@ class ExactWorkerClient:
         *,
         suppress_fresh_edges: bool,
     ) -> None:
-        if not isinstance(kind, Integral) or isinstance(kind, bool):
-            raise TypeError("action kind must be an integer")
-        if not isinstance(wait_ticks, Integral) or isinstance(wait_ticks, bool):
-            raise TypeError("wait_ticks must be an integer")
-        if not isinstance(x, Real) or isinstance(x, bool):
-            raise TypeError("x must be a real number")
-        if not isinstance(y, Real) or isinstance(y, bool):
-            raise TypeError("y must be a real number")
-        kind, wait_ticks = int(kind), int(wait_ticks)
-        if not 0 <= kind <= 3:
-            raise ValueError("action kind must be in [0, 3]")
-        if not 0 <= wait_ticks <= 0xFFFFFFFF:
-            raise ValueError("wait_ticks must fit in uint32")
-        payload = _STEP_REQUEST.pack(
-            kind, float(x), float(y), wait_ticks, int(bool(suppress_fresh_edges))
+        self._begin_request(
+            opcode,
+            _pack_step_request(
+                kind, x, y, wait_ticks, suppress_fresh_edges
+            ),
         )
-        self._begin_request(opcode, payload)
 
     def receive_step(self) -> ExactTransition:
         return _decode_transition(self.receive_step_payload())
@@ -1822,11 +1891,12 @@ class ExactSimulator:
             if self._pending_action is not None:
                 raise NativeError("exact simulator already has a pending step")
             client = self._require_open()
-            sender = client.send_step_padded if padded else client.send_step
-            sender(action_kind, x, y, wait_ticks)
-            self._pending_action = _STEP_REQUEST.pack(
-                int(action_kind), float(x), float(y), int(wait_ticks), 0
+            action = _pack_step_request(action_kind, x, y, wait_ticks)
+            client._begin_request(
+                _STEP_PADDED if padded else _STEP,
+                action,
             )
+            self._pending_action = action
 
     def receive_step_typed(self) -> ExactTransition:
         """Finish a step previously started by :meth:`send_step`."""

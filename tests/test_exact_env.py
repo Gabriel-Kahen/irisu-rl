@@ -208,9 +208,66 @@ class ExactBackendArgumentTests(unittest.TestCase):
                 worker_path="worker",
             )
 
+    def test_padded_validation_checks_every_body_metadata_field(self) -> None:
+        header = exact_ipc_module._OBSERVATION_HEADER.pack(
+            7, 11, 2993, 40_000, 2,
+            130.0, 120.0, 320.0, 250.0, 120.0, 370.0,
+            3, 4, 96, 5, 2, 0, 0, 0, 0,
+        )
+
+        def body(identifier: int, kind: int, shape: int, lifecycle: int) -> bytes:
+            return exact_ipc_module._BODY.pack(
+                0, 0, 0,
+                0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+                identifier, 0, 0, 0, kind, shape, lifecycle, 0,
+            )
+
+        suffix = exact_ipc_module._TRANSITION.pack(
+            17, 0, 123, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+        ) + exact_ipc_module._EVENT_GENERATION.pack(9)
+        payload = bytearray(header + body(1, 0, 0, 0) + body(2, 2, 2, 4) + suffix)
+        body_end, config_hash, generation = (
+            exact_ipc_module._validate_raw_padded_transition(bytes(payload))
+        )
+        self.assertEqual(
+            (body_end, config_hash, generation),
+            (
+                exact_ipc_module._OBSERVATION_HEADER.size
+                + 2 * exact_ipc_module._BODY.size,
+                123,
+                9,
+            ),
+        )
+
+        for body_index in range(2):
+            for field_offset, invalid_value in ((96, 3), (97, 3), (98, 5), (99, 1)):
+                with self.subTest(body=body_index, field=field_offset):
+                    corrupted = payload.copy()
+                    corrupted[
+                        exact_ipc_module._OBSERVATION_HEADER.size
+                        + body_index * exact_ipc_module._BODY.size
+                        + field_offset
+                    ] = invalid_value
+                    with self.assertRaisesRegex(
+                        ExactProtocolError, "invalid body metadata"
+                    ):
+                        exact_ipc_module._validate_raw_padded_transition(
+                            bytes(corrupted)
+                        )
+
+        destination = padded_module.ExactPaddedTransition()
+        transition, decoded_generation = padded_module._decode_exact_transition(
+            bytes(payload), destination
+        )
+        self.assertEqual(decoded_generation, 9)
+        self.assertEqual(transition.observation.body_count, 2)
+        self.assertEqual(transition.observation.bodies[1].id, 2)
+        self.assertEqual(transition.observation.bodies[1].lifecycle, 4)
+        self.assertEqual(transition.config_hash, 123)
+
     def test_exact_explicit_workers_exceed_default_portable_cap(self) -> None:
         cases = (
-            ("exact", None, 8),
+            ("exact", None, 12),
             ("exact", 5, 5),
             ("exact", 12, 12),
             ("exact", 20, 12),
@@ -222,6 +279,8 @@ class ExactBackendArgumentTests(unittest.TestCase):
             padded_module, "ExactSimulator", FakeExactSimulator
         ), mock.patch.object(
             padded_module, "NativeSimulator", FakeNativeSimulator
+        ), mock.patch.object(
+            padded_module.os, "sched_getaffinity", return_value={0, 1, 2}
         ):
             for backend, workers, expected in cases:
                 with self.subTest(backend=backend, workers=workers):
@@ -234,15 +293,16 @@ class ExactBackendArgumentTests(unittest.TestCase):
                     with PaddedVectorEnv(12, **kwargs) as vector:
                         self.assertEqual(vector.workers, expected)
 
-    def test_exact_explicit_workers_send_more_than_eight_lanes(self) -> None:
+    def test_exact_adaptive_default_sends_more_than_eight_lanes(self) -> None:
         FakeExactSimulator.reset_tracking()
         with mock.patch.object(
             padded_module, "ExactSimulator", FakeExactSimulator
         ), mock.patch.object(
             padded_module, "_decode_exact_transition", decode_fake_exact_transition
+        ), mock.patch.object(
+            padded_module.os, "sched_getaffinity", return_value={0, 1, 2}
         ), PaddedVectorEnv(
             12,
-            workers=12,
             physics_backend="exact",
             worker_path="unused",
         ) as vector:
@@ -333,6 +393,18 @@ class ExactBackendArgumentTests(unittest.TestCase):
         with mock.patch.object(ExactWorkerClient, "_hello", hello):
             with self.assertRaisesRegex(
                 ExactProtocolError, "required exact multiworld backend"
+            ):
+                ExactWorkerClient(sys.executable)
+
+    def test_worker_handshake_rejects_noncanonical_x87_control_word(self) -> None:
+        def hello(client: ExactWorkerClient) -> ExactWorkerInfo:
+            return self.worker_info(
+                pid=client._transport_pid, x87_control_word=0x037F
+            )
+
+        with mock.patch.object(ExactWorkerClient, "_hello", hello):
+            with self.assertRaisesRegex(
+                ExactProtocolError, "canonical x87 control word"
             ):
                 ExactWorkerClient(sys.executable)
 

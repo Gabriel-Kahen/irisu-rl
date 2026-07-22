@@ -133,15 +133,27 @@ embeds `linked_exact_library` for the host actually mapped by the live worker.
 The environment captures the worker executable only after Hello proves `exec`
 completed, then verifies the mapped library's path, device, inode, ELF segments,
 worker and client mount identities, metadata, and bytes against the handshake
-SHA-256. It also requires the worker's 15-target runtime attestation to match
-that independently captured mapping, preventing a mapped genuine host from
-masking interposed `b2d_*` calls. The scorer independently rehashes both artifacts before and after each
-scenario and rejects unstable or inconsistent provenance.
+SHA-256. Production launch uses working directory `/`, removes every inherited
+`LD_*` variable and `GLIBC_TUNABLES`, and forces x87 control word `0x027f`. The
+15 typed targets are the forward wrapper's actual physics call path, not a
+side-channel symbol sample. Each target must have the requested `dladdr1` name
+and exact symbol-start address in the captured host, and its global binding must
+equal the stored pointer. The scorer requires worker opcode 13's target count
+and mapping identity to match that independently captured library. Tests reject
+both ordinary `b2d_*` interposition and an interposed-`dlsym` same-host X/Y
+permutation. The generated host additionally binds private `msvc_b2d_*` calls
+with `-Bsymbolic-functions` and is rejected if any `R_386_*` relocation names
+those helpers. These are fail-closed provenance checks for the tested loader
+attacks, not a general in-process sandbox. The scorer independently rehashes
+both artifacts before and after each scenario and rejects unstable or
+inconsistent provenance.
 
 This tool scores the controlled-scenario subgate only. Even an exit-0 report
 explicitly leaves the full `clone.md` fidelity gate false: a separate hashed
 statistical comparison of spawn/difficulty distributions and an original-game
 policy-transfer result must still be supplied and combined with this report.
+The current representative exact backend also remains below the separate
+20,000-decision/s engineering gate.
 
 Exit status `0` means the controlled-scenario subgate passed, `1` means
 admissible scenarios were evaluated and failed, and `2` means the

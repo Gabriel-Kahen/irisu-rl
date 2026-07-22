@@ -100,16 +100,31 @@ CMake rejects an exact host without that SONAME so the linker cannot capture
 its build-time absolute path. `cmake --install` places the host beside the C
 ABI library and gives the installed executables origin-relative lookup paths;
 the resulting install tree can therefore be moved as a unit.
+The exact host remains a `DT_NEEDED` dependency and the adapter reopens only the
+already-loaded object with `RTLD_NOLOAD`. A post-link verifier requires every
+exact consumer to have a nonempty `RPATH`/`RUNPATH` made only of absolute or
+`$ORIGIN`-relative components. Empty/current-directory and bare relative
+components fail the build; install relinks rather than padding a build path
+with an empty loader-search component.
 
-The exact-forward adapter additionally attests its 15 resolved `b2d_*` call
-targets before simulator construction. They must be unique executable
-addresses owned by this library's link-map object, share one device/inode
-mapping, and match their process-global bindings. Worker opcode 13 exposes the
-count and mapping identity for an independent Python `/proc` comparison, so
-preloaded interposition cannot pass merely because the genuine SONAME remains
-mapped.
+The exact-forward adapter resolves 15 typed `b2d_*` pointers before simulator
+construction and uses those stored pointers for every physics call. Their
+targets must be unique executable addresses owned by this library's link-map
+object, share one device/inode mapping, and match their process-global
+bindings. Every target's `dladdr1` symbol name and exact symbol-start address
+must equal the requested entrypoint. Worker opcode 13 exposes the count and
+target mapping identity; Python requires it to equal an independent live-library
+capture. Production launch uses working directory `/`, removes every inherited
+`LD_*` variable and `GLIBC_TUNABLES`, and forces x87 control word `0x027f`.
+Consequently, an ordinary preload exporting `b2d_world_step` is rejected even
+though the genuine SONAME remains mapped, and a tested interposed-`dlsym`
+same-host X/Y permutation fails the symbol-identity check. The library's lower
+`msvc_b2d_*` bridge calls are linked with `-Bsymbolic-functions`, and both the
+hosting tool and exact CMake reject every `R_386_*` relocation naming those
+helpers. These are fail-closed provenance checks for the tested loader attacks,
+not a general sandbox for arbitrary code already executing inside the worker.
 
-## Validation completed 2026-07-20
+## Validation completed 2026-07-20; revalidated 2026-07-21
 
 - The C smoke test matched every position, rotation, raw velocity, and contact
   bit for 180 steps against the validated legacy exact library.
@@ -124,27 +139,47 @@ mapped.
 - The pre-trig and paired hosts produced byte-identical 813,508-record,
   13,757,907-byte wrapper traces through that replay. Both trace SHA-256 values
   are `cde35ca60b5511678edf128ed8f3ae09c8cf00e240696325c4acc8681f829eb0`.
+- The July 21 post-attestation comparison report has SHA-256
+  `1d2109141426119b24c1333a9367d0e2bd84b79bd74ee4e6c040bdb3288ee29d`
+  and reports no first mismatch.
+- Of those records, 813,412 active mutation/step/contact records were compared,
+  including all 573,557 contacts. A second global-call-order replay directly
+  matched the original trace's 9,810,360 getter-only records and all 12,262,950
+  returned binary32 words against the exact host through step 47,019. Its
+  [`tracked report`](../getter-parity-2026-07-21.json) SHA-256 is
+  `815e8805ea777fdcecc265ee1a669c4664e993a74f92a05cfe2f134195703ef8`;
+  getter, contact, and first-mismatch counts are all zero/null.
 - The exact replay corpus evaluator reported 4/4 full scoring, terminal-state,
   score-timeline, and rot-penalty-timeline parity.
-- The full current gate passes 10/10 exact CTest targets, including the paired-
-  trig runtime test and complete 47,019-step replay stream. Portable Release
-  and ASAN/UBSAN builds each pass 8/8 targets, and the Python suite passes 159
-  tests with two optional Gym skips.
+- The production `IrisuEnv` exact-worker corpus gate independently matches all
+  1,111 available original state checkpoints: 536 score, 103 rot, 431 clear,
+  and 41 level events. Its attested report SHA-256 is
+  `b0e5def9d05eab34f76a43c0bdc23a2ecb83e414223a5ad06bb1d06c500d1848`.
+- The full current gate passes 14/14 exact Release and 14/14 exact ASAN/UBSAN
+  CTest targets, including the paired-
+  trig runtime test, both replay execution paths, and active
+  mutation/step/contact stream through all 47,019 steps. Portable Release
+  and ASAN/UBSAN builds each pass 8/8 targets. Sanitized hostile-preload tests
+  put the worker-linked ELF32 `libasan` first. The GNU layers are instrumented;
+  the immutable MSVC9 host is explicitly verified as uninstrumented. The
+  Python suite passes 204 tests with three expected normal-build skips.
 - The current production host SHA-256 is
-  `bf46953217a7bcd49f382d44cb05dd58db373fb9f86dc1e42eb531c12c71908a`;
+  `ce14d1cab9ce4331bf494fe92bf657029487aec9f7435e7479b3c7cb579fafb5`;
   the worker SHA-256 is
-  `aa7ba4a6998b6dfeb59d1ea80cd1690cd0e7b727cf9968c38f362e60835e6d57`.
+  `4faa4508a89df3e1e62b80e2871b6a35b5913f220d53fe5de43408ad6512c261`,
+  and the replay runner SHA-256 is
+  `d06e1ff08811b21047b827bebb27ea39295445b64d3b56c772617befb1bc22f9`.
 - The current
-  [`exact-pipeline-range-safe-wide-2026-07-20.json`](../../../benchmarks/results/exact-pipeline-range-safe-wide-2026-07-20.json)
-  records 37/37 current source hashes and 64/64 true cross-path equivalence
+  [`exact-pipeline-adaptive-wide-perf-2026-07-21.json`](../../../benchmarks/results/exact-pipeline-adaptive-wide-perf-2026-07-21.json)
+  records 38/38 current runtime-source hashes and 88/88 true cross-path equivalence
   leaves. Its SHA-256 is
-  `91c8db5feb9d3c8339d101940f05a42d93a4490641745964a0ca427553b8b8e9`.
-  Its explicit 32-lane result is 7,199.041 decisions/s, 35.995% of the
-  20,000-decision/s target (2.778x short). Its directly comparable 30,000-tick
-  48-body physics workload reaches 75,819.177 ticks/s.
-- The earlier
+  `4067fdff9360989adb696bdc5ad7d98983729f9fa424271fbd7e3e1fb9164eef`.
+  Its explicit 64-lane result is 9,685.170 decisions/s, 48.426% of the
+  20,000-decision/s target (2.065x short). Its directly comparable 30,000-tick
+  48-body physics workload reaches 74,853.849 ticks/s.
+- The July 20
   [`exact-pipeline-paired-trig-2026-07-20.json`](../../../benchmarks/results/exact-pipeline-paired-trig-2026-07-20.json)
-  remains the directly comparable post-pair artifact; its host and worker
+  remains the historical directly comparable post-pair artifact; its host and worker
   identities are historical rather than the current range-safe positive-zero
   build.
 

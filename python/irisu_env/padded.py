@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ctypes
 import math
+import os
 import select
 from collections.abc import Mapping, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -107,30 +108,37 @@ if (
     ctypes.sizeof(ExactPaddedBody) != _BODY.size
     or ExactPaddedObservation.bodies.offset != _OBSERVATION_HEADER.size
     or ExactPaddedTransition.reward.offset != ctypes.sizeof(ExactPaddedObservation)
+    or ctypes.sizeof(ExactPaddedTransition)
+    - ExactPaddedTransition.reward.offset
+    != _TRANSITION.size
 ):
     raise RuntimeError("exact padded ctypes layout does not match the worker protocol")
 
 
 _OBSERVATION_FIELDS = tuple(name for name, _ in ExactPaddedObservation._fields_[:-1])
 _BODY_FIELDS = tuple(name for name, _ in ExactPaddedBody._fields_)
-_TRANSITION_FIELDS = (
-    "reward",
-    "event_count",
-    "config_hash",
-    "finish_call_count",
-    "recorded_final_score",
-    "recorded_final_clears",
-    "latest_final_score",
-    "latest_final_clears",
-    "recorded_final_highest_chain",
-    "recorded_final_level",
-    "latest_final_highest_chain",
-    "latest_final_level",
-    "terminated",
-    "truncated",
-    "terminal_metadata_recorded",
-    "invalid_action",
-)
+
+
+def _available_logical_cpus() -> int:
+    """Return the process-visible CPU count with a deterministic fallback."""
+
+    try:
+        affinity = os.sched_getaffinity(0)
+    except (AttributeError, OSError):
+        affinity = ()
+    if affinity:
+        return len(affinity)
+    try:
+        count = os.cpu_count()
+    except (NotImplementedError, OSError):
+        count = None
+    return count if isinstance(count, int) and count > 0 else 1
+
+
+def _default_exact_workers(num_envs: int) -> int:
+    """Keep enough independent exact workers in flight to fill the host."""
+
+    return min(num_envs, 4 * _available_logical_cpus())
 
 
 def _copy_exact_observation(
@@ -158,21 +166,16 @@ def _decode_exact_transition(
 ) -> tuple[ExactPaddedTransition, int]:
     """Copy a prevalidated worker payload into reusable packed typed storage."""
 
-    observation_address = ctypes.addressof(destination.observation)
-    ctypes.memmove(observation_address, payload, _OBSERVATION_HEADER.size)
-    body_count = int(destination.observation.body_count)
-    body_size = body_count * ctypes.sizeof(ExactPaddedBody)
-    body_end = _OBSERVATION_HEADER.size + body_size
-    if body_size:
-        ctypes.memmove(
-            observation_address + _OBSERVATION_HEADER.size,
-            payload[_OBSERVATION_HEADER.size : body_end],
-            body_size,
-        )
-
-    values = _TRANSITION.unpack_from(payload, body_end)
-    for name, value in zip(_TRANSITION_FIELDS, values):
-        setattr(destination, name, value)
+    body_count = _OBSERVATION_HEADER.unpack_from(payload)[15]
+    body_end = _OBSERVATION_HEADER.size + body_count * _BODY.size
+    ctypes.memmove(
+        ctypes.addressof(destination.observation), payload, body_end
+    )
+    ctypes.memmove(
+        ctypes.addressof(destination) + ExactPaddedTransition.reward.offset,
+        payload[body_end : body_end + _TRANSITION.size],
+        _TRANSITION.size,
+    )
     generation = _EVENT_GENERATION.unpack_from(
         payload, body_end + _TRANSITION.size
     )[0]
@@ -291,16 +294,17 @@ class PaddedVectorEnv:
         self._lock = RLock()
         self._envs: tuple[NativeSimulator | ExactSimulator, ...] = ()
         self._num_envs = int(num_envs)
-        requested_workers = (
-            int(workers) if workers is not None else self._num_envs
+        requested_workers = int(workers) if workers is not None else (
+            _default_exact_workers(self._num_envs)
+            if self._physics_backend == "exact"
+            else self._num_envs
         )
         # Portable lanes share one native process and retain the eight-thread
-        # ceiling. Exact lanes are independent worker processes, so an explicit
-        # request may use every lane; the default remains the conservative cap.
+        # ceiling. Exact lanes are independent worker processes; their adaptive
+        # default keeps several runnable worlds per visible CPU to cover uneven
+        # solver times, while an explicit request remains authoritative.
         worker_ceiling = (
-            self._num_envs
-            if self._physics_backend == "exact" and workers is not None
-            else 8
+            self._num_envs if self._physics_backend == "exact" else 8
         )
         self._workers = min(self._num_envs, worker_ceiling, requested_workers)
         self._executor: ThreadPoolExecutor | None = None

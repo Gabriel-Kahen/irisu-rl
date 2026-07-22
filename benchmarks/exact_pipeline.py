@@ -80,6 +80,7 @@ SOURCE_FILES = (
     "tools/exact-physics-prototype/physics_wrapper_forward.cpp",
     "tools/host-msvc9-box2d-multiworld.py",
     "tools/host-msvc9-box2d.py",
+    "tools/verify-elf-runpath.cmake",
 )
 
 

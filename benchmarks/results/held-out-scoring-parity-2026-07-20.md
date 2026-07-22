@@ -1,5 +1,11 @@
 # Exact-forward scoring evaluation — 2026-07-20
 
+> Historical evidence record. The hashes below identify the July 20 binaries
+> and reports used for this evaluation; they are not current artifact
+> identities. The post-hardening July 21 replay and full-stream revalidation is
+> tracked in `reference/native-box2d/validation.json` and preserves 4/4 scoring
+> parity across 57,921 ticks and 536 score calls.
+
 The exact-forward simulator has full scoring parity on all four authoritative
 bundled-v2.03 playback oracles available in the repository. Replay-header
 claims are reported separately: three of the four eligible headers do not
@@ -41,6 +47,25 @@ authoritative corpus. The remaining scoring risk for RL is unseen,
 policy-generated state/action coverage, not a currently observed formula or
 timing mismatch.
 
+## Production `IrisuEnv` integration revalidation
+
+The July 21 gate repeats the same four oracles through the RL-facing
+`IrisuEnv(physics_backend="exact")` worker path. It matches all 1,111 available
+original state checkpoints: 536 score, 103 rot, 431 qualifying-clear, and 41
+level events. The normalized rows compare every score, gauge, level, and clear
+count that the public event stream can reconstruct at the original event point.
+All terminal scalars and frames are also exact.
+
+The production report is
+[`exact-production-replay-parity-2026-07-21.json`](./exact-production-replay-parity-2026-07-21.json),
+SHA-256
+`b0e5def9d05eab34f76a43c0bdc23a2ecb83e414223a5ad06bb1d06c500d1848`.
+For every replay it records the executed worker identity (`4faa4508...`), live
+mapped exact host (`ce14d1ca...`), and canonical x87 control word `0x027f`.
+This closes the former inference gap between the standalone exact runner and
+the production Python backend; it does not populate the separate five-category
+controlled golden manifest.
+
 ## Unverified header diagnostics
 
 | Header score / level / chain / records | Bundled v2.03 and exact-forward | Interpretation |
@@ -69,6 +94,14 @@ python3 tools/evaluate-exact-replay-corpus.py \
   --output /tmp/irisu-scoring-authority-evaluation.json
 ```
 
+Run the production backend gate with:
+
+```sh
+python3 tools/evaluate-exact-replay-corpus.py \
+  --worker build-exact/irisu-exact-worker \
+  --require-observed-parity
+```
+
 The evaluator discovers validated oracle metadata by schema and status, then
 matches it to corpus inputs by replay SHA-256. It has no replay-specific outcome
 branches.
@@ -83,7 +116,7 @@ Evidence hashes:
 - 41,449 observed events: `f8ab8fb968543ca7ca0daf30d6b78e07575659e0d87d799cd9e7dc66edf2e878`
 - 43,791 repeated events: `9933ba8de1979b8f8171839c5de07ff9e2a72b4928b93722c5352712c35f1d27`
 
-## Full wrapper-stream cross-check
+## Active wrapper-stream cross-check
 
 The final runner also produced a complete `IRISU_EXACT_TRACE` for the 41,449
 replay. `tools/compare-exact-wrapper-trace.py` streamed the 1.5 GB,
@@ -95,7 +128,12 @@ sets, 2,344 gameplay destroys, 47,019 steps, and 573,557 contact results.
 
 The original-only post-step process teardown contains 153,500 transform writes,
 24 destroys, and one dispose, all at step 47,019. Getter observations are not
-wrapper mutations and are excluded. Exact bounds and hashes are recorded in
+wrapper mutations and are excluded from that first comparator. A second direct
+global-order harness now covers every recorded getter: 9,810,360 records,
+12,262,950 returned binary32 words, and all 573,557 contact results match with
+no mismatch through step 47,019. Its final report SHA-256 is
+`815e8805ea777fdcecc265ee1a669c4664e993a74f92a05cfe2f134195703ef8`.
+Exact bounds and hashes are recorded in
 `reference/native-box2d/validation.json`. The final trace SHA-256 is
 `cde35ca60b5511678edf128ed8f3ae09c8cf00e240696325c4acc8681f829eb0`;
 the streamed comparison output SHA-256 is

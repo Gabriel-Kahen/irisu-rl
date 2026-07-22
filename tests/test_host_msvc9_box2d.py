@@ -36,8 +36,9 @@ class NativeBox2DHostingTests(unittest.TestCase):
             (
                 "00019004  00001707 R_386_JUMP_SLOT 00015750 msvc_b2d_world_step",
                 "00018fe4  00000206 R_386_GLOB_DAT 00000000 msvc_b2d_world_get_x",
+                "00017000  00000301 R_386_32 00015000 msvc_b2d_world_create",
                 "00019000  00000107 R_386_JUMP_SLOT 00000000 abort@GLIBC_2.0",
-                "00000000  00000000 R_386_RELATIVE 00000000 msvc_b2d_ignored",
+                "00000000  00000000 R_386_RELATIVE 00000000",
             )
         )
         with mock.patch.object(
@@ -45,7 +46,11 @@ class NativeBox2DHostingTests(unittest.TestCase):
         ) as run:
             self.assertEqual(
                 TOOL.interposable_msvc_b2d_relocations("readelf", Path("host.so")),
-                {"msvc_b2d_world_step", "msvc_b2d_world_get_x"},
+                {
+                    "msvc_b2d_world_step",
+                    "msvc_b2d_world_get_x",
+                    "msvc_b2d_world_create",
+                },
             )
         run.assert_called_once_with(
             ("readelf", "-rW", Path("host.so")), capture=True

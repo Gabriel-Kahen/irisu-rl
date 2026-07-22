@@ -1,8 +1,235 @@
 {
   "schema": 2,
   "date": "2026-07-20",
-  "status": "valid_bounded_native_physics_parity",
-  "claim": "The exact-forward simulator's clean-room ELF32 MSVC9 host matched every active per-operation wrapper stream through all 47019 original physics steps, including all 573557 contact cursor results. Getter-only records, two constructor/bootstrap generations, and the original process's post-step teardown suffix are outside this comparison. This is not by itself a full-game score-parity claim.",
+    "status": "valid_bounded_native_physics_parity",
+    "claim": "The exact-forward simulator's clean-room ELF32 MSVC9 host matched every active per-operation wrapper stream through all 47019 original physics steps, including all 573557 contact cursor results. An independent global-call-order replay also matched every one of the original trace's 9810360 recorded getter calls and 12262950 returned binary32 words. This is not by itself a full-game score-parity claim.",
+    "current_revalidation": {
+        "date": "2026-07-21",
+        "scope": "post-attestation-hardening exact worker, replay runner, and production IrisuEnv path",
+        "exact_library_sha256": "ce14d1cab9ce4331bf494fe92bf657029487aec9f7435e7479b3c7cb579fafb5",
+        "exact_worker_sha256": "4faa4508a89df3e1e62b80e2871b6a35b5913f220d53fe5de43408ad6512c261",
+        "exact_replay_runner_sha256": "d06e1ff08811b21047b827bebb27ea39295445b64d3b56c772617befb1bc22f9",
+        "typed_entrypoints_attested": 15,
+        "replay_oracles": {
+            "report_sha256": "0faa2b1c585675175bb18adc5a67a20b135a6eb940c9f870578d2df5a0a64e17",
+            "eligible": 4,
+            "full_scoring_parity": 4,
+            "score_timeline_exact": 4,
+            "rot_penalty_timeline_exact": 4,
+            "terminal_state_exact": 4,
+            "ticks": 57921,
+            "score_calls": 536
+        },
+        "production_irisu_env_replay_oracles": {
+            "report": "benchmarks/results/exact-production-replay-parity-2026-07-21.json",
+            "report_sha256": "b0e5def9d05eab34f76a43c0bdc23a2ecb83e414223a5ad06bb1d06c500d1848",
+            "corpus_evaluator_sha256": "72751905cb3640ca3a2e7efd71471ef8908f5036b28f3fa666202e31bd222170",
+            "replay_adapter_sha256": "40a5b6eea41a91b3e6414b676f81f194e333373daf8ae3943cd1eada336a5673",
+            "eligible": 4,
+            "full_scoring_parity": 4,
+            "terminal_state_exact": 4,
+            "available_state_checkpoint_streams": 4,
+            "available_state_checkpoints_exact": 4,
+            "score_checkpoints": 536,
+            "rot_checkpoints": 103,
+            "clear_checkpoints": 431,
+            "level_checkpoints": 41,
+            "ticks": 57921,
+            "exact_worker_sha256": "4faa4508a89df3e1e62b80e2871b6a35b5913f220d53fe5de43408ad6512c261",
+            "exact_library_sha256": "ce14d1cab9ce4331bf494fe92bf657029487aec9f7435e7479b3c7cb579fafb5",
+            "x87_control_word": "027f"
+        },
+        "active_physics_stream": {
+            "exact_forward_trace_sha256": "cde35ca60b5511678edf128ed8f3ae09c8cf00e240696325c4acc8681f829eb0",
+            "comparison_result_sha256": "1d2109141426119b24c1333a9367d0e2bd84b79bd74ee4e6c040bdb3288ee29d",
+            "steps": 47019,
+            "records_compared": 813412,
+            "contacts": 573557,
+            "first_mismatch": null,
+            "status": "exact_through_final_physics_step"
+        },
+      "direct_getter_stream": {
+            "original_trace_sha256": "e57730cbf284cdd8d369d17a7a3fe2bb9760014e74543efe6d9b09be217c827f",
+            "comparison_result": "reference/native-box2d/getter-parity-2026-07-21.json",
+            "comparison_result_sha256": "815e8805ea777fdcecc265ee1a669c4664e993a74f92a05cfe2f134195703ef8",
+            "comparator_sha256": "ff01e86237037cc88219a0f176b81fbb286fa758e09c3609bb2fc9657fefa9db",
+            "helper_source_sha256": "951e3635badfa6fe734db3a23b66893e671563778393bf20c43146a2d1a1fb6f",
+            "helper_binary_sha256": "f62019a75e3261f0eb5234a38ea958c45c0c0024cca3f287846ccc9923b4a8f8",
+            "exact_library_sha256": "ce14d1cab9ce4331bf494fe92bf657029487aec9f7435e7479b3c7cb579fafb5",
+            "recorded_commands_replayed": 10777297,
+            "steps": 47019,
+            "getter_records": 9810360,
+            "getter_values_f32": 12262950,
+            "scalar_getters": 7357770,
+            "velocity_getters": 2452590,
+            "contacts": 573557,
+            "getter_record_mismatches": 0,
+            "getter_value_mismatches": 0,
+            "contact_mismatches": 0,
+            "first_mismatch": null,
+            "x87_control_word": "027f",
+        "status": "exact_all_getters"
+      },
+      "production_validation": {
+        "exact_release_ctest": {
+          "passed": 14,
+          "total": 14,
+          "elapsed_seconds": 29.27
+        },
+        "exact_asan_ubsan_ctest": {
+          "passed": 14,
+          "total": 14,
+          "elapsed_seconds": 100.92,
+          "instrumented_scope": "GNU worker, wrapper, public API, and test fixtures",
+          "uninstrumented_scope": "immutable MSVC9 Box2D host instructions; allocations cross ASAN's interposed allocator",
+          "hostile_preload_topology": "worker-linked ELF32 libasan first, instrumented interposer second"
+        },
+        "portable_release_ctest": {
+          "passed": 8,
+          "total": 8,
+          "elapsed_seconds": 10.63
+        },
+        "portable_asan_ubsan_ctest": {
+          "passed": 8,
+          "total": 8,
+          "elapsed_seconds": 22.54
+        },
+        "python_unittest_discovery": {
+          "passed": 204,
+          "total": 204,
+          "expected_skips": 3,
+          "elapsed_seconds": 18.142,
+          "skip_scope": "two optional Gym checks plus the sanitizer-only topology assertion in a normal build"
+        },
+        "test_source_sha256": {
+          "tests/native/exact_dlsym_interposer.cpp": "aa0095ba85c1729d6a0303b8c19cdfbe1300c7bb51eaa1d817d7adeaccb4bab4",
+          "tests/test_exact_ipc_protocol.py": "57dade6da2a948a0b8c2288e3291a85430327e3bb8982c62ce36c19bcb326ef1",
+          "tests/test_exact_actor_rollout.py": "5894135e8c4174848ce7cfda1dd9867e1f307f2582f0958058d02f92658f3ac8",
+          "tests/test_exact_default_concurrency.py": "98d2dff0111f55c06d124cbd9e48cb69d32b78b0de664935e4e021d17295d968",
+          "tests/test_exact_padded_fast_path.py": "2646ec607f08abbd2cb6468d230401ea39b2ca7dc14e1f75c8c64983ff1e0ffa",
+          "tests/test_exact_vector_snapshot_concurrency.py": "cef0fa13a3cdf9fe170f697f77271aefd3ac4a6d790465ad9948cde059137cea"
+        },
+        "vector_snapshot_scope": "four exact lanes across serial, two-worker threaded, and two-worker padded APIs; divergent futures, contact/scoring events, truncation, byte snapshots, state hashes, restore replay, and transactional corrupt-lane rollback"
+      },
+      "performance": {
+        "full_pipeline_report": "benchmarks/results/exact-pipeline-adaptive-wide-perf-2026-07-21.json",
+        "full_pipeline_report_sha256": "4067fdff9360989adb696bdc5ad7d98983729f9fa424271fbd7e3e1fb9164eef",
+        "full_pipeline_elapsed_seconds": 809.952465988,
+        "source_hashes_current": 38,
+        "source_hashes_total": 38,
+        "equivalence_leaves_true": 88,
+        "equivalence_leaves_total": 88,
+        "packed_lazy_decisions_per_second": {
+          "1": 1370.539,
+          "4": 1988.302,
+          "8": 3569.759,
+          "16": 5679.407,
+          "32": 7977.156,
+          "48": 8917.207,
+          "64": 9685.170
+        },
+        "raw_packed_64_decisions_per_second": 10333.568,
+        "target_64_decisions_per_second": 20000.0,
+        "target_fraction": 0.4842585,
+        "target_shortfall_ratio": 2.065013,
+        "gate_passed": false,
+        "limitation_accepted_for_rl": true,
+        "acceptance_date": "2026-07-21",
+        "acceptance_basis": "project owner explicitly accepted the measured current throughput as sufficient for RL",
+        "readiness_criterion_satisfied": true,
+        "optimization_status": "closed_by_explicit_acceptance",
+        "dense_native_wall_decisions_per_second": 1447.881,
+        "dense_native_step_plus_observation_per_second": 1485.277,
+        "physics_48_body_ticks_per_second": 74853.849,
+        "snapshot_1000_history": {
+          "fast_checkpoint_us": 171.215,
+          "fast_branch_p50_us": 283.931,
+          "durable_restore_p50_us": 95478.617,
+          "median_restore_over_branch": 336.274,
+          "durable_snapshot_bytes": 28104
+        },
+        "paired_python_hot_path_report": "benchmarks/results/exact-padded-python-hot-path-ab-2026-07-21.json",
+        "paired_python_hot_path_report_sha256": "0f7a5c6820cd002d190f177f45ba0f0db44c7cf7387c4527d154c8a30299fbbd",
+        "paired_python_hot_path_improvement_percent": 5.996903,
+        "adaptive_exact_concurrency": {
+          "default_rule": "min(num_envs, 4 * process-visible logical CPUs)",
+          "explicit_workers_authoritative": true,
+          "portable_worker_ceiling": 8,
+          "supplemental_report": "benchmarks/results/exact-padded-scaling-ceiling-2026-07-21.json",
+          "supplemental_report_sha256": "2938d3e072ee99e39ba408f0dd934e5e5caa82993e8e1d7472a6b3322d4f4657",
+          "status": "supplemental_scaling_evidence_not_the_full_performance_gate",
+          "host_physical_cores": 8,
+          "host_logical_cpus": 16,
+          "equal_lane_worker_8_decisions_per_second": 4674.9922385998,
+          "equal_lane_worker_64_decisions_per_second": 10975.352035570524,
+          "lane_64_old_default_8_decisions_per_second": 4606.713853586171,
+          "lane_64_adaptive_improvement_percent": 138.24688019262544,
+          "samples_per_configuration": 1,
+          "old_default_8_full_equivalence_digest_available": false,
+          "default_is_topology_heuristic_not_proven_optimum": true,
+          "hard_affinity_enabled": false
+        },
+        "experimental_actor_rollout": {
+          "report": "benchmarks/results/exact-actor-rollout-ab-2026-07-21.json",
+          "report_sha256": "2f247f1222f0423475bdcffc185ea893c0b31eb204a7fb6df55030c396d6fc4f",
+          "benchmark_source_sha256": "f51e57deb0a4d4127e864941251cd2de00852dee36dc1412b2eea1d94aa6d3db",
+          "implementation_source_sha256": "7b2fbe342f854021ffe9e81ffceb04b1b8957a4544ee754e19e1d699a36b5168",
+          "source_hashes_current": 4,
+          "source_hashes_total": 4,
+          "status": "supplemental_architecture_evidence_not_the_full_performance_gate",
+          "lanes": [16, 32, 64],
+          "warmup_steps_per_lane": 128,
+          "steps_per_lane": 1500,
+          "rollout_horizon": 64,
+          "repeats": 3,
+          "paired_samples": 9,
+          "trajectory_parity_all_samples": true,
+          "median_synchronous_decisions_per_second": {
+            "16": 4781.823828572508,
+            "32": 5481.509239556661,
+            "64": 5707.713251559763
+          },
+          "median_actor_decisions_per_second": {
+            "16": 5747.609023982777,
+            "32": 5960.249597918768,
+            "64": 6032.7118661827335
+          },
+          "median_paired_speedup": {
+            "16": 1.2106323103341077,
+            "32": 1.0965801305256662,
+            "64": 1.0569402491504205
+          },
+          "batched_policy_inference": false,
+          "policy_state_requirement": "lane-private or thread-safe",
+          "failed_collection_may_commit_successful_sibling_lanes": true,
+          "transport_protocol_failure_requires_pool_recreation": true
+        },
+        "rejected_trig_cache_report": "benchmarks/results/exact-core-trig-cache-investigation-2026-07-21.json",
+        "rejected_trig_cache_report_sha256": "13f4d6b26d5bde00fd900e2c48317b1336bb5918b9209117e1b279214b8ba9b0",
+        "rejected_trig_cache_improvement_percent": 1.04,
+        "rejected_solver_source_optimizations": {
+          "report": "benchmarks/results/exact-core-solver-source-optimizations-2026-07-21.json",
+          "report_sha256": "6fe2b8c482e8764ff64577261d839d552ae7c4a5a996c538bbead2a135ffcb71",
+          "integration_threshold_percent": 3.0,
+          "static_position_skip_improvement_percent": 0.647814908,
+          "velocity_anchor_cache_improvement_percent": 0.471555992,
+          "full_47019_step_replay_exact": true,
+          "wrapper_trace_records_exact": 813508,
+          "full_getter_replay_run": false,
+          "candidate_inputs_archived": false,
+          "clean_checkout_rebuildable": false,
+          "tracked_engine_change_retained": false,
+          "status": "rejected_below_integration_threshold"
+        },
+        "dominant_remaining_cost": "immutable exact MSVC9 contact solver"
+      },
+      "commands": {
+            "replays": "python3 tools/evaluate-exact-replay-corpus.py --runner <exact-replay> --corpus reference/replays/raw/internet --oracle-root reference/runs --require-observed-parity",
+            "production_replays": "python3 tools/evaluate-exact-replay-corpus.py --worker <exact-worker> --corpus reference/replays/raw/internet --oracle-root reference/runs --require-observed-parity",
+            "stream": "python3 tools/compare-exact-wrapper-trace.py reference/runs/replay-41449-getters-gdb-20260720-005/data/dll/box2d-trace.jsonl <IRISU_EXACT_TRACE>",
+            "getters": "TMPDIR=$PWD/.tmp/compiler-temp python3 tools/compare-exact-getter-trace.py reference/runs/replay-41449-getters-gdb-20260720-005/data/dll/box2d-trace.jsonl <EXACT_MULTIWORLD_LIBRARY> --output .tmp/exact-getter-parity-final-20260721.json"
+        }
+    },
   "source": {
     "engine": "pristine Box2D SVN revision 58",
     "archive_sha256": "db3e9f5a232e1df2992c926029e0f24ddd416542d3e802441938eee7373adf50",
@@ -81,6 +308,7 @@
       "get_scalar": 7357770,
       "get_v": 2452590
     },
+    "ignored_getter_scope": "Ignored only by this active-stream comparator; all are directly checked by direct_getter_replay.",
     "first_mismatch": null,
     "status": "exact_through_final_physics_step"
   },
@@ -102,7 +330,35 @@
     "set_position_calls": 336887,
     "created_bodies": 2368,
     "first_bad_step": 0,
-    "getter_scope": "The harness replays every mutating wrapper call and checks every contact result. It does not compare the trace's per-body getter records beyond the separately archived 32515-field prefix comparison."
+    "historical_harness_getter_scope": "This earlier generated harness replayed mutations and contacts but compared only the separately archived 32515-field getter prefix. The later direct_getter_replay closes that gap."
+  },
+  "direct_getter_replay": {
+    "date": "2026-07-21",
+    "original_trace_sha256": "e57730cbf284cdd8d369d17a7a3fe2bb9760014e74543efe6d9b09be217c827f",
+    "original_records": 10777298,
+    "comparator": "tools/compare-exact-getter-trace.py",
+    "comparator_sha256": "ff01e86237037cc88219a0f176b81fbb286fa758e09c3609bb2fc9657fefa9db",
+    "helper_source": "tools/exact-physics-prototype/getter_trace_replay.c",
+    "helper_source_sha256": "951e3635badfa6fe734db3a23b66893e671563778393bf20c43146a2d1a1fb6f",
+    "helper_binary_sha256": "f62019a75e3261f0eb5234a38ea958c45c0c0024cca3f287846ccc9923b4a8f8",
+    "exact_library_sha256": "ce14d1cab9ce4331bf494fe92bf657029487aec9f7435e7479b3c7cb579fafb5",
+    "result": "reference/native-box2d/getter-parity-2026-07-21.json",
+    "result_sha256": "815e8805ea777fdcecc265ee1a669c4664e993a74f92a05cfe2f134195703ef8",
+    "method": "single-pass global-call-order replay; raw binary32 equality",
+    "recorded_commands_replayed": 10777297,
+    "steps": 47019,
+    "getter_records": 9810360,
+    "getter_values_f32": 12262950,
+    "scalar_getters": 7357770,
+    "velocity_getters": 2452590,
+    "contact_results_compared": 573557,
+    "getter_record_mismatches": 0,
+    "getter_value_mismatches": 0,
+    "contact_mismatches": 0,
+    "first_mismatch": null,
+    "x87_control_word": "027f",
+    "status": "exact_all_getters",
+    "scope": "Exact for every call recorded by the proxy. The proxy did not log b2d_test, so this is not a call-count claim for that unobserved export."
   },
   "discriminating_variants": {
     "interleaved_normal_tangent": {
