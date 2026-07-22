@@ -55,13 +55,18 @@ class EvaluationSuite:
     max_simulated_ticks: int
     runtime_identity_sha256: str
     assignment_sha256: str
-    version: str = "r3b-evaluation-suite-v1"
+    library_sha256: str
+    snapshot_store_sha256: str
+    action_spec_sha256: str
+    version: str = "r3b-evaluation-suite-v2"
 
     def __post_init__(self) -> None:
         if (
-            not self.suite_id
+            self.version != "r3b-evaluation-suite-v2"
+            or not self.suite_id
             or not self.suite_id.isascii()
             or self.split not in {"calibration", "validation", "test"}
+            or not isinstance(self.snapshot_ids, tuple)
             or not self.snapshot_ids
             or len(set(self.snapshot_ids)) != len(self.snapshot_ids)
             or any(not value for value in self.snapshot_ids)
@@ -76,7 +81,16 @@ class EvaluationSuite:
             or not isinstance(self.policy_seed, Integral)
             or not 0 <= self.policy_seed < 2**64
             or not _is_sha256(self.runtime_identity_sha256)
-            or not _is_sha256(self.assignment_sha256)
+            or any(
+                not _is_sha256(value) or value == "0" * 64
+                for value in (
+                    self.runtime_identity_sha256,
+                    self.assignment_sha256,
+                    self.library_sha256,
+                    self.snapshot_store_sha256,
+                    self.action_spec_sha256,
+                )
+            )
         ):
             raise ValueError("evaluation suite seed or identity is invalid")
 
@@ -155,19 +169,27 @@ class EvaluationReport:
     suite_sha256: str
     policy_sha256: str
     evaluator_sha256: str
+    backend_identity_sha256: str
+    execution_identity_sha256: str
     episodes: tuple[EpisodeMetrics, ...]
-    version: str = "r3b-evaluation-report-v1"
+    version: str = "r3b-evaluation-report-v2"
 
     def __post_init__(self) -> None:
         if (
-            not all(
+            self.version != "r3b-evaluation-report-v2"
+            or not isinstance(self.episodes, tuple)
+            or not all(
                 _is_sha256(value)
                 for value in (
                     self.suite_sha256,
                     self.policy_sha256,
                     self.evaluator_sha256,
+                    self.backend_identity_sha256,
+                    self.execution_identity_sha256,
                 )
             )
+            or self.backend_identity_sha256 == "0" * 64
+            or self.execution_identity_sha256 == "0" * 64
             or not self.episodes
             or len({(value.snapshot_id, value.repetition) for value in self.episodes})
             != len(self.episodes)
@@ -180,12 +202,18 @@ class EvaluationReport:
             "suite_sha256": self.suite_sha256,
             "policy_sha256": self.policy_sha256,
             "evaluator_sha256": self.evaluator_sha256,
+            "backend_identity_sha256": self.backend_identity_sha256,
+            "execution_identity_sha256": self.execution_identity_sha256,
             "episodes": [asdict(value) for value in self.episodes],
         }
 
     @property
     def sha256(self) -> str:
         return _canonical_sha256(self.manifest())
+
+    @property
+    def episode_content_sha256(self) -> str:
+        return _canonical_sha256([asdict(value) for value in self.episodes])
 
 
 @dataclass(frozen=True, slots=True)
@@ -203,7 +231,15 @@ class ScriptedBaselineSpec:
             "scripted_side_ejector",
             "scripted_imminent_rot_hazard",
         }
-        if self.baseline_id not in supported:
+        if (
+            self.version != "r3b-scripted-baseline-v1"
+            or self.baseline_id not in supported
+            or not isinstance(self.parameters, tuple)
+            or any(
+                not isinstance(item, tuple) or len(item) != 2
+                for item in self.parameters
+            )
+        ):
             raise ValueError("unknown scripted baseline")
         names = tuple(name for name, _ in self.parameters)
         if len(names) != len(set(names)) or any(not name for name in names):
@@ -304,6 +340,11 @@ class RecurrentSemanticPolicy:
         expected_wait = (lanes, len(self.model.action_spec.wait_choices))
         if wait_mask.shape != expected_wait or wait_mask.dtype != torch.bool:
             raise ValueError("evaluation wait mask does not match the action schema")
+        if not bool(torch.all(kind_mask.any(dim=1))):
+            raise ValueError("evaluation kind mask contains an all-masked lane")
+        wait_lanes = kind_mask[:, int(SemanticActionKind.WAIT)]
+        if bool(torch.any(wait_lanes & ~wait_mask.any(dim=1))):
+            raise ValueError("WAIT is enabled without a legal wait duration")
         global_features = (
             torch.from_numpy(observation.global_features).to(self.device).unsqueeze(0)
         )
@@ -373,13 +414,19 @@ def evaluate_scripted_baseline(
     baseline: ScriptedBaselineSpec,
     *,
     evaluator_sha256: str,
+    expected_assignment_sha256: str,
+    actual_runtime_identity_sha256: str,
+    backend_identity_sha256: str,
+    execution_identity_sha256: str,
 ) -> EvaluationReport:
     """Evaluate fixed snapshot/repetition cells using deployment macro semantics."""
+
+    action_spec = ActionSpec()
 
     def factory(seed: int):
         policy = baseline.build(seed)
         return lambda observation: semantic_from_native(
-            policy.act(_mapping(observation)), ActionSpec()
+            policy.act(_mapping(observation)), action_spec
         )
 
     return _evaluate_semantic_policy(
@@ -388,6 +435,11 @@ def evaluate_scripted_baseline(
         suite,
         policy_sha256=baseline.sha256,
         evaluator_sha256=evaluator_sha256,
+        expected_assignment_sha256=expected_assignment_sha256,
+        actual_runtime_identity_sha256=actual_runtime_identity_sha256,
+        backend_identity_sha256=backend_identity_sha256,
+        execution_identity_sha256=execution_identity_sha256,
+        action_spec=action_spec,
         policy_factory=factory,
     )
 
@@ -402,6 +454,10 @@ def evaluate_recurrent_policy(
     wait_mask: Tensor,
     *,
     evaluator_sha256: str,
+    expected_assignment_sha256: str,
+    actual_runtime_identity_sha256: str,
+    backend_identity_sha256: str,
+    execution_identity_sha256: str,
 ) -> EvaluationReport:
     """Evaluate a learned policy on the same fixed cells and macro semantics."""
 
@@ -412,6 +468,10 @@ def evaluate_recurrent_policy(
         raise ValueError(
             "recurrent evaluation wait mask disagrees with the action schema"
         )
+    if not bool(torch.all(kind_mask.any(dim=1))):
+        raise ValueError("recurrent evaluation kind mask is all-masked")
+    if bool(kind_mask[0, int(SemanticActionKind.WAIT)]) and not bool(wait_mask.any()):
+        raise ValueError("WAIT is enabled without a legal wait duration")
     kind_mask = kind_mask.detach().cpu().clone()
     wait_mask = wait_mask.detach().cpu().clone()
 
@@ -432,6 +492,11 @@ def evaluate_recurrent_policy(
         suite,
         policy_sha256=model_state_sha256(model),
         evaluator_sha256=evaluator_sha256,
+        expected_assignment_sha256=expected_assignment_sha256,
+        actual_runtime_identity_sha256=actual_runtime_identity_sha256,
+        backend_identity_sha256=backend_identity_sha256,
+        execution_identity_sha256=execution_identity_sha256,
+        action_spec=model.action_spec,
         policy_factory=factory,
     )
 
@@ -443,15 +508,43 @@ def _evaluate_semantic_policy(
     *,
     policy_sha256: str,
     evaluator_sha256: str,
+    expected_assignment_sha256: str,
+    actual_runtime_identity_sha256: str,
+    backend_identity_sha256: str,
+    execution_identity_sha256: str,
+    action_spec: ActionSpec,
     policy_factory: Any,
 ) -> EvaluationReport:
     """Shared fixed-cell evaluator after a policy has entered semantic space."""
 
-    if not _is_sha256(evaluator_sha256) or not _is_sha256(policy_sha256):
+    if (
+        not _is_sha256(evaluator_sha256)
+        or not _is_sha256(policy_sha256)
+        or not _is_sha256(expected_assignment_sha256)
+        or not _is_sha256(actual_runtime_identity_sha256)
+        or not _is_sha256(backend_identity_sha256)
+        or not _is_sha256(execution_identity_sha256)
+        or "0" * 64
+        in (
+            evaluator_sha256,
+            policy_sha256,
+            expected_assignment_sha256,
+            actual_runtime_identity_sha256,
+            backend_identity_sha256,
+            execution_identity_sha256,
+        )
+    ):
         raise ValueError("policy and evaluator identities must be lowercase SHA-256")
-    if suite.runtime_identity_sha256 == "0" * 64:
-        raise ValueError("evaluation suite cannot use a placeholder runtime identity")
-    action_spec = ActionSpec()
+    if actual_runtime_identity_sha256 != suite.runtime_identity_sha256:
+        raise ValueError("evaluated simulator runtime identity mismatch")
+    if suite.assignment_sha256 != expected_assignment_sha256:
+        raise ValueError("evaluation suite assignment identity mismatch")
+    if suite.library_sha256 != store.library.sha256:
+        raise ValueError("evaluation suite snapshot-library identity mismatch")
+    if suite.snapshot_store_sha256 != store.sha256:
+        raise ValueError("evaluation suite snapshot-store identity mismatch")
+    if suite.action_spec_sha256 != action_spec.sha256:
+        raise ValueError("evaluation suite action identity mismatch")
     episodes: list[EpisodeMetrics] = []
     for snapshot_id in suite.snapshot_ids:
         recipe = store.library[snapshot_id]
@@ -461,8 +554,30 @@ def _evaluate_semantic_policy(
             raise ValueError("evaluation snapshot runtime identity mismatch")
         for repetition in range(suite.repetitions):
             observation = simulator.restore_state(store[snapshot_id])
+            if int(simulator.config_hash()) != recipe.config_hash:
+                raise ValueError("evaluated simulator config hash mismatch")
+            if _canonical_sha256(simulator.config()) != recipe.config_sha256:
+                raise ValueError("evaluated simulator canonical config mismatch")
             if int(simulator.state_hash()) != recipe.expected_state_hash:
                 raise ValueError("evaluation snapshot state hash mismatch")
+            restored = _mapping(observation)
+            gauge = restored.get("gauge")
+            gauge_max = restored.get("gauge_max")
+            if (
+                int(restored.get("tick", -1)) != recipe.expected_tick
+                or int(restored.get("score", -1)) != recipe.expected_score
+                or bool(restored.get("terminated", False))
+                or bool(restored.get("truncated", False))
+                or isinstance(gauge, bool)
+                or not isinstance(gauge, Integral)
+                or isinstance(gauge_max, bool)
+                or not isinstance(gauge_max, Integral)
+                or gauge_max <= 0
+                or not 0 <= gauge <= gauge_max
+            ):
+                raise ValueError(
+                    "evaluation snapshot is not the declared live boundary"
+                )
             seed = suite.episode_seed(snapshot_id, repetition)
             act = policy_factory(seed)
             if not callable(act):
@@ -483,10 +598,28 @@ def _evaluate_semantic_policy(
                 < suite.max_simulated_ticks
             ):
                 semantic = action_spec.validate(act(observation))
-                primitives = [action_spec.press(semantic)]
+                elapsed = int(_mapping(observation)["tick"]) - initial_tick
+                remaining = suite.max_simulated_ticks - elapsed
+                if remaining <= 0:
+                    break
+                first = (
+                    Action.wait(min(semantic.wait_ticks, remaining))
+                    if semantic.kind is SemanticActionKind.WAIT
+                    else action_spec.press(semantic)
+                )
+                primitives = [first]
                 if semantic.kind is not SemanticActionKind.WAIT:
                     primitives.append(action_spec.release())
                 for primitive in primitives:
+                    elapsed = int(_mapping(observation)["tick"]) - initial_tick
+                    remaining = suite.max_simulated_ticks - elapsed
+                    if remaining <= 0:
+                        break
+                    if (
+                        ActionKind.parse(primitive.kind) is ActionKind.WAIT
+                        and primitive.wait_ticks > remaining
+                    ):
+                        primitive = Action.wait(remaining)
                     observation, reward, terminated, truncated, info = simulator.step(
                         primitive
                     )
@@ -501,6 +634,8 @@ def _evaluate_semantic_policy(
             budget_cut = not terminated and not truncated
             final = _mapping(observation)
             final_score = int(final["score"])
+            if int(final["tick"]) - initial_tick > suite.max_simulated_ticks:
+                raise ValueError("evaluation exceeded its simulated-tick horizon")
             if accumulated_reward != final_score - initial_score:
                 raise ValueError("evaluation raw reward does not equal score delta")
             episodes.append(
@@ -524,5 +659,89 @@ def _evaluate_semantic_policy(
         suite.sha256,
         policy_sha256,
         evaluator_sha256,
+        backend_identity_sha256,
+        execution_identity_sha256,
         tuple(episodes),
     )
+
+
+def build_baseline_evidence(
+    baseline: ScriptedBaselineSpec,
+    suite: EvaluationSuite,
+    report: EvaluationReport,
+    replay_report: EvaluationReport,
+    exact_backend_report: EvaluationReport,
+):
+    """Build acceptance evidence only from matching evaluated report artifacts."""
+
+    from .r3b_experiments import BaselineEvidence
+
+    reports = (report, replay_report, exact_backend_report)
+    if any(value.suite_sha256 != suite.sha256 for value in reports):
+        raise ValueError("baseline reports disagree with the evaluation suite")
+    if any(value.policy_sha256 != baseline.sha256 for value in reports):
+        raise ValueError("baseline reports disagree with the scripted policy")
+    if (
+        report.backend_identity_sha256 != replay_report.backend_identity_sha256
+        or exact_backend_report.backend_identity_sha256
+        == report.backend_identity_sha256
+        or len({value.execution_identity_sha256 for value in reports}) != 3
+        or len({value.sha256 for value in reports}) != 3
+    ):
+        raise ValueError("baseline evidence lacks independent backend executions")
+    expected_cells = {
+        (snapshot_id, repetition)
+        for snapshot_id in suite.snapshot_ids
+        for repetition in range(suite.repetitions)
+    }
+    for value in reports:
+        if {
+            (episode.snapshot_id, episode.repetition) for episode in value.episodes
+        } != expected_cells or any(
+            episode.policy_seed
+            != suite.episode_seed(episode.snapshot_id, episode.repetition)
+            or episode.decisions > suite.max_decisions
+            or episode.elapsed_ticks > suite.max_simulated_ticks
+            or not (episode.terminated or episode.truncated)
+            for episode in value.episodes
+        ):
+            raise ValueError("baseline report cells do not exactly match the suite")
+    if report.episode_content_sha256 != replay_report.episode_content_sha256:
+        raise ValueError("baseline replay is not deterministic")
+    if report.episode_content_sha256 != exact_backend_report.episode_content_sha256:
+        raise ValueError("portable and exact baseline episode metrics differ")
+    episodes = len(report.episodes)
+    return BaselineEvidence(
+        baseline.baseline_id,
+        "complete",
+        episodes,
+        sum(value.raw_score for value in report.episodes) / episodes,
+        sum(value.invalid_actions for value in report.episodes),
+        suite.sha256,
+        report.sha256,
+        replay_report.sha256,
+        exact_backend_report.sha256,
+        report.backend_identity_sha256,
+        exact_backend_report.backend_identity_sha256,
+        report.episode_content_sha256,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class BaselineArtifactBundle:
+    """Typed primary/replay/exact artifacts consumed by sealed confirmation."""
+
+    baseline: ScriptedBaselineSpec
+    suite: EvaluationSuite
+    report: EvaluationReport
+    replay_report: EvaluationReport
+    exact_backend_report: EvaluationReport
+
+    def evidence(self):
+        return build_baseline_evidence(
+            self.baseline,
+            self.suite,
+            self.report,
+            self.replay_report,
+            self.exact_backend_report,
+        )

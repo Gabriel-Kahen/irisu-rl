@@ -31,6 +31,15 @@ def _canonical_sha256(value: object) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
+def _is_nonzero_sha256(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and value != "0" * 64
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
 def _require_keys(
     value: object, expected: set[str], *, location: str
 ) -> Mapping[str, object]:
@@ -467,41 +476,55 @@ class R3BExperimentPlan:
     def trial_jobs(
         self,
         phase: str,
-        arms: Sequence[CandidateArm] = (),
+        arms: (
+            Sequence[CandidateArm]
+            | CalibrationSelectionAuthorization
+            | SealedTestRunAuthorization
+        ) = (),
     ) -> tuple[TrialJob, ...]:
         """Enumerate the exact paired jobs allowed to enter one phase."""
 
-        supplied = tuple(arms)
+        supplied = (
+            ()
+            if isinstance(
+                arms,
+                (CalibrationSelectionAuthorization, SealedTestRunAuthorization),
+            )
+            else tuple(arms)
+        )
         if phase == "calibration":
             if supplied:
                 raise ValueError("calibration arms come only from the frozen grid")
             selected = self.arms
             seeds = self.calibration_learner_seeds
-            budget = self.calibration_budgets_updates[-1]
+            budgets = self.calibration_budgets_updates
             sealed = False
         elif phase == "validation":
             if (
-                len(supplied) != len(self.alpha_weight_ppm)
-                or tuple(arm.alpha_weight_ppm for arm in supplied)
-                != self.alpha_weight_ppm
-                or any(arm not in self.arms for arm in supplied)
+                not isinstance(arms, CalibrationSelectionAuthorization)
+                or arms.plan_sha256 != self.sha256
             ):
-                raise ValueError("validation requires one grid arm per alpha")
-            selected = supplied
+                raise ValueError("validation jobs require calibrated-arm authorization")
+            selected = arms.arms
             seeds = self.validation_learner_seeds
-            budget = self.validation_updates
+            budgets = (self.validation_updates,)
             sealed = False
         elif phase == "test":
             if (
-                len(supplied) != 2
-                or supplied[0].alpha_weight_ppm != 0
-                or supplied[1].alpha_weight_ppm <= 0
-                or any(arm not in self.arms for arm in supplied)
+                not isinstance(arms, SealedTestRunAuthorization)
+                or arms.plan.sha256 != self.sha256
             ):
-                raise ValueError("test requires one control and one shaped grid arm")
-            selected = supplied
+                raise ValueError("test jobs require a validation-bound authorization")
+            indexed = {arm.arm_id: arm for arm in self.arms}
+            try:
+                selected = (
+                    indexed[arms.authorization.control_arm_id],
+                    indexed[arms.authorization.candidate_arm_id],
+                )
+            except KeyError as exc:
+                raise ValueError("test authorization names an unplanned arm") from exc
             seeds = self.test_learner_seeds
-            budget = self.test_updates
+            budgets = (self.test_updates,)
             sealed = True
         else:
             raise ValueError("unknown R3b experiment phase")
@@ -514,9 +537,21 @@ class R3BExperimentPlan:
                 budget,
                 sealed,
                 TrialSeedPlan.derive(self.sha256, seed).sha256,
+                (
+                    arms.sha256
+                    if isinstance(
+                        arms,
+                        (
+                            CalibrationSelectionAuthorization,
+                            SealedTestRunAuthorization,
+                        ),
+                    )
+                    else None
+                ),
             )
             for arm in selected
             for seed in seeds
+            for budget in budgets
         )
 
     def manifest(self) -> dict[str, object]:
@@ -876,12 +911,13 @@ class TrialJob:
     budget_updates: int
     sealed: bool
     seed_plan_sha256: str
-    version: str = "r3b-trial-job-v1"
+    authorization_sha256: str | None = None
+    version: str = "r3b-trial-job-v2"
 
     def __post_init__(self) -> None:
         if (
             self.phase not in _PHASES
-            or self.version != "r3b-trial-job-v1"
+            or self.version != "r3b-trial-job-v2"
             or not isinstance(self.arm, CandidateArm)
             or isinstance(self.learner_seed, bool)
             or not isinstance(self.learner_seed, int)
@@ -890,6 +926,11 @@ class TrialJob:
             or not isinstance(self.budget_updates, int)
             or self.budget_updates <= 0
             or not isinstance(self.sealed, bool)
+            or (self.phase == "calibration" and self.authorization_sha256 is not None)
+            or (
+                self.phase != "calibration"
+                and not _is_nonzero_sha256(self.authorization_sha256)
+            )
         ):
             raise ValueError("trial job identity or budget is invalid")
         for name in ("plan_sha256", "seed_plan_sha256"):
@@ -912,6 +953,40 @@ class TrialJob:
             "budget_updates": self.budget_updates,
             "sealed": self.sealed,
             "seed_plan_sha256": self.seed_plan_sha256,
+            "authorization_sha256": self.authorization_sha256,
+        }
+
+    @property
+    def sha256(self) -> str:
+        return _canonical_sha256(self.manifest())
+
+
+@dataclass(frozen=True, slots=True)
+class CalibrationSelectionAuthorization:
+    """The single LR-per-alpha selection allowed to enter validation."""
+
+    plan_sha256: str
+    arms: tuple[CandidateArm, ...]
+    calibration_results_sha256: str
+    version: str = "r3b-calibration-selection-authorization-v1"
+
+    def __post_init__(self) -> None:
+        if (
+            self.version != "r3b-calibration-selection-authorization-v1"
+            or not _is_nonzero_sha256(self.plan_sha256)
+            or not _is_nonzero_sha256(self.calibration_results_sha256)
+            or not isinstance(self.arms, tuple)
+            or not self.arms
+            or any(not isinstance(arm, CandidateArm) for arm in self.arms)
+        ):
+            raise ValueError("calibration-selection authorization is malformed")
+
+    def manifest(self) -> dict[str, object]:
+        return {
+            "version": self.version,
+            "plan_sha256": self.plan_sha256,
+            "arms": [arm.manifest() for arm in self.arms],
+            "calibration_results_sha256": self.calibration_results_sha256,
         }
 
     @property
@@ -970,6 +1045,91 @@ def tick_aligned_raw_score_auc(
 
 
 @dataclass(frozen=True, slots=True)
+class EngineeringEvidence:
+    """Artifact identities required before an outcome may enter selection."""
+
+    phase: str
+    completed_updates: int
+    plan_sha256: str
+    job_sha256: str
+    arm_id: str
+    learner_seed: int
+    authorization_sha256: str | None
+    policy_sha256: str
+    trial_manifest_sha256: str
+    pairing_sha256: str
+    metrics_sha256: str
+    evaluation_suite_sha256: str
+    evaluation_report_sha256: str
+    checkpoint_resume_sha256: str
+    exact_backend_parity_sha256: str
+    tail_state_sha256: str | None = None
+    tail_phase: str | None = None
+    score_only_updates: int = 0
+    version: str = "r3b-engineering-evidence-v1"
+
+    def __post_init__(self) -> None:
+        if (
+            self.version != "r3b-engineering-evidence-v1"
+            or self.phase not in _PHASES
+            or isinstance(self.completed_updates, bool)
+            or not isinstance(self.completed_updates, int)
+            or self.completed_updates <= 0
+            or not self.arm_id
+            or isinstance(self.learner_seed, bool)
+            or not isinstance(self.learner_seed, int)
+            or not 0 <= self.learner_seed < 2**64
+            or isinstance(self.score_only_updates, bool)
+            or not isinstance(self.score_only_updates, int)
+            or self.score_only_updates < 0
+        ):
+            raise ValueError("engineering evidence phase or counters are invalid")
+        hashes = (
+            self.plan_sha256,
+            self.job_sha256,
+            self.policy_sha256,
+            self.trial_manifest_sha256,
+            self.pairing_sha256,
+            self.metrics_sha256,
+            self.evaluation_suite_sha256,
+            self.evaluation_report_sha256,
+            self.checkpoint_resume_sha256,
+            self.exact_backend_parity_sha256,
+        )
+        if self.tail_state_sha256 is not None:
+            hashes += (self.tail_state_sha256,)
+        if self.authorization_sha256 is not None:
+            hashes += (self.authorization_sha256,)
+        if any(not _is_nonzero_sha256(value) for value in hashes):
+            raise ValueError("engineering evidence must bind nonzero SHA-256 artifacts")
+        if self.phase == "calibration":
+            if (
+                self.authorization_sha256 is not None
+                or self.tail_state_sha256 is not None
+                or self.tail_phase is not None
+                or self.score_only_updates != 0
+            ):
+                raise ValueError("calibration evidence cannot claim tail completion")
+        elif self.authorization_sha256 is None:
+            raise ValueError("full-budget evidence must bind its phase authorization")
+        if self.phase != "calibration" and (
+            self.tail_state_sha256 is None
+            or self.tail_phase != "complete"
+            or self.score_only_updates != 400
+        ):
+            raise ValueError(
+                "full-budget evidence requires a completed score-only tail"
+            )
+
+    def manifest(self) -> dict[str, object]:
+        return asdict(self)
+
+    @property
+    def sha256(self) -> str:
+        return _canonical_sha256(self.manifest())
+
+
+@dataclass(frozen=True, slots=True)
 class LearnerOutcome:
     learner_seed: int
     raw_score_auc: float
@@ -978,7 +1138,7 @@ class LearnerOutcome:
     initial_model_sha256: str
     assignment_sha256: str
     seed_plan_sha256: str
-    engineering_pass: bool = True
+    engineering_evidence: EngineeringEvidence | None
 
     def __post_init__(self) -> None:
         if (
@@ -1001,8 +1161,15 @@ class LearnerOutcome:
             ):
                 raise ValueError(f"{name} must be finite and nonnegative")
             object.__setattr__(self, name, float(value))
-        if not isinstance(self.engineering_pass, bool):
-            raise ValueError("engineering_pass must be boolean")
+        if self.engineering_evidence is not None and not isinstance(
+            self.engineering_evidence, EngineeringEvidence
+        ):
+            raise ValueError("engineering evidence is malformed")
+        if (
+            self.engineering_evidence is not None
+            and self.engineering_evidence.learner_seed != self.learner_seed
+        ):
+            raise ValueError("engineering evidence learner seed mismatch")
         for name in (
             "initial_model_sha256",
             "assignment_sha256",
@@ -1018,7 +1185,17 @@ class LearnerOutcome:
                 raise ValueError(f"{name} must be a nonzero lowercase SHA-256")
 
     def manifest(self) -> dict[str, object]:
-        return asdict(self)
+        value = asdict(self)
+        value["engineering_evidence"] = (
+            None
+            if self.engineering_evidence is None
+            else self.engineering_evidence.manifest()
+        )
+        return value
+
+    @property
+    def engineering_pass(self) -> bool:
+        return self.engineering_evidence is not None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1048,6 +1225,17 @@ class ArmPhaseResult:
                 raise ValueError(
                     "complete results require outcomes and no failure reason"
                 )
+            if any(
+                outcome.engineering_evidence is not None
+                and (
+                    outcome.engineering_evidence.phase != self.phase
+                    or outcome.engineering_evidence.completed_updates
+                    != self.budget_updates
+                    or outcome.engineering_evidence.arm_id != self.arm_id
+                )
+                for outcome in self.outcomes
+            ):
+                raise ValueError("engineering evidence disagrees with its phase result")
         elif not isinstance(self.failure_reason, str) or not self.failure_reason:
             raise ValueError("non-complete results must retain a failure reason")
 
@@ -1093,7 +1281,7 @@ def _require_exact_seeds(
 def _require_paired_identities(
     results: Sequence[ArmPhaseResult], expected_seeds: tuple[int, ...]
 ) -> None:
-    by_seed: dict[int, tuple[str, str, str]] = {}
+    by_seed: dict[int, tuple[str, str, str, str, str]] = {}
     for result in results:
         if result.status != "complete":
             continue
@@ -1104,12 +1292,34 @@ def _require_paired_identities(
                 outcome.initial_model_sha256,
                 outcome.assignment_sha256,
                 outcome.seed_plan_sha256,
+                (
+                    outcome.engineering_evidence.pairing_sha256
+                    if outcome.engineering_evidence is not None
+                    else ""
+                ),
+                (
+                    outcome.engineering_evidence.evaluation_suite_sha256
+                    if outcome.engineering_evidence is not None
+                    else ""
+                ),
             )
             previous = by_seed.setdefault(outcome.learner_seed, identity)
             if previous != identity:
                 raise ValueError(
-                    "paired arms disagree on initial model, assignment, or seed identity"
+                    "paired arms disagree on model, assignment, seed, runner, or suite identity"
                 )
+
+
+def _require_plan_evidence(
+    plan: R3BExperimentPlan, results: Sequence[ArmPhaseResult]
+) -> None:
+    if any(
+        outcome.engineering_evidence is not None
+        and outcome.engineering_evidence.plan_sha256 != plan.sha256
+        for result in results
+        for outcome in result.outcomes
+    ):
+        raise ValueError("engineering evidence belongs to another experiment plan")
 
 
 def select_calibrated_learning_rates(
@@ -1121,6 +1331,7 @@ def select_calibrated_learning_rates(
     indexed = _index_exact_results(
         results, {arm.arm_id for arm in arms}, phase="calibration"
     )
+    _require_plan_evidence(plan, tuple(indexed.values()))
     _require_paired_identities(tuple(indexed.values()), plan.calibration_learner_seeds)
     selected: list[CandidateArm] = []
     final_budget = plan.calibration_budgets_updates[-1]
@@ -1158,14 +1369,33 @@ def select_calibrated_learning_rates(
     return tuple(selected)
 
 
+def authorize_validation(
+    plan: R3BExperimentPlan, results: Sequence[ArmPhaseResult]
+) -> CalibrationSelectionAuthorization:
+    retained = tuple(results)
+    arms = select_calibrated_learning_rates(plan, retained)
+    return CalibrationSelectionAuthorization(
+        plan.sha256,
+        arms,
+        _canonical_sha256(
+            [result.sha256 for result in sorted(retained, key=lambda x: x.arm_id)]
+        ),
+    )
+
+
 def select_validation_candidate(
     plan: R3BExperimentPlan,
-    calibrated_arms: Sequence[CandidateArm],
+    authorization: CalibrationSelectionAuthorization,
     results: Sequence[ArmPhaseResult],
 ) -> CandidateArm | None:
     """Choose one shaped candidate using validation only; never consult test data."""
 
-    arms = tuple(calibrated_arms)
+    if (
+        not isinstance(authorization, CalibrationSelectionAuthorization)
+        or authorization.plan_sha256 != plan.sha256
+    ):
+        raise ValueError("validation selection lacks calibration authorization")
+    arms = authorization.arms
     if (
         len(arms) != len(plan.alpha_weight_ppm)
         or tuple(arm.alpha_weight_ppm for arm in arms) != plan.alpha_weight_ppm
@@ -1174,7 +1404,15 @@ def select_validation_candidate(
     indexed = _index_exact_results(
         results, {arm.arm_id for arm in arms}, phase="validation"
     )
+    _require_plan_evidence(plan, tuple(indexed.values()))
     _require_paired_identities(tuple(indexed.values()), plan.validation_learner_seeds)
+    if any(
+        outcome.engineering_evidence is not None
+        and outcome.engineering_evidence.authorization_sha256 != authorization.sha256
+        for result in indexed.values()
+        for outcome in result.outcomes
+    ):
+        raise ValueError("validation evidence disagrees with calibration authorization")
     for result in indexed.values():
         if result.budget_updates != plan.validation_updates:
             raise ValueError("validation result is not a full-budget run")
@@ -1242,13 +1480,21 @@ class BaselineEvidence:
     episodes: int
     mean_raw_score: float
     invalid_actions: int
-    deterministic_replay: bool
-    raw_score_identity: bool
-    portable_exact_parity: bool
+    suite_sha256: str
     report_sha256: str
+    replay_report_sha256: str
+    exact_report_sha256: str
+    portable_backend_sha256: str
+    exact_backend_sha256: str
+    episode_content_sha256: str
+    version: str = "r3b-baseline-evidence-v1"
 
     def __post_init__(self) -> None:
-        if not isinstance(self.baseline_id, str) or not self.baseline_id:
+        if (
+            self.version != "r3b-baseline-evidence-v1"
+            or not isinstance(self.baseline_id, str)
+            or not self.baseline_id
+        ):
             raise ValueError("baseline_id is required")
         if self.status not in {"complete", "failure"}:
             raise ValueError("baseline status must be complete or failure")
@@ -1269,24 +1515,31 @@ class BaselineEvidence:
         ):
             raise ValueError("baseline raw-score mean must be finite and nonnegative")
         object.__setattr__(self, "mean_raw_score", float(self.mean_raw_score))
-        if (
-            not isinstance(self.report_sha256, str)
-            or self.report_sha256 == "0" * 64
-            or len(self.report_sha256) != 64
-            or any(
-                character not in "0123456789abcdef" for character in self.report_sha256
-            )
-        ):
-            raise ValueError("baseline evidence must bind a nonzero report SHA-256")
         if any(
-            not isinstance(value, bool)
+            not _is_nonzero_sha256(value)
             for value in (
-                self.deterministic_replay,
-                self.raw_score_identity,
-                self.portable_exact_parity,
+                self.suite_sha256,
+                self.report_sha256,
+                self.replay_report_sha256,
+                self.exact_report_sha256,
+                self.portable_backend_sha256,
+                self.exact_backend_sha256,
+                self.episode_content_sha256,
             )
         ):
-            raise ValueError("baseline audit fields must be boolean")
+            raise ValueError("baseline evidence must bind nonzero report SHA-256s")
+        if (
+            len(
+                {
+                    self.report_sha256,
+                    self.replay_report_sha256,
+                    self.exact_report_sha256,
+                }
+            )
+            != 3
+            or self.portable_backend_sha256 == self.exact_backend_sha256
+        ):
+            raise ValueError("baseline evidence requires independent backend reports")
 
     def manifest(self) -> dict[str, object]:
         return asdict(self)
@@ -1297,7 +1550,10 @@ class BaselineEvidence:
 
 
 def baseline_requirements_pass(
-    plan: R3BExperimentPlan, evidence: Sequence[BaselineEvidence]
+    plan: R3BExperimentPlan,
+    evidence: Sequence[BaselineEvidence],
+    *,
+    expected_suite_sha256: str | None = None,
 ) -> bool:
     indexed: dict[str, BaselineEvidence] = {}
     allowed = set(plan.required_baselines) | set(plan.optional_baselines)
@@ -1311,10 +1567,188 @@ def baseline_requirements_pass(
         item.status == "complete"
         and item.episodes >= plan.minimum_baseline_episodes
         and item.invalid_actions == 0
-        and item.deterministic_replay
-        and item.raw_score_identity
-        and item.portable_exact_parity
+        and (
+            expected_suite_sha256 is None or item.suite_sha256 == expected_suite_sha256
+        )
         for item in (indexed[name] for name in plan.required_baselines)
+    )
+
+
+def _resolve_baseline_artifacts(
+    artifacts: Sequence[object],
+) -> tuple[BaselineEvidence, ...]:
+    from .r3b_evaluation import BaselineArtifactBundle
+
+    if any(not isinstance(item, BaselineArtifactBundle) for item in artifacts):
+        raise TypeError("sealed confirmation requires typed baseline artifacts")
+    return tuple(item.evidence() for item in artifacts)
+
+
+@dataclass(frozen=True, slots=True)
+class SealedTestAuthorization:
+    """One candidate selection bound to validation and a sealed test suite."""
+
+    plan_sha256: str
+    calibration_authorization_sha256: str
+    control_arm_id: str
+    candidate_arm_id: str
+    validation_results_sha256: str
+    validation_suite_sha256: str
+    test_suite_sha256: str
+    attempt: int = 1
+    version: str = "r3b-sealed-test-authorization-v2"
+
+    def __post_init__(self) -> None:
+        if (
+            self.version != "r3b-sealed-test-authorization-v2"
+            or not self.control_arm_id
+            or not self.candidate_arm_id
+            or self.control_arm_id == self.candidate_arm_id
+            or self.attempt != 1
+            or any(
+                not _is_nonzero_sha256(value)
+                for value in (
+                    self.plan_sha256,
+                    self.calibration_authorization_sha256,
+                    self.validation_results_sha256,
+                    self.validation_suite_sha256,
+                    self.test_suite_sha256,
+                )
+            )
+        ):
+            raise ValueError("sealed-test authorization identity is invalid")
+
+    def manifest(self) -> dict[str, object]:
+        return asdict(self)
+
+    @property
+    def sha256(self) -> str:
+        return _canonical_sha256(self.manifest())
+
+
+def authorize_sealed_test(
+    plan: R3BExperimentPlan,
+    calibration_authorization: CalibrationSelectionAuthorization,
+    validation_results: Sequence[ArmPhaseResult],
+    validation_suite: object,
+    test_suite: object,
+) -> SealedTestAuthorization:
+    """Select exactly once from validation data and bind the sealed test cells."""
+
+    from .r3b_evaluation import EvaluationSuite
+
+    if (
+        not isinstance(validation_suite, EvaluationSuite)
+        or not isinstance(test_suite, EvaluationSuite)
+        or validation_suite.split != "validation"
+        or test_suite.split != "test"
+        or len(validation_suite.snapshot_ids) * validation_suite.repetitions
+        != plan.validation_episodes_per_policy
+        or len(test_suite.snapshot_ids) * test_suite.repetitions
+        != plan.test_episodes_per_policy
+        or set(validation_suite.snapshot_ids) & set(test_suite.snapshot_ids)
+        or (
+            validation_suite.runtime_identity_sha256,
+            validation_suite.library_sha256,
+            validation_suite.snapshot_store_sha256,
+            validation_suite.action_spec_sha256,
+            validation_suite.assignment_sha256,
+        )
+        != (
+            test_suite.runtime_identity_sha256,
+            test_suite.library_sha256,
+            test_suite.snapshot_store_sha256,
+            test_suite.action_spec_sha256,
+            test_suite.assignment_sha256,
+        )
+    ):
+        raise ValueError("validation/test evaluation suites violate the sealed split")
+    results = tuple(validation_results)
+    if any(
+        outcome.engineering_evidence is None
+        or outcome.engineering_evidence.evaluation_suite_sha256
+        != validation_suite.sha256
+        for result in results
+        for outcome in result.outcomes
+    ):
+        raise ValueError("validation outcomes disagree with their evaluation suite")
+    arms = calibration_authorization.arms
+    candidate = select_validation_candidate(plan, calibration_authorization, results)
+    if candidate is None:
+        raise ValueError("validation selected no shaped candidate")
+    control = arms[0]
+    if control.alpha_weight_ppm != 0 or candidate.alpha_weight_ppm <= 0:
+        raise ValueError("sealed authorization requires control and shaped arms")
+    result_identity = _canonical_sha256(
+        [result.sha256 for result in sorted(results, key=lambda x: x.arm_id)]
+    )
+    return SealedTestAuthorization(
+        plan.sha256,
+        calibration_authorization.sha256,
+        control.arm_id,
+        candidate.arm_id,
+        result_identity,
+        validation_suite.sha256,
+        test_suite.sha256,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class SealedTestRunAuthorization:
+    """Resolved upstream artifacts required to create or confirm test jobs."""
+
+    plan: R3BExperimentPlan
+    authorization: SealedTestAuthorization
+    calibration_authorization: CalibrationSelectionAuthorization
+    validation_results: tuple[ArmPhaseResult, ...]
+    validation_suite: object
+    test_suite: object
+    version: str = "r3b-sealed-test-run-authorization-v1"
+
+    def __post_init__(self) -> None:
+        if (
+            self.version != "r3b-sealed-test-run-authorization-v1"
+            or not isinstance(self.plan, R3BExperimentPlan)
+            or not isinstance(self.validation_results, tuple)
+        ):
+            raise ValueError("sealed-test run authorization is malformed")
+        expected = authorize_sealed_test(
+            self.plan,
+            self.calibration_authorization,
+            self.validation_results,
+            self.validation_suite,
+            self.test_suite,
+        )
+        if expected != self.authorization:
+            raise ValueError("sealed-test run authorization artifacts disagree")
+
+    @property
+    def sha256(self) -> str:
+        return self.authorization.sha256
+
+
+def bind_sealed_test_run(
+    plan: R3BExperimentPlan,
+    calibration_authorization: CalibrationSelectionAuthorization,
+    validation_results: Sequence[ArmPhaseResult],
+    validation_suite: object,
+    test_suite: object,
+) -> SealedTestRunAuthorization:
+    results = tuple(validation_results)
+    authorization = authorize_sealed_test(
+        plan,
+        calibration_authorization,
+        results,
+        validation_suite,
+        test_suite,
+    )
+    return SealedTestRunAuthorization(
+        plan,
+        authorization,
+        calibration_authorization,
+        results,
+        validation_suite,
+        test_suite,
     )
 
 
@@ -1380,23 +1814,25 @@ class ConfirmationDecision:
 @dataclass(frozen=True, slots=True)
 class SealedConfirmationReport:
     plan_sha256: str
+    authorization_sha256: str
     candidate_arm_id: str
     control_arm_id: str
     candidate_result_sha256: str
     control_result_sha256: str
     baseline_evidence_sha256: tuple[str, ...]
     decision: ConfirmationDecision
-    version: str = "r3b-sealed-confirmation-report-v1"
+    version: str = "r3b-sealed-confirmation-report-v2"
 
     def __post_init__(self) -> None:
         hashes = (
             self.plan_sha256,
+            self.authorization_sha256,
             self.candidate_result_sha256,
             self.control_result_sha256,
             *self.baseline_evidence_sha256,
         )
         if (
-            self.version != "r3b-sealed-confirmation-report-v1"
+            self.version != "r3b-sealed-confirmation-report-v2"
             or not self.candidate_arm_id
             or not self.control_arm_id
             or not isinstance(self.decision, ConfirmationDecision)
@@ -1418,6 +1854,7 @@ class SealedConfirmationReport:
         return {
             "version": self.version,
             "plan_sha256": self.plan_sha256,
+            "authorization_sha256": self.authorization_sha256,
             "candidate_arm_id": self.candidate_arm_id,
             "control_arm_id": self.control_arm_id,
             "candidate_result_sha256": self.candidate_result_sha256,
@@ -1440,19 +1877,30 @@ def _percentile_lower(values: list[float], confidence_level: float) -> float:
 
 def confirm_on_sealed_test(
     plan: R3BExperimentPlan,
-    candidate_arm: CandidateArm,
+    sealed_run: SealedTestRunAuthorization,
     candidate_result: ArmPhaseResult,
-    control_arm: CandidateArm,
     control_result: ArmPhaseResult,
-    baseline_evidence: Sequence[BaselineEvidence],
+    baseline_artifacts: Sequence[object],
 ) -> ConfirmationDecision:
     """Apply one-sided paired-bootstrap gates to one preselected candidate."""
 
+    authorization_valid = (
+        isinstance(sealed_run, SealedTestRunAuthorization)
+        and sealed_run.plan.sha256 == plan.sha256
+    )
+    authorization = sealed_run.authorization
+    arm_index = {arm.arm_id: arm for arm in plan.arms}
+    candidate_arm = arm_index.get(authorization.candidate_arm_id)
+    control_arm = arm_index.get(authorization.control_arm_id)
     preconditions = (
-        candidate_arm.alpha_weight_ppm > 0
+        authorization_valid
+        and authorization.plan_sha256 == plan.sha256
+        and candidate_arm is not None
+        and control_arm is not None
+        and candidate_arm.alpha_weight_ppm > 0
         and control_arm.alpha_weight_ppm == 0
-        and candidate_result.arm_id == candidate_arm.arm_id
-        and control_result.arm_id == control_arm.arm_id
+        and candidate_result.arm_id == authorization.candidate_arm_id
+        and control_result.arm_id == authorization.control_arm_id
         and candidate_result.phase == control_result.phase == "test"
         and candidate_result.budget_updates
         == control_result.budget_updates
@@ -1473,10 +1921,24 @@ def confirm_on_sealed_test(
     control = {outcome.learner_seed: outcome for outcome in control_result.outcomes}
     exact_test = set(candidate) == set(control) == set(plan.test_learner_seeds)
     engineering = all(
-        outcome.engineering_pass
+        outcome.engineering_evidence is not None
+        and outcome.engineering_evidence.plan_sha256 == plan.sha256
+        and outcome.engineering_evidence.phase == "test"
+        and outcome.engineering_evidence.authorization_sha256 == authorization.sha256
+        and outcome.engineering_evidence.evaluation_suite_sha256
+        == authorization.test_suite_sha256
         for outcome in (*candidate_result.outcomes, *control_result.outcomes)
     )
-    baseline_pass = baseline_requirements_pass(plan, baseline_evidence)
+    try:
+        baseline_evidence = _resolve_baseline_artifacts(baseline_artifacts)
+        baseline_pass = baseline_requirements_pass(
+            plan,
+            baseline_evidence,
+            expected_suite_sha256=authorization.test_suite_sha256,
+        )
+    except (TypeError, ValueError):
+        baseline_evidence = ()
+        baseline_pass = False
     if not exact_test:
         return ConfirmationDecision(
             False,
@@ -1574,27 +2036,31 @@ def confirm_on_sealed_test(
 
 def build_sealed_confirmation_report(
     plan: R3BExperimentPlan,
-    candidate_arm: CandidateArm,
+    sealed_run: SealedTestRunAuthorization,
     candidate_result: ArmPhaseResult,
-    control_arm: CandidateArm,
     control_result: ArmPhaseResult,
-    baseline_evidence: Sequence[BaselineEvidence],
+    baseline_artifacts: Sequence[object],
 ) -> SealedConfirmationReport:
     """Bind the canonical decision to every result/evidence artifact identity."""
 
-    evidence = tuple(baseline_evidence)
+    artifacts = tuple(baseline_artifacts)
+    authorization = sealed_run.authorization
+    try:
+        evidence = _resolve_baseline_artifacts(artifacts)
+    except (TypeError, ValueError):
+        evidence = ()
     decision = confirm_on_sealed_test(
         plan,
-        candidate_arm,
+        sealed_run,
         candidate_result,
-        control_arm,
         control_result,
-        evidence,
+        artifacts,
     )
     return SealedConfirmationReport(
         plan.sha256,
-        candidate_arm.arm_id,
-        control_arm.arm_id,
+        authorization.sha256,
+        authorization.candidate_arm_id,
+        authorization.control_arm_id,
         candidate_result.sha256,
         control_result.sha256,
         tuple(item.sha256 for item in evidence),

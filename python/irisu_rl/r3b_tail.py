@@ -57,6 +57,16 @@ def _finite_rows(value: object, width: int, label: str) -> tuple[float, ...]:
     return tuple(result)
 
 
+def _integer_rows(value: object, width: int, label: str) -> tuple[int, ...]:
+    if isinstance(value, (str, bytes)) or not isinstance(value, Sequence):
+        raise ValueError(f"decision audit is missing {label}")
+    if len(value) != width or any(
+        isinstance(item, bool) or not isinstance(item, Integral) for item in value
+    ):
+        raise ValueError(f"decision audit {label} must contain {width} integers")
+    return tuple(int(item) for item in value)
+
+
 def _weights(value: object, *, label: str) -> tuple[int, ...]:
     if isinstance(value, Tensor):
         if (
@@ -86,7 +96,9 @@ def _weights(value: object, *, label: str) -> tuple[int, ...]:
     return tuple(result)
 
 
-def _audit_manifest(audit: object) -> dict[str, object]:
+def _audit_manifest(
+    audit: object, *, reward_scale: float, reward_sha256: str
+) -> dict[str, object]:
     """Validate and reduce one collection audit to score-only evidence."""
 
     if audit is None:
@@ -104,6 +116,8 @@ def _audit_manifest(audit: object) -> dict[str, object]:
         raise ValueError("collection audit is missing decision audits")
     if len(decisions) != decision_rows:
         raise ValueError("collection decision-row count mismatch")
+    if getattr(audit, "reward_sha256", None) != reward_sha256:
+        raise ValueError("collection reward identity mismatch")
 
     optimizer_reward = getattr(audit, "optimizer_reward", None)
     if (
@@ -122,9 +136,13 @@ def _audit_manifest(audit: object) -> dict[str, object]:
         or invalid_actions < 0
     ):
         raise ValueError("collection invalid-action count is malformed")
+    if invalid_actions != 0:
+        raise ValueError("collection contains invalid actions")
 
     rows = []
     lane_width: int | None = None
+    raw_total = 0
+    optimizer_total = 0.0
     for decision in decisions:
         weights = _weights(
             getattr(decision, "shaping_weight_ppm", None),
@@ -134,6 +152,11 @@ def _audit_manifest(audit: object) -> dict[str, object]:
             lane_width = len(weights)
         elif len(weights) != lane_width:
             raise ValueError("decision audit lane width changed within a collection")
+        raw = _integer_rows(
+            getattr(decision, "raw_rewards", None),
+            len(weights),
+            "raw_rewards",
+        )
         scaled = _finite_rows(
             getattr(decision, "scaled_raw_rewards", None),
             len(weights),
@@ -149,13 +172,41 @@ def _audit_manifest(audit: object) -> dict[str, object]:
             len(weights),
             "optimizer_rewards",
         )
-        for weight, raw_value, optimizer_value in zip(weights, scaled, optimizer):
-            if weight == 0 and optimizer_value != raw_value:
+        expected_scaled = tuple(
+            float(
+                torch.tensor(int(raw_value), dtype=torch.int64)
+                .to(torch.float32)
+                .div(reward_scale)
+            )
+            for raw_value in raw
+        )
+        expected_optimizer = tuple(
+            float(value)
+            for value in (
+                torch.tensor(expected_scaled, dtype=torch.float32)
+                + torch.tensor(shaping, dtype=torch.float32)
+                * (
+                    torch.tensor(weights, dtype=torch.int64).to(torch.float32)
+                    / 1_000_000.0
+                )
+            ).tolist()
+        )
+        if scaled != expected_scaled:
+            raise ValueError("scaled raw reward does not match raw reward and scale")
+        if optimizer != expected_optimizer:
+            raise ValueError("optimizer reward does not match declared composition")
+        for weight, shaping_value, raw_value, optimizer_value in zip(
+            weights, shaping, scaled, optimizer
+        ):
+            if weight == 0 and (shaping_value != 0.0 or optimizer_value != raw_value):
                 raise ValueError(
                     "zero-weight decision reward is not exactly score-only"
                 )
+        raw_total += sum(raw)
+        optimizer_total += float(torch.tensor(optimizer, dtype=torch.float32).sum())
         rows.append(
             {
+                "raw_rewards": list(raw),
                 "shaping_weight_ppm": list(weights),
                 "scaled_raw_rewards": list(scaled),
                 "shaping_rewards": list(shaping),
@@ -164,12 +215,17 @@ def _audit_manifest(audit: object) -> dict[str, object]:
         )
     if transitions != decision_rows * int(lane_width or 0):
         raise ValueError("collection transition count does not match decision audits")
+    if int(raw_reward) != raw_total:
+        raise ValueError("collection raw reward does not match decision rows")
+    if float(optimizer_reward) != optimizer_total:
+        raise ValueError("collection optimizer reward does not match decision rows")
     return {
         "decision_rows": decision_rows,
         "transitions": transitions,
         "raw_reward": int(raw_reward),
         "optimizer_reward": float(optimizer_reward),
         "invalid_actions": int(invalid_actions),
+        "reward_sha256": reward_sha256,
         "decisions": rows,
     }
 
@@ -183,10 +239,15 @@ class ScoreOnlyTailController:
     again when the completed clock advances.
     """
 
-    version = "score-only-tail-controller-v1"
+    version = "score-only-tail-controller-v2"
 
     def __init__(
-        self, sweep_updates: int, *, minimum_score_only_updates: int = 400
+        self,
+        sweep_updates: int,
+        *,
+        reward_scale: float,
+        reward_sha256: str,
+        minimum_score_only_updates: int = 400,
     ) -> None:
         if (
             isinstance(sweep_updates, bool)
@@ -200,7 +261,18 @@ class ScoreOnlyTailController:
             or minimum_score_only_updates < 400
         ):
             raise ValueError("score-only tail must contain at least 400 updates")
+        if (
+            isinstance(reward_scale, bool)
+            or not isinstance(reward_scale, Real)
+            or not math.isfinite(float(reward_scale))
+            or reward_scale <= 0
+            or not _is_sha256(reward_sha256)
+            or reward_sha256 == _ZERO_SHA256
+        ):
+            raise ValueError("tail reward scale and identity are invalid")
         self.sweep_updates = int(sweep_updates)
+        self.reward_scale = float(reward_scale)
+        self.reward_sha256 = reward_sha256
         self.minimum_score_only_updates = int(minimum_score_only_updates)
         self.phase: TailPhase = "sweep"
         self.completed_updates = 0
@@ -214,6 +286,8 @@ class ScoreOnlyTailController:
             "version": self.version,
             "sweep_updates": self.sweep_updates,
             "minimum_score_only_updates": self.minimum_score_only_updates,
+            "reward_scale": self.reward_scale,
+            "reward_sha256": self.reward_sha256,
             "score_only_weight_ppm": 0,
             "drain_advances_optimizer_clock": False,
         }
@@ -280,7 +354,11 @@ class ScoreOnlyTailController:
         self._clock(completed_updates)
         if self.phase != "draining":
             raise RuntimeError("drain evidence is only valid during tail draining")
-        manifest = _audit_manifest(audit)
+        manifest = _audit_manifest(
+            audit,
+            reward_scale=self.reward_scale,
+            reward_sha256=self.reward_sha256,
+        )
         weights = [
             weight
             for row in manifest["decisions"]
@@ -311,7 +389,11 @@ class ScoreOnlyTailController:
             raise RuntimeError(f"optimizer updates are forbidden during {self.phase}")
         if self.phase == "sweep" and before >= self.sweep_updates:
             raise RuntimeError("tail collection mode must be resolved after the sweep")
-        manifest = _audit_manifest(audit)
+        manifest = _audit_manifest(
+            audit,
+            reward_scale=self.reward_scale,
+            reward_sha256=self.reward_sha256,
+        )
         if self.phase == "score_only" and any(
             weight != 0
             for row in manifest["decisions"]
@@ -331,7 +413,11 @@ class ScoreOnlyTailController:
         after = _canonical_nonnegative(completed_updates, "completed update clock")
         if after != pending[0] + 1 or pending[0] != self.completed_updates:
             raise ValueError("optimizer update clock did not advance by exactly one")
-        manifest = _audit_manifest(audit)
+        manifest = _audit_manifest(
+            audit,
+            reward_scale=self.reward_scale,
+            reward_sha256=self.reward_sha256,
+        )
         audit_sha256 = _canonical_sha256(manifest)
         if audit_sha256 != pending[1]:
             raise ValueError("optimizer update audit changed after validation")

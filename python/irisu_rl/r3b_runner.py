@@ -26,7 +26,16 @@ from .curriculum import (
 from .encoding import TeacherStateEncoder
 from .models import RecurrentActorCritic
 from .ppo import PPOConfig, PPOTrainer
-from .r3b_experiments import CandidateArm, R3BExperimentPlan, TrialSeedPlan
+from .r3b_evaluation import EvaluationReport, EvaluationSuite
+from .r3b_experiments import (
+    CalibrationSelectionAuthorization,
+    CandidateArm,
+    EngineeringEvidence,
+    R3BExperimentPlan,
+    SealedTestRunAuthorization,
+    TrialJob,
+    TrialSeedPlan,
+)
 from .r3b_tail import ScoreOnlyTailController
 from .rewards import (
     LinearGaugePotential,
@@ -62,8 +71,13 @@ def _thaw_json(value: object) -> object:
 @dataclass(frozen=True, slots=True)
 class TrialManifest:
     plan_sha256: str
+    job_sha256: str
+    phase: str
     arm_id: str
     learner_seed: int
+    budget_updates: int
+    sealed: bool
+    authorization_sha256: str | None
     seed_plan_sha256: str
     initial_model_sha256: str
     curriculum_sha256: str
@@ -71,17 +85,19 @@ class TrialManifest:
     snapshot_store_sha256: str
     runtime_identity_sha256: str
     reward_sha256: str
+    pairing_sha256: str
     collector: Mapping[str, object]
     ppo: Mapping[str, object]
     lanes: int
     deployable: bool = False
     observation_provenance: str = "privileged_simulator"
     transfer_gate: str = "R4 causal tracker and input calibration pending"
-    version: str = "r3b-trial-manifest-v1"
+    version: str = "r3b-trial-manifest-v2"
 
     def __post_init__(self) -> None:
         hashes = (
             self.plan_sha256,
+            self.job_sha256,
             self.seed_plan_sha256,
             self.initial_model_sha256,
             self.curriculum_sha256,
@@ -89,6 +105,7 @@ class TrialManifest:
             self.snapshot_store_sha256,
             self.runtime_identity_sha256,
             self.reward_sha256,
+            self.pairing_sha256,
         )
         if any(
             not isinstance(value, str)
@@ -101,7 +118,8 @@ class TrialManifest:
                 "trial identities must be nonzero lowercase SHA-256 values"
             )
         if (
-            self.version != "r3b-trial-manifest-v1"
+            self.version != "r3b-trial-manifest-v2"
+            or self.phase not in {"calibration", "validation", "test"}
             or not self.arm_id
             or isinstance(self.learner_seed, bool)
             or not isinstance(self.learner_seed, int)
@@ -109,6 +127,24 @@ class TrialManifest:
             or isinstance(self.lanes, bool)
             or not isinstance(self.lanes, int)
             or self.lanes <= 0
+            or isinstance(self.budget_updates, bool)
+            or not isinstance(self.budget_updates, int)
+            or self.budget_updates <= 0
+            or not isinstance(self.sealed, bool)
+            or self.sealed != (self.phase == "test")
+            or (
+                self.phase != "calibration"
+                and (
+                    not isinstance(self.authorization_sha256, str)
+                    or len(self.authorization_sha256) != 64
+                    or self.authorization_sha256 == "0" * 64
+                    or any(
+                        character not in "0123456789abcdef"
+                        for character in self.authorization_sha256
+                    )
+                )
+            )
+            or (self.phase == "calibration" and self.authorization_sha256 is not None)
         ):
             raise ValueError("trial manifest identity or dimensions are invalid")
         if (
@@ -123,8 +159,13 @@ class TrialManifest:
     def manifest(self) -> dict[str, object]:
         return {
             "plan_sha256": self.plan_sha256,
+            "job_sha256": self.job_sha256,
+            "phase": self.phase,
             "arm_id": self.arm_id,
             "learner_seed": self.learner_seed,
+            "budget_updates": self.budget_updates,
+            "sealed": self.sealed,
+            "authorization_sha256": self.authorization_sha256,
             "seed_plan_sha256": self.seed_plan_sha256,
             "initial_model_sha256": self.initial_model_sha256,
             "curriculum_sha256": self.curriculum_sha256,
@@ -132,6 +173,7 @@ class TrialManifest:
             "snapshot_store_sha256": self.snapshot_store_sha256,
             "runtime_identity_sha256": self.runtime_identity_sha256,
             "reward_sha256": self.reward_sha256,
+            "pairing_sha256": self.pairing_sha256,
             "collector": _thaw_json(self.collector),
             "ppo": _thaw_json(self.ppo),
             "lanes": self.lanes,
@@ -159,6 +201,65 @@ class BuiltTrial:
         close = getattr(self.environment, "close", None)
         if close is not None:
             close()
+
+    def engineering_evidence(
+        self,
+        *,
+        metrics_sha256: str,
+        evaluation_suite: EvaluationSuite,
+        evaluation_report: EvaluationReport,
+        checkpoint_resume_sha256: str,
+        exact_backend_parity_sha256: str,
+    ) -> EngineeringEvidence:
+        """Bind completed session state to the external audit artifacts."""
+
+        self.session.assert_evidence_ready()
+        completed = self.session.trainer.schedule.completed_updates
+        policy_sha256 = self.session.policy_sha256
+        if (
+            evaluation_suite.split != self.manifest.phase
+            or evaluation_report.suite_sha256 != evaluation_suite.sha256
+            or evaluation_report.policy_sha256 != policy_sha256
+        ):
+            raise ValueError(
+                "evaluation artifacts do not belong to the completed trial"
+            )
+        tail_state = None
+        tail_state_sha256 = None
+        tail_phase = None
+        score_only_updates = 0
+        if self.session.tail_controller is not None:
+            tail_state = self.session.tail_controller.state_dict()
+            tail_phase = str(tail_state["phase"])
+            score_only_updates = int(tail_state["score_only_updates"])
+            tail_state_sha256 = hashlib.sha256(
+                json.dumps(
+                    tail_state,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    allow_nan=False,
+                ).encode()
+            ).hexdigest()
+        return EngineeringEvidence(
+            phase=self.manifest.phase,
+            completed_updates=completed,
+            plan_sha256=self.manifest.plan_sha256,
+            job_sha256=self.manifest.job_sha256,
+            arm_id=self.manifest.arm_id,
+            learner_seed=self.manifest.learner_seed,
+            authorization_sha256=self.manifest.authorization_sha256,
+            policy_sha256=policy_sha256,
+            trial_manifest_sha256=self.manifest.sha256,
+            pairing_sha256=self.manifest.pairing_sha256,
+            metrics_sha256=metrics_sha256,
+            evaluation_suite_sha256=evaluation_suite.sha256,
+            evaluation_report_sha256=evaluation_report.sha256,
+            checkpoint_resume_sha256=checkpoint_resume_sha256,
+            exact_backend_parity_sha256=exact_backend_parity_sha256,
+            tail_state_sha256=tail_state_sha256,
+            tail_phase=tail_phase,
+            score_only_updates=score_only_updates,
+        )
 
     def __enter__(self) -> BuiltTrial:
         return self
@@ -242,7 +343,80 @@ class R3BRunBuilder:
         )
         return replace(self.base_curriculum, stages=(stage,))
 
-    def build(self, arm: CandidateArm, learner_seed: int) -> BuiltTrial:
+    def _validate_job(
+        self,
+        job: TrialJob,
+        authorization: CalibrationSelectionAuthorization
+        | SealedTestRunAuthorization
+        | None,
+    ) -> None:
+        if not isinstance(job, TrialJob) or job.plan_sha256 != self.plan.sha256:
+            raise ValueError("trial job does not belong to the frozen plan")
+        if job.arm not in self.plan.arms:
+            raise ValueError("trial job arm is absent from the frozen plan")
+        phase_contract = {
+            "calibration": (
+                self.plan.calibration_learner_seeds,
+                self.plan.calibration_budgets_updates,
+                False,
+            ),
+            "validation": (
+                self.plan.validation_learner_seeds,
+                (self.plan.validation_updates,),
+                False,
+            ),
+            "test": (
+                self.plan.test_learner_seeds,
+                (self.plan.test_updates,),
+                True,
+            ),
+        }
+        seeds, budgets, sealed = phase_contract[job.phase]
+        expected_seed_plan = TrialSeedPlan.derive(
+            self.plan.sha256, job.learner_seed
+        ).sha256
+        if (
+            job.learner_seed not in seeds
+            or job.budget_updates not in budgets
+            or job.sealed != sealed
+            or job.seed_plan_sha256 != expected_seed_plan
+            or (job.phase != "calibration" and job.authorization_sha256 is None)
+        ):
+            raise ValueError("trial job violates its frozen phase contract")
+        if job.phase == "calibration":
+            valid_authorization = authorization is None
+        elif job.phase == "validation":
+            valid_authorization = (
+                isinstance(authorization, CalibrationSelectionAuthorization)
+                and authorization.plan_sha256 == self.plan.sha256
+                and job.arm in authorization.arms
+                and job.authorization_sha256 == authorization.sha256
+            )
+        else:
+            valid_authorization = (
+                isinstance(authorization, SealedTestRunAuthorization)
+                and authorization.plan.sha256 == self.plan.sha256
+                and job.arm.arm_id
+                in {
+                    authorization.authorization.control_arm_id,
+                    authorization.authorization.candidate_arm_id,
+                }
+                and job.authorization_sha256 == authorization.sha256
+            )
+        if not valid_authorization:
+            raise ValueError("trial job lacks its phase-selection authorization")
+
+    def build(
+        self,
+        job: TrialJob,
+        *,
+        authorization: CalibrationSelectionAuthorization
+        | SealedTestRunAuthorization
+        | None = None,
+    ) -> BuiltTrial:
+        self._validate_job(job, authorization)
+        arm = job.arm
+        learner_seed = job.learner_seed
         seed_plan = TrialSeedPlan.derive(self.plan.sha256, learner_seed)
         curriculum = self._curriculum(arm)
         environment = self.environment_factory()
@@ -258,7 +432,12 @@ class R3BRunBuilder:
                 environment_pool=curriculum.stages[0].environment_pool,
                 runtime_identity_sha256=self.runtime_identity_sha256,
             )
-            with torch.random.fork_rng(devices=[], enabled=True):
+            cuda_devices = (
+                list(range(torch.cuda.device_count()))
+                if torch.cuda.is_available()
+                else []
+            )
+            with torch.random.fork_rng(devices=cuda_devices, enabled=True):
                 torch.manual_seed(seed_plan.model_initialization)
                 model = self.model_factory()
             if model.config.critic_condition_features != 1:
@@ -296,9 +475,15 @@ class R3BRunBuilder:
                 total_updates=self.plan.total_updates,
                 sampler_seed=seed_plan.ppo_minibatching,
             )
-            tail = ScoreOnlyTailController(
-                self.plan.shaped_updates,
-                minimum_score_only_updates=self.plan.zero_tail_updates,
+            tail = (
+                ScoreOnlyTailController(
+                    self.plan.shaped_updates,
+                    minimum_score_only_updates=self.plan.zero_tail_updates,
+                    reward_scale=composer.reward_scale,
+                    reward_sha256=composer.sha256,
+                )
+                if job.budget_updates == self.plan.total_updates
+                else None
             )
             session = R3ATrainingSession(
                 collector,
@@ -306,11 +491,62 @@ class R3BRunBuilder:
                 numpy_seed=seed_plan.session_numpy,
                 max_consecutive_skips=self.max_consecutive_skips,
                 tail_controller=tail,
+                optimizer_update_limit=job.budget_updates,
             )
+            pairing_payload = {
+                "version": "r3b-pairing-v1",
+                "plan_sha256": self.plan.sha256,
+                "phase": job.phase,
+                "learner_seed": learner_seed,
+                "budget_updates": job.budget_updates,
+                "authorization_sha256": job.authorization_sha256,
+                "seed_plan_sha256": seed_plan.sha256,
+                "initial_model_sha256": initial_model_sha256,
+                "assignment_sha256": curriculum.assignment_sha256,
+                "curriculum_shared": {
+                    **{
+                        key: value
+                        for key, value in curriculum.manifest().items()
+                        if key not in {"stages", "assignment_sha256"}
+                    },
+                    "stages": [
+                        {
+                            key: value
+                            for key, value in stage.manifest().items()
+                            if key != "reward_schedule"
+                        }
+                        for stage in curriculum.stages
+                    ],
+                },
+                "snapshot_store_sha256": self.snapshots.sha256,
+                "runtime_identity_sha256": self.runtime_identity_sha256,
+                "reward_sha256": composer.sha256,
+                "collector": self.collector_config.manifest(),
+                "ppo_without_learning_rate": {
+                    key: value
+                    for key, value in trial_ppo.manifest().items()
+                    if key != "learning_rate"
+                },
+                "lanes": self.lanes,
+                "max_consecutive_skips": self.max_consecutive_skips,
+            }
+            pairing_sha256 = hashlib.sha256(
+                json.dumps(
+                    pairing_payload,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    allow_nan=False,
+                ).encode()
+            ).hexdigest()
             manifest = TrialManifest(
                 self.plan.sha256,
+                job.sha256,
+                job.phase,
                 arm.arm_id,
                 learner_seed,
+                job.budget_updates,
+                job.sealed,
+                job.authorization_sha256,
                 seed_plan.sha256,
                 initial_model_sha256,
                 curriculum.sha256,
@@ -318,6 +554,7 @@ class R3BRunBuilder:
                 self.snapshots.sha256,
                 self.runtime_identity_sha256,
                 composer.sha256,
+                pairing_sha256,
                 self.collector_config.manifest(),
                 trial_ppo.manifest(),
                 self.lanes,

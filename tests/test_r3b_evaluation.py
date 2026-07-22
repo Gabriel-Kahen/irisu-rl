@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import struct
 import unittest
+from dataclasses import replace
 
 from irisu_env import Action
 from irisu_rl.actions import ActionSpec
@@ -12,6 +13,7 @@ from irisu_rl.r3b_evaluation import (
     EvaluationSuite,
     ScriptedBaselineSpec,
     RecurrentSemanticPolicy,
+    build_baseline_evidence,
     evaluate_recurrent_policy,
     evaluate_scripted_baseline,
     semantic_from_native,
@@ -21,12 +23,22 @@ from tests.test_rl_vector_adapter import observation
 
 import torch
 from tests.test_r3b_snapshot_initializer import (
+    _CONFIG,
+    _CONFIG_HASH,
     _RUNTIME_SHA256,
     _fixture,
 )
 
 
 _SNAPSHOT = struct.Struct("<qqqQ")
+
+
+def evaluation_identity(*, backend: str = "a", execution: str = "c"):
+    return {
+        "actual_runtime_identity_sha256": _RUNTIME_SHA256,
+        "backend_identity_sha256": backend * 64,
+        "execution_identity_sha256": execution * 64,
+    }
 
 
 class FakeSingleSimulator:
@@ -52,6 +64,12 @@ class FakeSingleSimulator:
     def state_hash(self) -> int:
         return int(self.hash)
 
+    def config_hash(self) -> int:
+        return _CONFIG_HASH
+
+    def config(self):
+        return dict(_CONFIG)
+
     def step(self, action: Action):
         delta = action.wait_ticks if int(action.kind) == 0 else 1
         self.tick += int(delta)
@@ -75,6 +93,9 @@ class R3BEvaluationTests(unittest.TestCase):
             3,
             _RUNTIME_SHA256,
             spec.assignment_sha256,
+            store.library.sha256,
+            store.sha256,
+            ActionSpec().sha256,
         )
         baseline = ScriptedBaselineSpec("no_action_long_wait", (("wait_ticks", 1),))
         report = evaluate_scripted_baseline(
@@ -83,12 +104,55 @@ class R3BEvaluationTests(unittest.TestCase):
             suite,
             baseline,
             evaluator_sha256="e" * 64,
+            expected_assignment_sha256=spec.assignment_sha256,
+            **evaluation_identity(),
         )
         self.assertEqual(len(report.episodes), 2)
         self.assertEqual([value.raw_score for value in report.episodes], [3, 3])
         self.assertTrue(all(value.truncated for value in report.episodes))
         self.assertTrue(all(value.invalid_actions == 0 for value in report.episodes))
         self.assertNotEqual(report.sha256, "0" * 64)
+        replay = evaluate_scripted_baseline(
+            FakeSingleSimulator(),
+            store,
+            suite,
+            baseline,
+            evaluator_sha256="e" * 64,
+            expected_assignment_sha256=spec.assignment_sha256,
+            **evaluation_identity(execution="d"),
+        )
+        exact = evaluate_scripted_baseline(
+            FakeSingleSimulator(),
+            store,
+            suite,
+            baseline,
+            evaluator_sha256="e" * 64,
+            expected_assignment_sha256=spec.assignment_sha256,
+            **evaluation_identity(backend="b", execution="e"),
+        )
+        evidence = build_baseline_evidence(baseline, suite, report, replay, exact)
+        self.assertEqual(evidence.episodes, 2)
+        self.assertEqual(evidence.invalid_actions, 0)
+        with self.assertRaisesRegex(ValueError, "assignment identity"):
+            evaluate_scripted_baseline(
+                FakeSingleSimulator(),
+                store,
+                replace(suite, assignment_sha256="f" * 64),
+                baseline,
+                evaluator_sha256="e" * 64,
+                expected_assignment_sha256=spec.assignment_sha256,
+                **evaluation_identity(),
+            )
+        with self.assertRaisesRegex(ValueError, "snapshot-store identity"):
+            evaluate_scripted_baseline(
+                FakeSingleSimulator(),
+                store,
+                replace(suite, snapshot_store_sha256="f" * 64),
+                baseline,
+                evaluator_sha256="e" * 64,
+                expected_assignment_sha256=spec.assignment_sha256,
+                **evaluation_identity(),
+            )
 
     def test_split_runtime_and_simultaneous_action_fail_closed(self) -> None:
         spec, blobs = _fixture()
@@ -103,6 +167,9 @@ class R3BEvaluationTests(unittest.TestCase):
             1,
             _RUNTIME_SHA256,
             spec.assignment_sha256,
+            store.library.sha256,
+            store.sha256,
+            ActionSpec().sha256,
         )
         with self.assertRaisesRegex(ValueError, "wrong split"):
             evaluate_scripted_baseline(
@@ -111,6 +178,8 @@ class R3BEvaluationTests(unittest.TestCase):
                 wrong_split,
                 ScriptedBaselineSpec("matcher_shot_policy"),
                 evaluator_sha256="e" * 64,
+                expected_assignment_sha256=spec.assignment_sha256,
+                **evaluation_identity(),
             )
         with self.assertRaisesRegex(ValueError, "simultaneous"):
             semantic_from_native(Action.both(10, 20), ActionSpec())
@@ -159,6 +228,9 @@ class R3BEvaluationTests(unittest.TestCase):
             2,
             _RUNTIME_SHA256,
             spec.assignment_sha256,
+            store.library.sha256,
+            store.sha256,
+            model.action_spec.sha256,
         )
         eval_wait = torch.zeros_like(wait)
         eval_wait[:, 0] = True
@@ -171,9 +243,54 @@ class R3BEvaluationTests(unittest.TestCase):
             kind,
             eval_wait,
             evaluator_sha256="e" * 64,
+            expected_assignment_sha256=spec.assignment_sha256,
+            **evaluation_identity(),
         )
         self.assertEqual(len(report.episodes), 1)
         self.assertEqual(report.episodes[0].raw_score, 2)
+
+        with self.assertRaisesRegex(ValueError, "all-masked"):
+            evaluate_recurrent_policy(
+                FakeSingleSimulator(),
+                store,
+                suite,
+                model,
+                TeacherStateEncoder(),
+                torch.zeros_like(kind),
+                eval_wait,
+                evaluator_sha256="e" * 64,
+                expected_assignment_sha256=spec.assignment_sha256,
+                **evaluation_identity(),
+            )
+
+    def test_long_wait_is_clipped_to_exact_tick_horizon(self) -> None:
+        spec, blobs = _fixture()
+        store = SnapshotBlobStore(spec.library, blobs)
+        suite = EvaluationSuite(
+            "bounded-validation-v1",
+            "validation",
+            ("validation",),
+            1,
+            37,
+            3,
+            3,
+            _RUNTIME_SHA256,
+            spec.assignment_sha256,
+            store.library.sha256,
+            store.sha256,
+            ActionSpec().sha256,
+        )
+        report = evaluate_scripted_baseline(
+            FakeSingleSimulator(),
+            store,
+            suite,
+            ScriptedBaselineSpec("no_action_long_wait"),
+            evaluator_sha256="e" * 64,
+            expected_assignment_sha256=spec.assignment_sha256,
+            **evaluation_identity(),
+        )
+        self.assertEqual(report.episodes[0].elapsed_ticks, 3)
+        self.assertEqual(report.episodes[0].raw_score, 3)
 
 
 if __name__ == "__main__":

@@ -42,11 +42,8 @@ class TailSessionIntegrationTests(unittest.TestCase):
             stages=(replace(base.stages[0], reward_schedule=schedule), base.stages[1]),
         )
         coordinator = CurriculumCoordinator(spec, 4, learner_seed=11)
-        task = CurriculumTaskContract(
-            coordinator,
-            RewardComposer(shaping_spec=LinearGaugePotential()),
-            capture_events=False,
-        )
+        composer = RewardComposer(shaping_spec=LinearGaugePotential())
+        task = CurriculumTaskContract(coordinator, composer, capture_events=False)
         model = RecurrentActorCritic(
             TEACHER_V1,
             config=RecurrentModelConfig(8, 8, 12, 12, 1, critic_condition_features=1),
@@ -66,7 +63,11 @@ class TailSessionIntegrationTests(unittest.TestCase):
             total_updates=401,
             sampler_seed=13,
         )
-        tail = ScoreOnlyTailController(1)
+        tail = ScoreOnlyTailController(
+            1,
+            reward_scale=composer.reward_scale,
+            reward_sha256=composer.sha256,
+        )
         session = R3ATrainingSession(
             collector,
             trainer,

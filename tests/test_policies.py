@@ -14,6 +14,7 @@ sys.path.insert(0, str(ROOT / "python"))
 from irisu_env import (  # noqa: E402
     Action,
     ActionKind,
+    DirectMatcherPolicy,
     IrisuEnv,
     MatcherShotPolicy,
     NativeError,
@@ -73,15 +74,44 @@ class PolicyUnitTests(unittest.TestCase):
         observation = {
             "tick": 8,
             "bodies": [
-                {"id": 8, "kind": "piece", "lifecycle": "scripted_falling", "color": 2, "x": 200, "y": 40, "size": 30},
-                {"id": 3, "kind": "piece", "lifecycle": "scripted_falling", "color": 2, "x": 210, "y": 90, "size": 48},
-                {"id": 9, "kind": "piece", "lifecycle": "scripted_falling", "color": 1, "x": 500, "y": 100, "size": 30},
+                {
+                    "id": 8,
+                    "kind": "piece",
+                    "lifecycle": "scripted_falling",
+                    "color": 2,
+                    "x": 200,
+                    "y": 40,
+                    "size": 30,
+                },
+                {
+                    "id": 3,
+                    "kind": "piece",
+                    "lifecycle": "scripted_falling",
+                    "color": 2,
+                    "x": 210,
+                    "y": 90,
+                    "size": 48,
+                },
+                {
+                    "id": 9,
+                    "kind": "piece",
+                    "lifecycle": "scripted_falling",
+                    "color": 1,
+                    "x": 500,
+                    "y": 100,
+                    "size": 30,
+                },
             ],
         }
         action = MatcherShotPolicy().act(observation)
         self.assertEqual(ActionKind.parse(action.kind), ActionKind.STRONG_SHOT)
         self.assertEqual(action.cursor_x, 210.0)
         self.assertEqual(action.cursor_y, 380.0)
+
+        direct = DirectMatcherPolicy().act(observation)
+        self.assertEqual(ActionKind.parse(direct.kind), ActionKind.WEAK_SHOT)
+        self.assertEqual(direct.cursor_x, 210.0)
+        self.assertNotEqual(direct, action)
 
     def test_mechanics_randomization_is_seeded_and_bounded(self) -> None:
         ranges = {
@@ -160,9 +190,7 @@ class _PublicContractEnv(_FakeBaseEnv):
     def step(self, action: Action):
         self.actions.append(action)
         requested = (
-            action.wait_ticks
-            if ActionKind.parse(action.kind) is ActionKind.WAIT
-            else 1
+            action.wait_ticks if ActionKind.parse(action.kind) is ActionKind.WAIT else 1
         )
         advanced = min(requested, max(0, self.terminal_tick - self.tick))
         self.tick += advanced
@@ -173,7 +201,9 @@ class _PublicContractEnv(_FakeBaseEnv):
             terminated,
             False,
             {
-                "events": [{"tick": self.tick, "kind": int(ActionKind.parse(action.kind))}],
+                "events": [
+                    {"tick": self.tick, "kind": int(ActionKind.parse(action.kind))}
+                ],
                 "invalid_action": False,
                 "diagnostics": {"tick": self.tick},
             },
@@ -202,14 +232,14 @@ class TransferRobustnessUnitTests(unittest.TestCase):
         nominal = TransferRobustnessEnv(nominal_native)
         nominal.reset(seed=0)
         nominal.step(Action.wait(50_000))
-        self.assertEqual([action.wait_ticks for action in nominal_native.actions], [50_000])
+        self.assertEqual(
+            [action.wait_ticks for action in nominal_native.actions], [50_000]
+        )
 
         delayed_native = _PublicContractEnv(terminal_tick=100_000)
         delayed = TransferRobustnessEnv(
             delayed_native,
-            TransferRanges(
-                observation_delay_ticks=ParameterRange(3, 3, integer=True)
-            ),
+            TransferRanges(observation_delay_ticks=ParameterRange(3, 3, integer=True)),
         )
         delayed.reset(seed=0)
         observation, *_ = delayed.step(Action.wait(50_000))
@@ -247,7 +277,9 @@ class TransferRobustnessUnitTests(unittest.TestCase):
         self.assertEqual(len(info["events"]), 2)
         self.assertEqual(info["diagnostics"], {"tick": 3})
 
-    def test_observation_delay_noise_and_ambiguous_merge_use_only_public_state(self) -> None:
+    def test_observation_delay_noise_and_ambiguous_merge_use_only_public_state(
+        self,
+    ) -> None:
         native = _PublicContractEnv()
         ranges = TransferRanges(
             observation_delay_ticks=ParameterRange(2, 2, integer=True),
@@ -276,9 +308,7 @@ class TransferRobustnessUnitTests(unittest.TestCase):
     def test_caller_cannot_mutate_buffered_delayed_observations(self) -> None:
         wrapped = TransferRobustnessEnv(
             _PublicContractEnv(),
-            TransferRanges(
-                observation_delay_ticks=ParameterRange(1, 1, integer=True)
-            ),
+            TransferRanges(observation_delay_ticks=ParameterRange(1, 1, integer=True)),
         )
         reset_observation, _ = wrapped.reset(seed=0)
         reset_observation["bodies"][0]["x"] = -999.0
@@ -360,14 +390,10 @@ class TransferRobustnessUnitTests(unittest.TestCase):
     def test_terminal_transition_flushes_observation_delay(self) -> None:
         wrapped = TransferRobustnessEnv(
             _PublicContractEnv(terminal_tick=2),
-            TransferRanges(
-                observation_delay_ticks=ParameterRange(3, 3, integer=True)
-            ),
+            TransferRanges(observation_delay_ticks=ParameterRange(3, 3, integer=True)),
         )
         wrapped.reset(seed=0)
-        observation, reward, terminated, truncated, _ = wrapped.step(
-            Action.wait(100)
-        )
+        observation, reward, terminated, truncated, _ = wrapped.step(Action.wait(100))
         self.assertEqual(observation["tick"], 2)
         self.assertTrue(observation["terminated"])
         self.assertEqual(reward, 2)
@@ -412,7 +438,9 @@ class TransferRobustnessUnitTests(unittest.TestCase):
 
 @unittest.skipIf(LIBRARY is None, "build the native shared library before policy tests")
 class PolicyIntegrationTests(unittest.TestCase):
-    @unittest.skipIf(_check_env is None, "Gymnasium optional dependency is not installed")
+    @unittest.skipIf(
+        _check_env is None, "Gymnasium optional dependency is not installed"
+    )
     def test_transfer_wrapper_passes_gym_checker_with_ambiguous_bodies(self) -> None:
         ranges = TransferRanges(
             observation_delay_ticks=ParameterRange(0, 2, integer=True),
@@ -431,8 +459,7 @@ class PolicyIntegrationTests(unittest.TestCase):
                 observation, *_ = env.step(Action.wait())
                 self.assertTrue(env.observation_space.contains(observation))
                 saw_ambiguous = saw_ambiguous or any(
-                    body["lifecycle"] == "ambiguous"
-                    for body in observation["bodies"]
+                    body["lifecycle"] == "ambiguous" for body in observation["bodies"]
                 )
                 if saw_ambiguous:
                     break
@@ -461,9 +488,7 @@ class PolicyIntegrationTests(unittest.TestCase):
         candidate = IrisuEnv(library_path=LIBRARY)
         wrapped = TransferRobustnessEnv(
             candidate,
-            TransferRanges(
-                observation_delay_ticks=ParameterRange(2, 2, integer=True)
-            ),
+            TransferRanges(observation_delay_ticks=ParameterRange(2, 2, integer=True)),
         )
         with wrapped, IrisuEnv(library_path=LIBRARY) as control:
             wrapped.reset(seed=37)
@@ -534,10 +559,13 @@ class PolicyIntegrationTests(unittest.TestCase):
         self.assertGreater(first["event_counts"].get("spawned", 0), 0)
         self.assertGreater(first["final_state_hash"], 0)
 
-    def test_vector_lane_matches_isolated_control_when_other_lane_is_perturbed(self) -> None:
-        with SyncVectorEnv(2, library_path=LIBRARY) as vector, IrisuEnv(
-            library_path=LIBRARY
-        ) as control:
+    def test_vector_lane_matches_isolated_control_when_other_lane_is_perturbed(
+        self,
+    ) -> None:
+        with (
+            SyncVectorEnv(2, library_path=LIBRARY) as vector,
+            IrisuEnv(library_path=LIBRARY) as control,
+        ):
             observations, _ = vector.reset(seed=[31, 31])
             control_observation, _ = control.reset(seed=31)
             self.assertEqual(observations[1], control_observation)

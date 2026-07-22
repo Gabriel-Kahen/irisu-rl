@@ -81,7 +81,13 @@ exactly 400 optimizer updates remain. Before each one, the tail controller
 requires:
 
 - every recorded coefficient is exactly integer zero;
-- optimizer reward equals scaled raw score exactly on every row;
+- each scaled score equals the integer raw score divided by the bound reward
+  scale using the collector's float32 arithmetic;
+- each optimizer reward exactly reconstructs from raw score, shaping value, and
+  coefficient, and zero-weight rows have both zero shaping and score-only
+  optimizer reward;
+- row totals equal the collection raw and optimizer totals, and the collection
+  reward-composer identity matches the controller;
 - decision/transition counts and audit widths agree;
 - all reward values are finite;
 - optimizer and tail clocks are contiguous.
@@ -92,13 +98,15 @@ optimizer state is retained across the boundary; resetting it would confound
 the comparison.
 
 R3b advances the adapter checkpoint to v3 and the training-session payload to
-v2 because active snapshot labels and tail state are required identities. Older
+v3 because active snapshot labels, the authorized optimizer-update limit, and
+tail state are required identities. Older
 R3a checkpoints intentionally fail version validation rather than being loaded
 without evidence those fields never carried.
 
 ## Reproducible trial construction
 
-`R3BRunBuilder` constructs a complete session from a frozen experiment plan,
+`R3BRunBuilder` consumes an immutable `TrialJob` and constructs a complete
+session from a frozen experiment plan,
 one-stage curriculum, verified snapshot store, exact runtime identity, model
 factory, vector factory, and collector/PPO configurations. It rejects adaptive
 promotion in the paired hyperparameter sweep because promotion would make arms
@@ -113,11 +121,16 @@ For each learner seed, `TrialSeedPlan` derives independent SHA-256 streams for:
 - session NumPy state;
 - evaluation.
 
-The derivation is arm-independent. Selection rejects results when paired arms
-disagree on initial model, assignment, or seed-plan identities. A trial
-manifest additionally binds the plan, curriculum, snapshot store, runtime,
-reward, collector, PPO, lane count, and pre-transfer status. Checkpoint callers
-must include this manifest identity in their runtime identity map.
+The derivation is arm-independent. A job binds phase, grid arm, learner seed,
+authorized update budget, sealed status, and (for test jobs) the validation
+authorization. The session enforces the job budget while retaining the frozen
+1,000-update learning-rate horizon, so calibration cannot silently train to
+validation length. Selection rejects results when paired arms disagree on
+initial model, assignment, seed-plan, runner-pairing, or evaluation-suite
+identities. A trial manifest additionally binds the job, plan, curriculum,
+snapshot store, runtime, reward, collector, PPO, lane count, and pre-transfer
+status. Checkpoint callers must include this manifest identity in their runtime
+identity map.
 
 ## Frozen selection design
 
@@ -138,7 +151,10 @@ candidate. Nomination requires at least 5% mean raw-score AUC gain over the
 score-only control and at least 95% final-mean retention. Validation selects;
 it does not confirm.
 
-The test set stays sealed until that single candidate is fixed. Test uses 12
+The test set stays sealed until that single candidate is fixed. A canonical
+authorization binds the chosen validation candidate, control, complete
+validation-result set, sealed evaluation-suite identity, and attempt number.
+Only jobs carrying that authorization may enter the test phase. Test uses 12
 new paired learner seeds, 512 fixed evaluation episodes per policy, and a
 one-sided paired bootstrap with the learner seed as the resampling unit. A
 candidate passes only if all lower confidence bounds satisfy:
@@ -156,10 +172,15 @@ same test set, and the test set cannot be reused after rejection.
 ## Evaluation and baselines
 
 Evaluation cells are fixed by suite identity, split snapshot ID, repetition,
-policy seed, runtime identity, assignment identity, and decision/tick bounds.
+policy seed, runtime identity, assignment identity, snapshot-library identity,
+snapshot-store identity, action-schema identity, and decision/tick bounds.
 Raw score is always `final_score - initial_score`, and accumulated environment
 reward must equal that delta. Gauge, invalid actions, terminal status, and
 elapsed ticks are diagnostics, never selection rewards.
+
+The tick horizon is exact: long waits are clipped to the remaining budget and
+a shot macro stops after its press when only one tick remains. An all-masked
+action branch is an error, not an implicit WAIT action.
 
 The deployment-style recurrent evaluator uses deterministic semantic argmax,
 masked wait choices, coordinate means, recurrent state, and a zero critic-only
@@ -175,6 +196,8 @@ press/release macros. Required baselines are:
 
 All required baselines need at least 512 fixed episodes, zero invalid actions,
 deterministic replay, exact raw-score accounting, and portable/exact parity.
+Baseline evidence is built from the suite plus primary, replay, and exact-backend
+report artifacts; acceptance rejects evidence from any other sealed suite.
 `one_step_greedy` is optional and cannot substitute for a missing required
 baseline.
 
@@ -189,6 +212,10 @@ cannot be ignored.
 No result is an R3b acceptance result until the complete calibration,
 validation, sealed test, exact-resume, snapshot replay, raw-score, and baseline
 artifacts exist and the canonical confirmation function returns `accepted`.
+Learner outcomes no longer carry a default boolean engineering pass: they must
+bind the completed trial manifest, pairing identity, metrics, evaluation,
+checkpoint-resume, exact-backend parity, and (for full-budget runs) completed
+score-only-tail artifacts.
 Unit and integration tests establish implementation behavior only; they are not
 empirical learning evidence.
 

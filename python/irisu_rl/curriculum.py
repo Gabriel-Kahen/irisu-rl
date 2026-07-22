@@ -133,8 +133,10 @@ class SnapshotRecipe:
             self.snapshot_sha256,
             self.runtime_identity_sha256,
         ):
-            if not _is_sha256(value):
-                raise ValueError("recipe identities must be lowercase SHA-256 values")
+            if not _is_sha256(value) or value == _SHA256_ZERO:
+                raise ValueError(
+                    "recipe identities must be nonzero lowercase SHA-256 values"
+                )
         integers = (
             self.config_hash,
             self.reset_seed,
@@ -314,9 +316,23 @@ class SnapshotBlobStore:
     def from_directory(
         cls, library: SnapshotLibrary, directory: str | Path
     ) -> SnapshotBlobStore:
-        root = Path(directory).resolve(strict=True)
-        if root.is_symlink() or not root.is_dir():
+        supplied_root = Path(directory)
+        if supplied_root.is_symlink():
             raise ValueError("snapshot root must be a real directory")
+        root = supplied_root.resolve(strict=True)
+        if not root.is_dir():
+            raise ValueError("snapshot root must be a real directory")
+        expected_names = {
+            f"{recipe.snapshot_id}.snapshot" for recipe in library.recipes
+        }
+        entries = tuple(root.iterdir())
+        if (
+            any(entry.is_symlink() for entry in entries)
+            or {entry.name for entry in entries} != expected_names
+        ):
+            raise ValueError(
+                "snapshot directory must contain exactly the library blobs"
+            )
         blobs: dict[str, bytes] = {}
         for recipe in library.recipes:
             path = root / f"{recipe.snapshot_id}.snapshot"
@@ -346,18 +362,29 @@ class SnapshotBlobStore:
         return _canonical_sha256(self.manifest())
 
 
-def replay_snapshot_recipe(simulator: Any, recipe: SnapshotRecipe) -> bytes:
+def replay_snapshot_recipe(
+    simulator: Any,
+    recipe: SnapshotRecipe,
+    *,
+    runtime_identity_sha256: str,
+) -> bytes:
     """Rebuild and verify a cached snapshot from reset seed plus legal macros."""
 
+    if (
+        not _is_sha256(runtime_identity_sha256)
+        or runtime_identity_sha256 == _SHA256_ZERO
+        or runtime_identity_sha256 != recipe.runtime_identity_sha256
+    ):
+        raise ValueError("snapshot recipe runtime identity mismatch")
     action_spec = ActionSpec()
     if recipe.action_spec_sha256 != action_spec.sha256:
         raise ValueError("snapshot recipe action identity mismatch")
+    reset_result = simulator.reset(seed=recipe.reset_seed)
+    observation = reset_result[0] if isinstance(reset_result, tuple) else reset_result
     if int(simulator.config_hash()) != recipe.config_hash:
         raise ValueError("snapshot recipe simulator config mismatch")
     if _canonical_sha256(simulator.config()) != recipe.config_sha256:
         raise ValueError("snapshot recipe canonical config mismatch")
-    reset_result = simulator.reset(seed=recipe.reset_seed)
-    observation = reset_result[0] if isinstance(reset_result, tuple) else reset_result
     done = False
     for payload in recipe.semantic_actions_hex:
         if done:

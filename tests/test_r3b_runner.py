@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import unittest
+import tempfile
 from pathlib import Path
 
 from irisu_rl.collector import CollectorConfig
 from irisu_rl.models import RecurrentActorCritic, RecurrentModelConfig
 from irisu_rl.ppo import PPOConfig
-from irisu_rl.r3b_experiments import load_plan
+from irisu_rl.r3b_experiments import TrialJob, load_plan
 from irisu_rl.r3b_runner import R3BRunBuilder
 from irisu_rl.schema import TEACHER_V1
 from tests.test_r3b_snapshot_initializer import (
@@ -14,6 +15,7 @@ from tests.test_r3b_snapshot_initializer import (
     _RUNTIME_SHA256,
     _fixture,
 )
+from tests.test_r3b_experiments import validation_authorization
 from tests.test_r3a_curriculum import curriculum as multistage_curriculum
 from irisu_rl.curriculum import SnapshotBlobStore
 
@@ -56,9 +58,24 @@ class R3BRunBuilderTests(unittest.TestCase):
         )
         control_arm = plan.arms[0]
         shaped_arm = next(arm for arm in plan.arms if arm.alpha_weight_ppm == 100_000)
+        jobs = plan.trial_jobs("calibration")
+        control_job = next(
+            job
+            for job in jobs
+            if job.arm == control_arm
+            and job.learner_seed == 1103
+            and job.budget_updates == plan.calibration_budgets_updates[-1]
+        )
+        shaped_job = next(
+            job
+            for job in jobs
+            if job.arm == shaped_arm
+            and job.learner_seed == 1103
+            and job.budget_updates == plan.calibration_budgets_updates[-1]
+        )
         with (
-            builder.build(control_arm, 1103) as control,
-            builder.build(shaped_arm, 1103) as shaped,
+            builder.build(control_job) as control,
+            builder.build(shaped_job) as shaped,
         ):
             self.assertEqual(
                 control.manifest.initial_model_sha256,
@@ -72,6 +89,15 @@ class R3BRunBuilderTests(unittest.TestCase):
                 control.manifest.seed_plan_sha256,
                 shaped.manifest.seed_plan_sha256,
             )
+            self.assertEqual(
+                control.manifest.pairing_sha256,
+                shaped.manifest.pairing_sha256,
+            )
+            self.assertEqual(
+                control.session.optimizer_update_limit,
+                plan.calibration_budgets_updates[-1],
+            )
+            self.assertIsNone(control.session.tail_controller)
             self.assertEqual(
                 control.manifest.reward_sha256, shaped.manifest.reward_sha256
             )
@@ -90,6 +116,60 @@ class R3BRunBuilderTests(unittest.TestCase):
                 control.session.task.coordinator.lane_snapshot_id,
                 shaped.session.task.coordinator.lane_snapshot_id,
             )
+
+        fabricated = TrialJob(
+            plan.sha256,
+            "calibration",
+            control_arm,
+            999_999_999,
+            plan.calibration_budgets_updates[-1],
+            False,
+            "a" * 64,
+        )
+        with self.assertRaisesRegex(ValueError, "phase contract"):
+            builder.build(fabricated)
+
+        first_rung = next(
+            job
+            for job in jobs
+            if job.arm == control_arm
+            and job.learner_seed == 1103
+            and job.budget_updates == plan.calibration_budgets_updates[0]
+        )
+        with builder.build(first_rung) as trial:
+            self.assertEqual(
+                trial.session.optimizer_update_limit,
+                plan.calibration_budgets_updates[0],
+            )
+            self.assertIsNone(trial.session.tail_controller)
+
+        validation_auth = validation_authorization(plan, plan.learning_rates[0])
+        validation_job = plan.trial_jobs("validation", validation_auth)[0]
+        with builder.build(validation_job, authorization=validation_auth) as trial:
+            self.assertEqual(trial.session.optimizer_update_limit, plan.total_updates)
+            self.assertIsNotNone(trial.session.tail_controller)
+
+        with tempfile.TemporaryDirectory() as directory:
+            with builder.build(validation_job, authorization=validation_auth) as source:
+                source.session.initialize()
+                identity = {"trial_manifest_sha256": source.manifest.sha256}
+                source.session.save(directory, "r3b", identity=identity)
+                expected_policy = source.session.policy_sha256
+                assert source.session.tail_controller is not None
+                expected_tail = source.session.tail_controller.state_dict()
+            with builder.build(
+                validation_job, authorization=validation_auth
+            ) as restored:
+                restored.session.restore(
+                    directory,
+                    generation="r3b",
+                    identity={"trial_manifest_sha256": restored.manifest.sha256},
+                )
+                self.assertEqual(restored.session.policy_sha256, expected_policy)
+                assert restored.session.tail_controller is not None
+                self.assertEqual(
+                    restored.session.tail_controller.state_dict(), expected_tail
+                )
 
     def test_adaptive_multi_stage_sweep_is_rejected(self) -> None:
         plan = load_plan(ROOT / "configs/rl/experiments/r3b-completion-v1.toml")

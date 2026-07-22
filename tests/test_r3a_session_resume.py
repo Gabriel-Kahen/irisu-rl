@@ -124,9 +124,7 @@ def build_session(
         coordinator,
         RewardComposer(
             reward_scale=100.0,
-            shaping_spec=(
-                LinearGaugePotential() if shaping_weight_ppm else None
-            ),
+            shaping_spec=(LinearGaugePotential() if shaping_weight_ppm else None),
         ),
         capture_events=False,
     )
@@ -282,6 +280,7 @@ class R3ASessionResumeMixin:
                 checkpoint_identity = {
                     **identity,
                     "r3a_payload": source.version,
+                    "optimizer_update_limit": source.optimizer_update_limit,
                 }
                 state, blobs, _ = load_checkpoint(
                     directory,

@@ -7,6 +7,7 @@ import tempfile
 import types
 import unittest
 from dataclasses import replace
+from pathlib import Path
 
 from irisu_env import ActionKind
 from irisu_rl.actions import ActionSpec, SemanticAction
@@ -19,6 +20,7 @@ from irisu_rl.curriculum import (
     SnapshotLibrary,
     SnapshotRecipe,
     StageSpec,
+    replay_snapshot_recipe,
 )
 from irisu_rl.encoding import TeacherStateEncoder
 from irisu_rl.rewards import (
@@ -32,7 +34,10 @@ from irisu_rl.vector_adapter import MacroVectorAdapter
 
 _SNAPSHOT = struct.Struct("<qqqQ")
 _CONFIG_HASH = 99
-_CONFIG_SHA256 = "1" * 64
+_CONFIG = {"mode": "snapshot-test"}
+_CONFIG_SHA256 = hashlib.sha256(
+    json.dumps(_CONFIG, sort_keys=True, separators=(",", ":")).encode()
+).hexdigest()
 _RUNTIME_SHA256 = "2" * 64
 _POOL = "snapshot-pool"
 
@@ -176,6 +181,35 @@ class FakeSnapshotVector:
         return output
 
 
+class ResetBoundReplaySimulator:
+    def __init__(self) -> None:
+        self.initialized = False
+        self.tick = 0
+
+    def reset(self, *, seed):
+        self.initialized = True
+        self.tick = 0
+        return {"tick": 0, "score": 0}
+
+    def config_hash(self):
+        if not self.initialized:
+            raise RuntimeError("config is unavailable before reset")
+        return 7
+
+    def config(self):
+        return {"mode": "replay-test"}
+
+    def step(self, action):
+        self.tick += int(action.wait_ticks)
+        return {"tick": self.tick, "score": self.tick}, self.tick, False, False, {}
+
+    def clone_state(self):
+        return b"verified-replay-state"
+
+    def state_hash(self):
+        return 11
+
+
 def _fixture() -> tuple[CurriculumSpec, dict[str, bytes]]:
     action_spec = ActionSpec()
     trace = (action_spec.serialize(SemanticAction.wait(1)).hex(),)
@@ -264,6 +298,51 @@ def _components():
 
 
 class SnapshotInitializerTests(unittest.TestCase):
+    def test_recipe_replay_resets_before_config_checks_and_binds_runtime(self) -> None:
+        action_spec = ActionSpec()
+        snapshot = b"verified-replay-state"
+        recipe = SnapshotRecipe(
+            "replay",
+            "stage",
+            "train",
+            "replay-family",
+            "replay-pool",
+            hashlib.sha256(
+                json.dumps(
+                    {"mode": "replay-test"},
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    allow_nan=False,
+                ).encode()
+            ).hexdigest(),
+            7,
+            5,
+            action_spec.sha256,
+            (action_spec.serialize(SemanticAction.wait(1)).hex(),),
+            1,
+            1,
+            11,
+            hashlib.sha256(snapshot).hexdigest(),
+            _RUNTIME_SHA256,
+            "replay-test-v1",
+        )
+        self.assertEqual(
+            replay_snapshot_recipe(
+                ResetBoundReplaySimulator(),
+                recipe,
+                runtime_identity_sha256=_RUNTIME_SHA256,
+            ),
+            snapshot,
+        )
+        with self.assertRaisesRegex(ValueError, "runtime identity"):
+            replay_snapshot_recipe(
+                ResetBoundReplaySimulator(),
+                recipe,
+                runtime_identity_sha256="3" * 64,
+            )
+        with self.assertRaisesRegex(ValueError, "nonzero"):
+            replace(recipe, runtime_identity_sha256="0" * 64)
+
     def test_snapshot_library_manifest_round_trips_strictly(self) -> None:
         spec, _ = _fixture()
         manifest = spec.library.manifest()
@@ -283,6 +362,26 @@ class SnapshotInitializerTests(unittest.TestCase):
                 SnapshotLibrary.from_json(path).sha256,
                 spec.library.sha256,
             )
+
+    def test_snapshot_directory_rejects_untracked_entries(self) -> None:
+        spec, blobs = _fixture()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "blobs"
+            root.mkdir()
+            for snapshot_id, payload in blobs.items():
+                (root / f"{snapshot_id}.snapshot").write_bytes(payload)
+            self.assertEqual(
+                SnapshotBlobStore.from_directory(spec.library, root).sha256,
+                SnapshotBlobStore(spec.library, blobs).sha256,
+            )
+            (root / "untracked.snapshot").write_bytes(b"untracked")
+            with self.assertRaisesRegex(ValueError, "exactly"):
+                SnapshotBlobStore.from_directory(spec.library, root)
+            (root / "untracked.snapshot").unlink()
+            symlink = Path(directory) / "blobs-link"
+            symlink.symlink_to(root, target_is_directory=True)
+            with self.assertRaisesRegex(ValueError, "real directory"):
+                SnapshotBlobStore.from_directory(spec.library, symlink)
 
     def test_assignment_stream_excludes_reward_schedule_identity(self) -> None:
         spec, _ = _fixture()

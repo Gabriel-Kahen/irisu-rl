@@ -45,7 +45,14 @@ from .padded import (
     FastVectorEnv,
     PaddedVectorEnv,
 )
-from .policies import MatcherShotPolicy, Policy, RandomPolicy, ScriptedPolicy, SplitMix64
+from .policies import (
+    DirectMatcherPolicy,
+    MatcherShotPolicy,
+    Policy,
+    RandomPolicy,
+    ScriptedPolicy,
+    SplitMix64,
+)
 from .randomization import DEFAULT_TRAINING_RANGES, ParameterRange, randomized_config
 from .transfer import (
     NOMINAL_TRANSFER_RANGES,
@@ -64,6 +71,7 @@ __all__ = [
     "Action",
     "ActionKind",
     "DEFAULT_TRAINING_RANGES",
+    "DirectMatcherPolicy",
     "EventKind",
     "EVENT_DETAIL_CAPACITY",
     "ExactBodyState",

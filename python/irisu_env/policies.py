@@ -187,8 +187,44 @@ class LongWaitPolicy:
         return Action.wait(self.wait_ticks)
 
 
-class DirectMatcherPolicy(MatcherShotPolicy):
-    """Named direct-matcher baseline used by the frozen R3b protocol."""
+class DirectMatcherPolicy:
+    """Weak-shot the lowest member of a visible same-color pair directly."""
+
+    def __init__(self, *, shot_period_ticks: int = 2, cursor_y: float = 390.0) -> None:
+        if type(shot_period_ticks) is not int or shot_period_ticks < 1:
+            raise ValueError("shot_period_ticks must be positive")
+        if not 0.0 <= cursor_y <= 480.0:
+            raise ValueError("cursor_y must be in the 640x480 client")
+        self.shot_period_ticks = shot_period_ticks
+        self.cursor_y = float(cursor_y)
+
+    def reset(self, seed: int = 0) -> None:
+        if type(seed) is not int or not 0 <= seed <= _MASK64:
+            raise ValueError("policy seed must fit in uint64")
+
+    def act(self, observation: Mapping[str, Any]) -> Action:
+        tick = int(observation.get("tick", 0))
+        until_shot = (-tick) % self.shot_period_ticks
+        if until_shot:
+            return Action.wait(until_shot)
+        by_color: dict[object, list[Mapping[str, Any]]] = {}
+        for body in observation.get("bodies", ()):
+            if body.get("kind") == "piece" and body.get("lifecycle") in (
+                "scripted_falling",
+                "dynamic_fresh",
+                "dynamic_rotten",
+            ):
+                by_color.setdefault(body.get("color"), []).append(body)
+        candidates = [
+            body for pieces in by_color.values() if len(pieces) >= 2 for body in pieces
+        ]
+        if not candidates:
+            return Action.wait(self.shot_period_ticks)
+        target = max(
+            candidates,
+            key=lambda body: (float(body["y"]), -int(body["id"])),
+        )
+        return Action.weak(min(640.0, max(0.0, float(target["x"]))), self.cursor_y)
 
 
 class SideEjectorPolicy:

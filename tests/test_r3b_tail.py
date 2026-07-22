@@ -12,6 +12,7 @@ from irisu_rl.r3b_tail import ScoreOnlyTailController
 @dataclass(frozen=True)
 class AuditRow:
     shaping_weight_ppm: tuple[int, ...]
+    raw_rewards: tuple[int, ...]
     scaled_raw_rewards: tuple[float, ...]
     shaping_rewards: tuple[float, ...]
     optimizer_rewards: tuple[float, ...]
@@ -24,29 +25,54 @@ class Audit:
     raw_reward: int
     optimizer_reward: float
     invalid_actions: int
+    reward_sha256: str
     decisions: tuple[AuditRow, ...]
 
 
+REWARD_SHA256 = "a" * 64
+
+
 def audit(*rows: tuple[int, ...]) -> Audit:
-    decisions = tuple(
-        AuditRow(
-            weights,
-            tuple(float(index + 1) for index in range(len(weights))),
-            tuple(0.25 for _ in weights),
-            tuple(
-                float(index + 1) if weight == 0 else float(index + 1) + 0.25
-                for index, weight in enumerate(weights)
-            ),
+    decisions = []
+    for weights in rows:
+        raw = tuple(index + 1 for index in range(len(weights)))
+        scaled = tuple(float(value) for value in raw)
+        shaping = tuple(0.0 if weight == 0 else 0.25 for weight in weights)
+        optimizer = tuple(
+            float(value)
+            for value in (
+                torch.tensor(scaled, dtype=torch.float32)
+                + torch.tensor(shaping, dtype=torch.float32)
+                * (
+                    torch.tensor(weights, dtype=torch.int64).to(torch.float32)
+                    / 1_000_000.0
+                )
+            ).tolist()
         )
-        for weights in rows
-    )
+        decisions.append(AuditRow(weights, raw, scaled, shaping, optimizer))
+    decisions = tuple(decisions)
     return Audit(
         len(decisions),
         sum(len(row.shaping_weight_ppm) for row in decisions),
-        1,
-        sum(sum(row.optimizer_rewards) for row in decisions),
+        sum(sum(row.raw_rewards) for row in decisions),
+        sum(
+            float(torch.tensor(row.optimizer_rewards, dtype=torch.float32).sum())
+            for row in decisions
+        ),
         0,
+        REWARD_SHA256,
         decisions,
+    )
+
+
+def tail_controller(
+    sweep_updates: int, *, minimum_score_only_updates: int = 400
+) -> ScoreOnlyTailController:
+    return ScoreOnlyTailController(
+        sweep_updates,
+        minimum_score_only_updates=minimum_score_only_updates,
+        reward_scale=1.0,
+        reward_sha256=REWARD_SHA256,
     )
 
 
@@ -59,7 +85,7 @@ class ScoreOnlyTailTests(unittest.TestCase):
         controller.record_optimizer_update(evidence, completed_updates=before + 1)
 
     def test_sweep_drain_and_four_hundred_score_only_updates(self) -> None:
-        controller = ScoreOnlyTailController(2)
+        controller = tail_controller(2)
         shaped = audit((100_000, 100_000), (100_000, 100_000))
         zero = audit((0, 0), (0, 0))
 
@@ -112,7 +138,7 @@ class ScoreOnlyTailTests(unittest.TestCase):
         )
 
     def test_direct_zero_boundary_skips_draining(self) -> None:
-        controller = ScoreOnlyTailController(1)
+        controller = tail_controller(1)
         zero = audit(
             (0, 0),
         )
@@ -128,7 +154,7 @@ class ScoreOnlyTailTests(unittest.TestCase):
             controller.record_drain(zero, completed_updates=1)
 
     def test_drain_and_optimizer_evidence_cannot_be_relabelled(self) -> None:
-        controller = ScoreOnlyTailController(1)
+        controller = tail_controller(1)
         shaped = audit(
             (100_000, 0),
         )
@@ -147,7 +173,7 @@ class ScoreOnlyTailTests(unittest.TestCase):
             controller.validate_optimizer_update(shaped, completed_updates=1)
 
     def test_missing_nonfinite_and_false_score_only_audits_fail(self) -> None:
-        controller = ScoreOnlyTailController(1)
+        controller = tail_controller(1)
         zero = audit(
             (0, 0),
         )
@@ -163,14 +189,34 @@ class ScoreOnlyTailTests(unittest.TestCase):
             controller.validate_optimizer_update(
                 replace(zero, decisions=(nonfinite_row,)), completed_updates=0
             )
+        with self.assertRaisesRegex(ValueError, "reward identity"):
+            controller.validate_optimizer_update(
+                replace(zero, reward_sha256="b" * 64), completed_updates=0
+            )
+        with self.assertRaisesRegex(ValueError, "invalid actions"):
+            controller.validate_optimizer_update(
+                replace(zero, invalid_actions=1), completed_updates=0
+            )
+        with self.assertRaisesRegex(ValueError, "raw reward and scale"):
+            controller.validate_optimizer_update(
+                replace(
+                    zero,
+                    decisions=(replace(zero.decisions[0], raw_rewards=(2, 2)),),
+                ),
+                completed_updates=0,
+            )
+        with self.assertRaisesRegex(ValueError, "raw reward does not match"):
+            controller.validate_optimizer_update(
+                replace(zero, raw_reward=zero.raw_reward + 1), completed_updates=0
+            )
         false_score_only = replace(zero.decisions[0], optimizer_rewards=(1.5, 2.0))
-        with self.assertRaisesRegex(ValueError, "exactly score-only"):
+        with self.assertRaisesRegex(ValueError, "composition"):
             controller.validate_optimizer_update(
                 replace(zero, decisions=(false_score_only,)), completed_updates=0
             )
 
     def test_update_transaction_rejects_clock_or_audit_substitution(self) -> None:
-        controller = ScoreOnlyTailController(2)
+        controller = tail_controller(2)
         first = audit(
             (100_000,),
         )
@@ -191,7 +237,7 @@ class ScoreOnlyTailTests(unittest.TestCase):
             )
 
     def test_checkpoint_round_trip_and_identity_validation(self) -> None:
-        source = ScoreOnlyTailController(1, minimum_score_only_updates=401)
+        source = tail_controller(1, minimum_score_only_updates=401)
         shaped = audit(
             (100_000, 0),
         )
@@ -202,12 +248,12 @@ class ScoreOnlyTailTests(unittest.TestCase):
         source.record_drain(shaped, completed_updates=1)
         state = source.state_dict()
 
-        restored = ScoreOnlyTailController(1, minimum_score_only_updates=401)
+        restored = tail_controller(1, minimum_score_only_updates=401)
         restored.load_state_dict(state)
         self.assertEqual(restored.state_dict(), state)
         self.assertEqual(restored.sha256, source.sha256)
 
-        wrong_identity = ScoreOnlyTailController(1)
+        wrong_identity = tail_controller(1)
         with self.assertRaisesRegex(ValueError, "identity"):
             wrong_identity.load_state_dict(state)
         malformed = dict(state)
@@ -218,10 +264,10 @@ class ScoreOnlyTailTests(unittest.TestCase):
 
     def test_configuration_and_weight_validation(self) -> None:
         with self.assertRaisesRegex(ValueError, "positive"):
-            ScoreOnlyTailController(0)
+            tail_controller(0)
         with self.assertRaisesRegex(ValueError, "at least 400"):
-            ScoreOnlyTailController(1, minimum_score_only_updates=399)
-        controller = ScoreOnlyTailController(1)
+            tail_controller(1, minimum_score_only_updates=399)
+        controller = tail_controller(1)
         with self.assertRaisesRegex(ValueError, "CPU int64"):
             controller.collection_mode(
                 completed_updates=0,

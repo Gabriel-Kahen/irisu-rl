@@ -1050,7 +1050,7 @@ class RecurrentCollector:
 class R3ATrainingSession:
     """One clean-boundary collect/update/checkpoint state machine."""
 
-    version = "r3a-training-session-v2"
+    version = "r3a-training-session-v3"
 
     def __init__(
         self,
@@ -1060,6 +1060,7 @@ class R3ATrainingSession:
         numpy_seed: int,
         max_consecutive_skips: int = 64,
         tail_controller: ScoreOnlyTailController | None = None,
+        optimizer_update_limit: int | None = None,
     ) -> None:
         if collector.model is not trainer.model:
             raise ValueError("collector and trainer must share one model instance")
@@ -1075,6 +1076,15 @@ class R3ATrainingSession:
         self.task = collector.task
         self.numpy_generator = np.random.default_rng(numpy_seed)
         self.max_consecutive_skips = int(max_consecutive_skips)
+        if optimizer_update_limit is None:
+            optimizer_update_limit = trainer.schedule.total_updates
+        if (
+            isinstance(optimizer_update_limit, bool)
+            or not isinstance(optimizer_update_limit, Integral)
+            or not 0 < optimizer_update_limit <= trainer.schedule.total_updates
+        ):
+            raise ValueError("optimizer update limit must fit the PPO schedule")
+        self.optimizer_update_limit = int(optimizer_update_limit)
         if tail_controller is not None:
             if not isinstance(collector.task, CurriculumTaskContract):
                 raise TypeError("score-only tail requires a curriculum task")
@@ -1086,6 +1096,8 @@ class R3ATrainingSession:
             )
             if trainer.schedule.total_updates < required_updates:
                 raise ValueError("PPO budget cannot complete the score-only tail")
+            if self.optimizer_update_limit != required_updates:
+                raise ValueError("trial update limit must exactly complete the tail")
         self.tail_controller = tail_controller
         self.attempted_rollouts = 0
         self.skipped_rollouts = 0
@@ -1132,10 +1144,9 @@ class R3ATrainingSession:
             raise RuntimeError("consecutive skipped-rollout safety limit is exhausted")
         if (
             not activating
-            and self.trainer.schedule.completed_updates
-            >= self.trainer.schedule.total_updates
+            and self.trainer.schedule.completed_updates >= self.optimizer_update_limit
         ):
-            raise RuntimeError("PPO update budget is exhausted")
+            raise RuntimeError("PPO update budget is exhausted for this trial")
         self._busy = True
         try:
             rollout = self.collector.collect()
@@ -1202,6 +1213,7 @@ class R3ATrainingSession:
         if "r3a_payload" in identity:
             raise ValueError("checkpoint identity uses reserved r3a_payload key")
         result = {**dict(identity), "r3a_payload": self.version}
+        result["optimizer_update_limit"] = self.optimizer_update_limit
         if self.tail_controller is not None:
             result["score_only_tail"] = self.tail_controller.manifest()
         return result
@@ -1236,6 +1248,21 @@ class R3ATrainingSession:
         if self._busy or self.poisoned:
             raise RuntimeError("policy identity requires a clean, healthy session")
         return model_state_sha256(self.model)
+
+    def assert_evidence_ready(self) -> None:
+        """Require a clean, synchronized, exactly completed trial boundary."""
+
+        if self._busy or self.poisoned:
+            raise RuntimeError("trial evidence requires a clean, healthy session")
+        self._validate_clean_collection_boundary()
+        self._validate_update_clocks()
+        self._validate_pending_policy()
+        if self.trainer.schedule.completed_updates != self.optimizer_update_limit:
+            raise RuntimeError("trial has not completed its optimizer update budget")
+        if self.tail_controller is not None:
+            state = self.tail_controller.state_dict()
+            if state["phase"] != "complete":
+                raise RuntimeError("score-only tail is not complete")
 
     def request_validation(
         self, *, evaluator_identity_sha256: str
@@ -1306,6 +1333,7 @@ class R3ATrainingSession:
             "version": self.version,
             "session": {
                 "max_consecutive_skips": self.max_consecutive_skips,
+                "optimizer_update_limit": self.optimizer_update_limit,
                 "attempted_rollouts": self.attempted_rollouts,
                 "skipped_rollouts": self.skipped_rollouts,
                 "consecutive_skips": self.consecutive_skips,
@@ -1359,6 +1387,7 @@ class R3ATrainingSession:
         session_state = state["session"]
         if not isinstance(session_state, Mapping) or set(session_state) != {
             "max_consecutive_skips",
+            "optimizer_update_limit",
             "attempted_rollouts",
             "skipped_rollouts",
             "consecutive_skips",
@@ -1369,6 +1398,7 @@ class R3ATrainingSession:
             session_state[name]
             for name in (
                 "max_consecutive_skips",
+                "optimizer_update_limit",
                 "attempted_rollouts",
                 "skipped_rollouts",
                 "consecutive_skips",
@@ -1380,6 +1410,7 @@ class R3ATrainingSession:
                 for value in skip_values
             )
             or session_state["max_consecutive_skips"] != self.max_consecutive_skips
+            or session_state["optimizer_update_limit"] != self.optimizer_update_limit
             or session_state["attempted_rollouts"] < session_state["skipped_rollouts"]
             or session_state["consecutive_skips"] > session_state["skipped_rollouts"]
             or session_state["consecutive_skips"] > self.max_consecutive_skips
