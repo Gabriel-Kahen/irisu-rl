@@ -46,6 +46,13 @@ class LogProbabilityComponents:
         return self.kind + self.wait + self.coordinates
 
 
+@dataclass(frozen=True, slots=True)
+class EntropyComponents:
+    kind: Tensor
+    wait: Tensor
+    coordinates: Tensor
+
+
 class TorchConditionalActionDistribution:
     """Masked WAIT/WEAK/STRONG distribution with conditional likelihoods.
 
@@ -159,14 +166,20 @@ class TorchConditionalActionDistribution:
         return self.log_prob_components(actions).total
 
     def entropy(self) -> Tensor:
+        components = self.entropy_components()
         kind_probability = self._kind.probs
-        result = self._kind.entropy()
-        result = result + kind_probability[..., 0] * self._wait.entropy()
-        coordinate_entropy = self._coordinates.entropy().sum(dim=-1)
         return (
-            result
-            + kind_probability[..., 1] * coordinate_entropy[..., 0]
-            + kind_probability[..., 2] * coordinate_entropy[..., 1]
+            components.kind
+            + kind_probability[..., 0] * components.wait
+            + kind_probability[..., 1] * components.coordinates[..., 0]
+            + kind_probability[..., 2] * components.coordinates[..., 1]
+        )
+
+    def entropy_components(self) -> EntropyComponents:
+        return EntropyComponents(
+            self._kind.entropy(),
+            self._wait.entropy(),
+            self._coordinates.entropy().sum(dim=-1),
         )
 
     def sample(self) -> ActionTensor:

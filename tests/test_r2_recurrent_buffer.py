@@ -8,12 +8,18 @@ import torch
 from irisu_rl.actions import ActionSpec, SemanticAction
 from irisu_rl.encoding import TeacherStateEncoder
 from irisu_rl.recurrent_buffer import RecurrentRolloutBuffer
+from irisu_rl.torch_distribution import LogProbabilityComponents
 from irisu_rl.vector_adapter import MacroVectorAdapter
 from tests.test_rl_vector_adapter import FakeTruncatingVector
 from tests.test_rl_vector_adapter import FakeActiveVector
 
 
 class RecurrentBufferTests(unittest.TestCase):
+    @staticmethod
+    def zero_components(lanes: int) -> LogProbabilityComponents:
+        zeros = torch.zeros(lanes)
+        return LogProbabilityComponents(zeros, zeros.clone(), zeros.clone())
+
     def _censored_predecessor_advantage(
         self, censored_reward: int, value: float
     ) -> float:
@@ -27,6 +33,7 @@ class RecurrentBufferTests(unittest.TestCase):
             first,
             torch.zeros(4),
             torch.zeros(4),
+            old_log_prob_components=self.zero_components(4),
             reset_before=torch.zeros(4, dtype=torch.bool),
         )
         second_observation = adapter.current_observation
@@ -46,6 +53,7 @@ class RecurrentBufferTests(unittest.TestCase):
             second,
             torch.zeros(4),
             old_values,
+            old_log_prob_components=self.zero_components(4),
             reset_before=torch.zeros(4, dtype=torch.bool),
         )
         return float(
@@ -81,6 +89,7 @@ class RecurrentBufferTests(unittest.TestCase):
             transitions,
             torch.zeros(4),
             torch.zeros(4),
+            old_log_prob_components=self.zero_components(4),
             reset_before=torch.zeros(4, dtype=torch.bool),
         )
         batch = buffer.finalize(torch.zeros((1, 4)), lambda_tick=0.99)
@@ -100,6 +109,7 @@ class RecurrentBufferTests(unittest.TestCase):
                 transitions,
                 torch.zeros(4),
                 torch.zeros(4),
+                old_log_prob_components=self.zero_components(4),
                 reset_before=torch.zeros(4, dtype=torch.bool),
             )
 
@@ -116,6 +126,7 @@ class RecurrentBufferTests(unittest.TestCase):
             transitions,
             torch.zeros(4),
             torch.zeros(4),
+            old_log_prob_components=self.zero_components(4),
             reset_before=torch.zeros(4, dtype=torch.bool),
         )
         saved = buffer.global_features.clone()
@@ -144,6 +155,7 @@ class RecurrentBufferTests(unittest.TestCase):
                 transitions,
                 torch.zeros(4),
                 torch.zeros(4),
+                old_log_prob_components=self.zero_components(4),
                 reset_before=torch.zeros(4, dtype=torch.bool),
                 kind_mask=custom,
             )
@@ -153,9 +165,34 @@ class RecurrentBufferTests(unittest.TestCase):
             valid_transitions,
             torch.zeros(4),
             torch.zeros(4),
+            old_log_prob_components=self.zero_components(4),
             reset_before=torch.zeros(4, dtype=torch.bool),
         )
         self.assertTrue(torch.all(buffer.kind_mask[0]))
+
+    def test_shot_only_lane_does_not_require_a_wait_duration(self) -> None:
+        adapter = MacroVectorAdapter(FakeActiveVector(), encoder=TeacherStateEncoder())
+        current = adapter.reset()
+        transitions = adapter.step(
+            tuple(SemanticAction.weak(0.5, 0.5) for _ in range(4))
+        )
+        buffer = RecurrentRolloutBuffer(1, 4, current.schema, torch.zeros((1, 4, 3)))
+        kind_mask = torch.zeros((4, 3), dtype=torch.bool)
+        kind_mask[:, 1] = True
+        wait_mask = torch.zeros(
+            (4, len(ActionSpec().wait_choices)), dtype=torch.bool
+        )
+        buffer.append(
+            current,
+            transitions,
+            torch.zeros(4),
+            torch.zeros(4),
+            old_log_prob_components=self.zero_components(4),
+            reset_before=torch.zeros(4, dtype=torch.bool),
+            kind_mask=kind_mask,
+            wait_mask=wait_mask,
+        )
+        self.assertFalse(torch.any(buffer.wait_mask[0]))
 
     def test_reset_mask_is_enforced_across_episode_boundaries(self) -> None:
         adapter = MacroVectorAdapter(FakeActiveVector(), encoder=TeacherStateEncoder())
@@ -169,6 +206,7 @@ class RecurrentBufferTests(unittest.TestCase):
             first,
             torch.zeros(4),
             torch.zeros(4),
+            old_log_prob_components=self.zero_components(4),
             reset_before=torch.zeros(4, dtype=torch.bool),
         )
         second_observation = adapter.current_observation
@@ -179,6 +217,7 @@ class RecurrentBufferTests(unittest.TestCase):
                 second,
                 torch.zeros(4),
                 torch.zeros(4),
+                old_log_prob_components=self.zero_components(4),
                 reset_before=torch.zeros(4, dtype=torch.bool),
             )
         reset = torch.zeros(4, dtype=torch.bool)
@@ -188,6 +227,7 @@ class RecurrentBufferTests(unittest.TestCase):
             second,
             torch.zeros(4),
             torch.zeros(4),
+            old_log_prob_components=self.zero_components(4),
             reset_before=reset,
         )
         self.assertTrue(buffer.reset_before[1, 3])

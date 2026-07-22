@@ -70,7 +70,10 @@ half-life rather than copying a decision-level `0.95` constant.
 
 Before the first optimizer mutation, stored action likelihoods and values are
 recomputed from the collection observations, masks, incoming hidden state, and
-current model. Mismatch fails closed. Advantages normalize only across
+current model. Total and kind/WAIT/coordinate likelihood components are stored
+and independently verified; update telemetry reports aggregate and per-branch
+KL/entropy so conditional-head drift remains visible. Mismatch fails closed.
+Advantages normalize only across
 loss-bearing decisions. Padding is neutralized before exponentiation, all
 selected outputs/losses/gradient norms must be finite, gradients are globally
 clipped, and KL can stop remaining epochs early. Complete lane sequences—not
@@ -101,6 +104,10 @@ rollout → update replay. R2b must add that integrated gate for its collector.
 
 Run manifests require producer-supplied observation provenance. Schema shape is
 not accepted as evidence that actor-track tensors came from a causal tracker.
+They also require a structured simulator identity: backend, worker and mapped
+physics-library hashes, mechanics/config hashes, protocol version, and seed
+manifest. These fields are canonical rather than optional metadata so a
+checkpoint cannot be resumed under a different simulator contract.
 
 The authoritative training lock targets Linux x86-64 with CPU PyTorch. Other
 platforms are not an R2 acceptance surface yet.
