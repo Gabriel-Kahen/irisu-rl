@@ -1,0 +1,35 @@
+{
+  "version": "teacher-v1",
+  "source": "teacher_state",
+  "capacity": 196,
+  "global_features": [
+    "tick_scaled", "score_signed_log1p", "gauge_fraction", "level_log1p",
+    "highest_chain_log1p", "qualifying_clears_log1p", "active_colors_scaled",
+    "spawn_interval_scaled", "left_held", "right_held", "terminated", "truncated"
+  ],
+  "body_features": [
+    "kind_piece", "kind_projectile", "kind_bonus", "kind_unknown",
+    "shape_circle", "shape_box", "shape_triangle", "shape_unknown",
+    "color_0", "color_1", "color_2", "color_3", "color_4", "color_5",
+    "color_bonus", "color_unknown", "lifecycle_falling", "lifecycle_fresh",
+    "lifecycle_confirmed", "lifecycle_rotten", "lifecycle_ambiguous",
+    "lifecycle_unknown", "effect_x_norm", "effect_y_norm",
+    "velocity_x_display_per_second_scaled", "velocity_y_display_per_second_scaled",
+    "orientation_sin", "orientation_cos", "orientation_valid",
+    "angular_velocity_scaled", "width_norm", "height_norm", "detection_confidence",
+    "track_age_seconds_scaled", "missing_age_seconds_scaled", "occluded_probability",
+    "merged_probability", "position_uncertainty_x_norm", "position_uncertainty_y_norm",
+    "id_scaled", "chain_id_scaled", "projectile_hits_log1p", "age_ticks_log1p",
+    "remaining_lifetime_signed_log1p", "rot_timer_log1p"
+  ],
+  "preprocessing": [
+    "coordinates: public pixels divided by 640x480",
+    "scripted velocity: public displacement/tick * 50 / 1000",
+    "physics velocity: public world-units/second * 10 / 1000",
+    "explicit display velocity fields: pixels/second / 1000 without conversion",
+    "angular_velocity: public value divided by 10",
+    "orientation: circle/unknown invalid; box sin(4a),cos(4a); triangle sin(a),cos(a)",
+    "wide signed values: signed log1p with declared divisors"
+  ],
+  "sha256": "7cba243c6517a195347ea5bb5c999cdd7eef165e8a91a32e1a2200630c5dc8fa"
+}

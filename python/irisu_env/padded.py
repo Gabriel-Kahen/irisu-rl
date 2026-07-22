@@ -25,7 +25,6 @@ from .exact_ipc import (
     _TRANSITION,
 )
 from .native import (
-    EVENT_DETAIL_CAPACITY,
     NativeError,
     NativeSimulator,
     PADDED_BODY_CAPACITY,
@@ -594,6 +593,47 @@ class PaddedVectorEnv:
             self._has_reset[index] = True
             return observation
 
+    def reset_many(
+        self, indices: Sequence[int], *, seeds: Sequence[int]
+    ) -> list[PaddedObservation | ExactPaddedObservation]:
+        """Reset a validated lane subset concurrently, preserving supplied order.
+
+        A backend failure can occur after another lane committed. Callers that
+        require atomic logical episodes must fail closed and recreate/restore
+        the vector owner; this method never hides partial transport failure.
+        """
+
+        with self._lock:
+            executor = self._require_open()
+            lane_indices = list(indices)
+            lane_seeds = list(seeds)
+            if len(lane_indices) != len(lane_seeds):
+                raise ValueError("indices and seeds must have equal length")
+            if len(set(lane_indices)) != len(lane_indices):
+                raise ValueError("reset indices must be unique")
+            if any(not isinstance(index, Integral) or isinstance(index, bool) for index in lane_indices):
+                raise TypeError("reset indices must be integers")
+            if any(not 0 <= int(index) < self._num_envs for index in lane_indices):
+                raise IndexError("reset lane index out of range")
+            resolved = [self._seed(seed) for seed in lane_seeds]
+
+            def reset_one(index: int, seed: int):
+                env = self._envs[index]
+                if isinstance(env, ExactSimulator):
+                    return _copy_exact_observation(
+                        env.reset_typed(seed), ExactPaddedObservation()
+                    )
+                return env.reset_padded(seed)
+
+            futures = [
+                executor.submit(reset_one, int(index), seed)
+                for index, seed in zip(lane_indices, resolved)
+            ]
+            observations = self._drain(futures)
+            for index in lane_indices:
+                self._has_reset[int(index)] = True
+            return observations
+
     def step(
         self, actions: Sequence[Action | Mapping[str, Any]]
     ) -> tuple[
@@ -647,6 +687,84 @@ class PaddedVectorEnv:
                 for transition, lane_events in zip(transitions, events)
             ]
             return observations, rewards, terminated, truncated, infos
+
+    def step_many(
+        self,
+        indices: Sequence[int],
+        actions: Sequence[Action | Mapping[str, Any]],
+    ) -> tuple[
+        list[PaddedObservation | ExactPaddedObservation],
+        list[int],
+        list[bool],
+        list[bool],
+        list[dict[str, Any]],
+    ]:
+        """Advance only a validated lane subset concurrently.
+
+        This is the active-lane primitive needed to finish click releases
+        without injecting fake waits into lanes already at policy boundaries.
+        """
+
+        with self._lock:
+            executor = self._require_open()
+            lane_indices = list(indices)
+            supplied_actions = list(actions)
+            if len(lane_indices) != len(supplied_actions):
+                raise ValueError("indices and actions must have equal length")
+            if len(set(lane_indices)) != len(lane_indices):
+                raise ValueError("step indices must be unique")
+            if any(not isinstance(index, Integral) or isinstance(index, bool) for index in lane_indices):
+                raise TypeError("step indices must be integers")
+            if any(not 0 <= int(index) < self._num_envs for index in lane_indices):
+                raise IndexError("step lane index out of range")
+            if any(not self._has_reset[int(index)] for index in lane_indices):
+                raise RuntimeError("reset must be called before step")
+            encoded = [_action(action) for action in supplied_actions]
+            if any(not math.isfinite(x) or not math.isfinite(y) for _, x, y, _ in encoded):
+                raise ValueError("cursor coordinates must be finite")
+
+            def step_one(index: int, action: tuple[Any, float, float, int]):
+                env = self._envs[index]
+                kind, x, y, wait_ticks = action
+                if isinstance(env, ExactSimulator):
+                    env.send_step_padded(int(kind), x, y, wait_ticks)
+                    payload, generation = env.receive_step_padded_raw()
+                    transition, decoded_generation = _decode_exact_transition(
+                        payload, ExactPaddedTransition()
+                    )
+                    if decoded_generation != generation:
+                        raise NativeError("exact padded event generation changed")
+                    events: Sequence[PaddedEvent] = ExactPaddedEvents(
+                        env, int(transition.event_count), generation
+                    )
+                else:
+                    transition, events = env.step_padded(
+                        int(kind), x, y, wait_ticks
+                    )
+                return transition, events
+
+            futures = [
+                executor.submit(step_one, int(index), action)
+                for index, action in zip(lane_indices, encoded)
+            ]
+            results = self._drain(futures)
+            transitions = [result[0] for result in results]
+            events = [result[1] for result in results]
+            return (
+                [transition.observation for transition in transitions],
+                [int(transition.reward) for transition in transitions],
+                [bool(transition.terminated) for transition in transitions],
+                [bool(transition.truncated) for transition in transitions],
+                [
+                    {
+                        "events": lane_events,
+                        "invalid_action": bool(transition.invalid_action),
+                        "config_hash": int(transition.config_hash),
+                        "diagnostics": transition,
+                    }
+                    for transition, lane_events in zip(transitions, events)
+                ],
+            )
 
     def clone_state(self) -> tuple[bytes, ...]:
         with self._lock:

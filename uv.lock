@@ -49,10 +49,17 @@ source = { editable = "." }
 gymnasium = [
     { name = "gymnasium" },
 ]
+training = [
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
+    { name = "numpy", version = "2.5.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
+]
 
 [package.metadata]
-requires-dist = [{ name = "gymnasium", marker = "extra == 'gymnasium'", specifier = ">=1.0" }]
-provides-extras = ["gymnasium"]
+requires-dist = [
+    { name = "gymnasium", marker = "extra == 'gymnasium'", specifier = ">=1.0" },
+    { name = "numpy", marker = "extra == 'training'", specifier = ">=2.0" },
+]
+provides-extras = ["gymnasium", "training"]
 
 [[package]]
 name = "numpy"

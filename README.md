@@ -11,11 +11,15 @@ original game.
 
 - [`clone`](clone): native C++ simulator and C API
 - [`python/irisu_env`](python/irisu_env): Python and Gymnasium-shaped environment
+- [`python/irisu_rl`](python/irisu_rl): versioned neural encoders, semantic
+  actions, exact-runtime attestation, and owned vector rollout plumbing
 - [`tests`](tests): native, Python, integration, and fidelity tests
 - [`benchmarks`](benchmarks): training-readiness and performance benchmarks
 - [`configs`](configs): measured mechanics configurations
 - [`tools`](tools): capture, validation, and exact-physics tooling
 - [`docs`](docs) and [`reference`](reference/README.md): design and clean-room research records
+- [`RL.md`](RL.md) and [`docs/rl-r0-r1.md`](docs/rl-r0-r1.md): transfer roadmap
+  and the implemented R0/R1 contract
 
 ## Simulator details
 
