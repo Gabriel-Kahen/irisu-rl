@@ -209,6 +209,7 @@ def one_body_training_batch(
         valid.clone(),
         kind_mask,
         wait_mask,
+        torch.zeros((1, lanes, 0), dtype=torch.float32),
     )
 
 

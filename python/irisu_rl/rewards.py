@@ -6,8 +6,8 @@ import hashlib
 import json
 import math
 from dataclasses import asdict, dataclass
-from numbers import Integral
-from typing import Callable, Sequence
+from numbers import Integral, Real
+from typing import Callable, ClassVar, Protocol, Sequence, runtime_checkable
 
 import torch
 from torch import Tensor
@@ -162,40 +162,64 @@ class RewardBatch:
 ShapingFunction = Callable[[Sequence[MacroTransition]], Tensor]
 
 
-class RewardComposer:
-    """Compose optimizer rewards while preserving raw-score authority."""
+@runtime_checkable
+class ShapingSpec(Protocol):
+    shaping_id: str
+    requires_events: bool
+    gamma_tick: float
+    critic_condition_features: int
 
-    version = "reward-composer-v1"
+    def manifest(self) -> dict[str, object]: ...
 
-    def __init__(
-        self,
-        *,
-        reward_scale: float = 1.0,
-        shaping_id: str = "none",
-        shaping: ShapingFunction | None = None,
-        requires_events: bool = False,
-    ) -> None:
-        if not math.isfinite(reward_scale) or reward_scale <= 0:
-            raise ValueError("reward scale must be finite and positive")
-        if not shaping_id or not shaping_id.isascii():
-            raise ValueError("shaping id must be nonempty ASCII")
-        if shaping is None and shaping_id != "none":
-            raise ValueError("a nontrivial shaping id requires a shaping function")
-        if shaping is not None and shaping_id == "none":
-            raise ValueError("a shaping function requires a versioned shaping id")
-        self.reward_scale = float(reward_scale)
-        self.shaping_id = shaping_id
-        self.shaping = shaping
-        self.requires_events = bool(requires_events)
+    def __call__(self, transitions: Sequence[MacroTransition]) -> Tensor: ...
+
+
+@dataclass(frozen=True, slots=True)
+class LinearGaugePotential:
+    """Bounded, policy-invariant gauge feedback for score pretraining.
+
+    The potential is evaluated from authoritative transition scalars rather
+    than learner-visible observations.  It is deliberately linear: every
+    retained gauge unit has one interpretable value, including near zero.
+    """
+
+    potential_scale: float = 1.0
+    gamma_tick: float = 1.0
+    version: ClassVar[str] = "linear-gauge-potential-v1"
+    shaping_id: ClassVar[str] = "linear-gauge-potential-v1"
+    requires_events: ClassVar[bool] = False
+    critic_condition_features: ClassVar[int] = 1
+
+    def __post_init__(self) -> None:
+        if (
+            isinstance(self.potential_scale, bool)
+            or not isinstance(self.potential_scale, Real)
+            or not math.isfinite(self.potential_scale)
+            or self.potential_scale != 1.0
+        ):
+            raise ValueError("linear-gauge-potential-v1 requires potential_scale=1")
+        if isinstance(self.gamma_tick, bool) or self.gamma_tick != 1.0:
+            raise ValueError("linear-gauge-potential-v1 requires gamma_tick=1")
+        object.__setattr__(self, "potential_scale", float(self.potential_scale))
+        object.__setattr__(self, "gamma_tick", float(self.gamma_tick))
 
     def manifest(self) -> dict[str, object]:
         return {
             "version": self.version,
-            "reward_scale": self.reward_scale,
-            "raw_reward": "score_after - score_before",
             "shaping_id": self.shaping_id,
+            "source": "authoritative_transition_int64",
+            "potential": "potential_scale*clamp(gauge,0,gauge_max)/gauge_max",
+            "potential_scale": self.potential_scale,
+            "gamma_tick": self.gamma_tick,
+            "macro_discount": "gamma_tick**elapsed_ticks",
+            "terminal": "zero_on_true_termination",
+            "truncation": "retain_transition_end_potential",
+            "autoreset": "excluded",
             "requires_events": self.requires_events,
-            "clip": False,
+            "critic_condition": "shaping_weight_ppm/1000000",
+            "critic_condition_features": self.critic_condition_features,
+            "actor_condition_features": 0,
+            "output": "detached_cpu_float32",
         }
 
     @property
@@ -205,11 +229,239 @@ class RewardComposer:
         ).encode()
         return hashlib.sha256(payload).hexdigest()
 
+    def _potential(self, gauge: int, gauge_max: int) -> float:
+        if (
+            isinstance(gauge, bool)
+            or not isinstance(gauge, int)
+            or isinstance(gauge_max, bool)
+            or not isinstance(gauge_max, int)
+        ):
+            raise TypeError("gauge potential requires canonical integer fields")
+        if gauge_max <= 0:
+            raise ValueError("gauge maximum must be positive")
+        retained = min(max(gauge, 0), gauge_max)
+        return self.potential_scale * retained / gauge_max
+
+    def __call__(self, transitions: Sequence[MacroTransition]) -> Tensor:
+        values: list[float] = []
+        for transition in transitions:
+            if transition.elapsed_ticks <= 0:
+                raise ValueError("gauge shaping requires positive elapsed ticks")
+            before = self._potential(transition.start_gauge, transition.gauge_max)
+            after = (
+                0.0
+                if transition.terminated
+                else self._potential(transition.end_gauge, transition.gauge_max)
+            )
+            discount = self.gamma_tick**transition.elapsed_ticks
+            values.append(discount * after - before)
+        return torch.tensor(values, dtype=torch.float32)
+
+
+class RewardComposer:
+    """Compose optimizer rewards while preserving raw-score authority."""
+
+    version = "reward-composer-v1"
+    __slots__ = (
+        "_reward_scale",
+        "_shaping_id",
+        "_shaping",
+        "_requires_events",
+        "_shaping_spec",
+        "_shaping_spec_manifest",
+        "_manifest",
+        "_sha256",
+    )
+
+    def __init__(
+        self,
+        *,
+        reward_scale: float = 1.0,
+        shaping_id: str = "none",
+        shaping: ShapingFunction | None = None,
+        requires_events: bool = False,
+        shaping_spec: ShapingSpec | None = None,
+    ) -> None:
+        if (
+            isinstance(reward_scale, bool)
+            or not isinstance(reward_scale, Real)
+            or not math.isfinite(reward_scale)
+            or reward_scale <= 0
+        ):
+            raise ValueError("reward scale must be finite and positive")
+        if (
+            not isinstance(shaping_id, str)
+            or not shaping_id
+            or not shaping_id.isascii()
+        ):
+            raise ValueError("shaping id must be nonempty ASCII")
+        if shaping_spec is not None and (
+            shaping is not None or shaping_id != "none" or requires_events
+        ):
+            raise ValueError(
+                "a shaping spec cannot be combined with legacy shaping arguments"
+            )
+        if shaping_spec is None and isinstance(shaping, ShapingSpec):
+            raise ValueError("manifested shaping must use the shaping_spec argument")
+        if shaping_spec is not None:
+            if not isinstance(shaping_spec, ShapingSpec):
+                raise TypeError("shaping spec does not implement its runtime contract")
+            shaping_id = shaping_spec.shaping_id
+            shaping = shaping_spec
+            requires_events = shaping_spec.requires_events
+            if (
+                not isinstance(shaping_spec.critic_condition_features, int)
+                or isinstance(shaping_spec.critic_condition_features, bool)
+                or shaping_spec.critic_condition_features not in (0, 1)
+            ):
+                raise ValueError("shaping spec critic-condition width is unsupported")
+            if not isinstance(requires_events, bool):
+                raise TypeError("shaping spec event requirement must be boolean")
+            if (
+                isinstance(shaping_spec.gamma_tick, bool)
+                or not isinstance(shaping_spec.gamma_tick, Real)
+                or not math.isfinite(shaping_spec.gamma_tick)
+                or shaping_spec.gamma_tick <= 0
+            ):
+                raise ValueError("shaping spec gamma_tick must be finite and positive")
+        if (
+            not isinstance(shaping_id, str)
+            or not shaping_id
+            or not shaping_id.isascii()
+        ):
+            raise ValueError("shaping id must be nonempty ASCII")
+        if shaping is None and shaping_id != "none":
+            raise ValueError("a nontrivial shaping id requires a shaping function")
+        if shaping is not None and shaping_id == "none":
+            raise ValueError("a shaping function requires a versioned shaping id")
+        shaping_spec_manifest = (
+            None
+            if shaping_spec is None
+            else self._canonical_shaping_manifest(shaping_spec)
+        )
+        if shaping_spec_manifest is not None:
+            declared = {
+                "shaping_id": shaping_id,
+                "requires_events": requires_events,
+                "gamma_tick": float(shaping_spec.gamma_tick),
+                "critic_condition_features": shaping_spec.critic_condition_features,
+            }
+            if any(
+                shaping_spec_manifest.get(key) != value
+                for key, value in declared.items()
+            ):
+                raise ValueError(
+                    "shaping spec manifest contradicts its runtime contract"
+                )
+        self._reward_scale = float(reward_scale)
+        self._shaping_id = shaping_id
+        self._shaping = shaping
+        self._requires_events = bool(requires_events)
+        self._shaping_spec = shaping_spec
+        self._shaping_spec_manifest = shaping_spec_manifest
+        manifest: dict[str, object] = {
+            "version": self.version,
+            "reward_scale": self._reward_scale,
+            "raw_reward": "score_after - score_before",
+            "shaping_id": self._shaping_id,
+            "requires_events": self._requires_events,
+            "clip": False,
+        }
+        if shaping_spec_manifest is not None:
+            manifest["shaping_spec"] = shaping_spec_manifest
+        self._manifest = manifest
+        payload = json.dumps(
+            manifest, sort_keys=True, separators=(",", ":"), allow_nan=False
+        ).encode()
+        self._sha256 = hashlib.sha256(payload).hexdigest()
+
+    @staticmethod
+    def _canonical_shaping_manifest(spec: ShapingSpec) -> dict[str, object]:
+        try:
+            manifest = json.loads(
+                json.dumps(
+                    spec.manifest(),
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    allow_nan=False,
+                )
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError("shaping spec manifest must be canonical JSON") from exc
+        if not isinstance(manifest, dict):
+            raise TypeError("shaping spec manifest must be an object")
+        return manifest
+
+    @property
+    def reward_scale(self) -> float:
+        return self._reward_scale
+
+    @property
+    def shaping_id(self) -> str:
+        return self._shaping_id
+
+    @property
+    def shaping(self) -> ShapingFunction | None:
+        return self._shaping
+
+    @property
+    def requires_events(self) -> bool:
+        return self._requires_events
+
+    @property
+    def shaping_spec(self) -> ShapingSpec | None:
+        return self._shaping_spec
+
+    @property
+    def critic_condition_features(self) -> int:
+        return (
+            0
+            if self._shaping_spec_manifest is None
+            else int(self._shaping_spec_manifest["critic_condition_features"])
+        )
+
+    @property
+    def shaping_gamma_tick(self) -> float | None:
+        return (
+            None
+            if self._shaping_spec_manifest is None
+            else float(self._shaping_spec_manifest["gamma_tick"])
+        )
+
+    def manifest(self) -> dict[str, object]:
+        return json.loads(json.dumps(self._manifest))
+
+    def validate_identity(self) -> None:
+        """Fail before use if an owned shaping spec changed its declaration."""
+
+        if self._shaping_spec is not None:
+            manifest = self._canonical_shaping_manifest(self._shaping_spec)
+            contract = {
+                "shaping_id": self._shaping_spec.shaping_id,
+                "requires_events": self._shaping_spec.requires_events,
+                "gamma_tick": float(self._shaping_spec.gamma_tick),
+                "critic_condition_features": (
+                    self._shaping_spec.critic_condition_features
+                ),
+            }
+            if manifest != self._shaping_spec_manifest or any(
+                self._shaping_spec_manifest.get(key) != value
+                for key, value in contract.items()
+            ):
+                raise RuntimeError(
+                    "shaping spec manifest changed after composition setup"
+                )
+
+    @property
+    def sha256(self) -> str:
+        return self._sha256
+
     def compose(
         self,
         transitions: Sequence[MacroTransition],
         shaping_weight_ppm: Tensor,
     ) -> RewardBatch:
+        self.validate_identity()
         lanes = len(transitions)
         if lanes <= 0:
             raise ValueError("reward composition requires at least one transition")

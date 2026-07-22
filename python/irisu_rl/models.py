@@ -23,6 +23,7 @@ class RecurrentModelConfig:
     minimum_concentration: float = 1.001
     coordinate_parameterization: str = "independent-alpha-beta"
     coordinate_concentration_log_bias: float = 2.0
+    critic_condition_features: int = 0
 
     def __post_init__(self) -> None:
         widths = (
@@ -37,6 +38,11 @@ class RecurrentModelConfig:
             for value in widths
         ):
             raise ValueError("model widths and layer count must be positive integers")
+        if (
+            isinstance(self.critic_condition_features, bool)
+            or self.critic_condition_features not in (0, 1)
+        ):
+            raise ValueError("critic condition feature count must be zero or one")
         if not 1.0 <= self.minimum_concentration <= 10.0:
             raise ValueError("minimum concentration must be within [1, 10]")
         if (
@@ -52,6 +58,8 @@ class RecurrentModelConfig:
 
     def manifest(self) -> dict[str, int | float | str]:
         manifest = asdict(self)
+        if self.critic_condition_features == 0:
+            manifest.pop("critic_condition_features")
         if self.coordinate_parameterization == "independent-alpha-beta":
             manifest.pop("coordinate_parameterization")
             manifest.pop("coordinate_concentration_log_bias")
@@ -144,6 +152,11 @@ class RecurrentActorCritic(nn.Module):
         self.wait_head = nn.Linear(hidden, len(self.action_spec.wait_choices))
         self.coordinate_head = nn.Linear(hidden, 2 * 2 * 2)
         self.value_head = nn.Linear(hidden, 1)
+        self.critic_condition_head = (
+            nn.Linear(hidden, self.config.critic_condition_features)
+            if self.config.critic_condition_features
+            else None
+        )
         self.apply(self._initialize)
         nn.init.orthogonal_(self.kind_head.weight, gain=0.01)
         nn.init.orthogonal_(self.wait_head.weight, gain=0.01)
@@ -156,6 +169,8 @@ class RecurrentActorCritic(nn.Module):
                     self.config.coordinate_concentration_log_bias
                 )
         nn.init.orthogonal_(self.value_head.weight, gain=1.0)
+        if self.critic_condition_head is not None:
+            nn.init.orthogonal_(self.critic_condition_head.weight, gain=1.0)
 
     @staticmethod
     def _initialize(module: nn.Module) -> None:
@@ -182,12 +197,18 @@ class RecurrentActorCritic(nn.Module):
         )
 
     def manifest(self) -> dict[str, object]:
-        return {
-            "architecture": (
+        architecture = (
+            "recurrent-actor-critic-v3-critic-conditioned"
+            if self.config.critic_condition_features
+            else (
                 "recurrent-actor-critic-v2"
-                if self.config.coordinate_parameterization == "mean-log-concentration"
+                if self.config.coordinate_parameterization
+                == "mean-log-concentration"
                 else "recurrent-actor-critic-v1"
-            ),
+            )
+        )
+        return {
+            "architecture": architecture,
             "actor_schema": self.schema.version,
             "actor_schema_sha256": self.schema.sha256,
             "critic_schema": self.schema.version,
@@ -209,6 +230,7 @@ class RecurrentActorCritic(nn.Module):
         recurrent_state: Tensor,
         *,
         reset_before: Tensor | None = None,
+        critic_condition: Tensor | None = None,
     ) -> PolicyValueOutput:
         """Run a time-major sequence shaped ``[T, B, ...]``.
 
@@ -248,6 +270,18 @@ class RecurrentActorCritic(nn.Module):
             )
         if reset_before.shape != (time, batch) or reset_before.dtype != torch.bool:
             raise ValueError("reset-before mask must be boolean [T, B]")
+        condition_shape = (time, batch, self.config.critic_condition_features)
+        if critic_condition is None:
+            if self.config.critic_condition_features:
+                raise ValueError("conditioned critic requires its declared input")
+            critic_condition = global_features.new_zeros(condition_shape)
+        if (
+            critic_condition.shape != condition_shape
+            or critic_condition.dtype != global_features.dtype
+            or critic_condition.device != global_features.device
+            or not torch.isfinite(critic_condition).all()
+        ):
+            raise ValueError("critic condition tensor is malformed")
 
         global_embedding = self.global_encoder(global_features)
         body_embedding = self.body_encoder(body_features, body_mask)
@@ -275,11 +309,19 @@ class RecurrentActorCritic(nn.Module):
                 F.softplus(raw_coordinates) + self.config.minimum_concentration
             )
             alpha, beta = concentration[..., 0], concentration[..., 1]
+        values = self.value_head(encoded).squeeze(-1)
+        if self.critic_condition_head is not None:
+            # Potential shaping is linear in its episode coefficient, but its
+            # value-function shift is state dependent. A learned state slope
+            # represents that interaction without exposing the coefficient to
+            # the recurrent core or any actor head.
+            condition_slope = self.critic_condition_head(encoded)
+            values = values + (condition_slope * critic_condition).sum(dim=-1)
         return PolicyValueOutput(
             self.kind_head(encoded),
             self.wait_head(encoded),
             alpha,
             beta,
-            self.value_head(encoded).squeeze(-1),
+            values,
             hidden,
         )

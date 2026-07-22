@@ -35,12 +35,18 @@ class RecurrentRolloutBuffer:
         *,
         action_spec: ActionSpec | None = None,
         reward_scale: float = 1.0,
+        critic_condition_features: int = 0,
     ) -> None:
         for name, value in (("horizon", horizon), ("lanes", lanes)):
             if not isinstance(value, Integral) or isinstance(value, bool) or value <= 0:
                 raise ValueError(f"{name} must be a positive integer")
         if not torch.isfinite(torch.tensor(reward_scale)) or reward_scale <= 0:
             raise ValueError("reward scale must be finite and positive")
+        if (
+            isinstance(critic_condition_features, bool)
+            or critic_condition_features not in (0, 1)
+        ):
+            raise ValueError("critic condition feature count must be zero or one")
         if initial_state.ndim != 3 or initial_state.shape[1] != lanes:
             raise ValueError("initial recurrent state must have shape [L, B, H]")
         if (
@@ -53,6 +59,7 @@ class RecurrentRolloutBuffer:
         self.schema = schema
         self.action_spec = action_spec or ActionSpec()
         self.reward_scale = float(reward_scale)
+        self.critic_condition_features = int(critic_condition_features)
         self.initial_state = initial_state.detach().cpu().clone()
         g = len(schema.global_features)
         f = len(schema.body_features)
@@ -74,6 +81,9 @@ class RecurrentRolloutBuffer:
         self.old_wait_log_prob = torch.zeros(shape, dtype=torch.float32)
         self.old_coordinate_log_prob = torch.zeros(shape, dtype=torch.float32)
         self.old_values = torch.zeros(shape, dtype=torch.float32)
+        self.critic_condition = torch.zeros(
+            (*shape, self.critic_condition_features), dtype=torch.float32
+        )
         self.raw_reward = torch.zeros(shape, dtype=torch.int64)
         self.optimizer_reward = torch.zeros(shape, dtype=torch.float32)
         self.elapsed_ticks = torch.zeros(shape, dtype=torch.int64)
@@ -99,6 +109,7 @@ class RecurrentRolloutBuffer:
         *,
         old_log_prob_components: LogProbabilityComponents,
         reset_before: Tensor,
+        critic_condition: Tensor | None = None,
         optimizer_reward: Tensor | None = None,
         kind_mask: Tensor | None = None,
         wait_mask: Tensor | None = None,
@@ -152,6 +163,19 @@ class RecurrentRolloutBuffer:
             or not torch.isfinite(optimizer_reward).all()
         ):
             raise ValueError("optimizer reward must be detached finite float32 [B]")
+        expected_condition = (self.lanes, self.critic_condition_features)
+        if critic_condition is None:
+            if self.critic_condition_features:
+                raise ValueError("conditioned critic requires rollout condition values")
+            critic_condition = torch.zeros(expected_condition, dtype=torch.float32)
+        if (
+            critic_condition.shape != expected_condition
+            or critic_condition.dtype != torch.float32
+            or critic_condition.requires_grad
+            or not torch.isfinite(critic_condition).all()
+        ):
+            raise ValueError("critic condition must be detached finite float32 [B, C]")
+        prepared_critic_condition = critic_condition.detach().cpu().clone()
         prepared_optimizer_reward = (
             optimizer_reward.detach().cpu().clone()
             if optimizer_reward is not None
@@ -245,6 +269,13 @@ class RecurrentRolloutBuffer:
                 )
                 if transition.episode_id != expected_episode:
                     raise ValueError("episode id does not match transition continuity")
+                if not expected_reset and not torch.equal(
+                    self.critic_condition[index - 1, lane],
+                    prepared_critic_condition[lane],
+                ):
+                    raise ValueError(
+                        "critic condition changed inside a continuing episode"
+                    )
             prepared.append(
                 (
                     kind,
@@ -272,6 +303,7 @@ class RecurrentRolloutBuffer:
             old_log_prob_components.coordinates.detach().cpu()
         )
         self.old_values[index].copy_(old_values.detach().cpu())
+        self.critic_condition[index].copy_(prepared_critic_condition)
         self.kind_mask[index].copy_(prepared_kind_mask)
         self.wait_mask[index].copy_(prepared_wait_mask)
         for lane, transition in enumerate(transitions):
@@ -357,4 +389,5 @@ class RecurrentRolloutBuffer:
             self.train_mask[: self.size],
             self.kind_mask[: self.size],
             self.wait_mask[: self.size],
+            self.critic_condition[: self.size],
         )

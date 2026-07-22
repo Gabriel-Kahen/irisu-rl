@@ -6,7 +6,7 @@ import unittest
 
 import torch
 
-from irisu_rl.actions import ActionSpec
+from irisu_rl.actions import ActionSpec, SemanticAction
 from irisu_rl.collector import (
     CollectorConfig,
     CurriculumTaskContract,
@@ -25,7 +25,12 @@ from irisu_rl.encoding import TeacherStateEncoder
 from irisu_rl.models import RecurrentActorCritic, RecurrentModelConfig
 from irisu_rl.models import PolicyValueOutput
 from irisu_rl.ppo import PPOConfig, PPOTrainer
-from irisu_rl.rewards import RewardComposer
+from irisu_rl.rewards import (
+    LinearGaugePotential,
+    RewardComposer,
+    RewardKnot,
+    RewardSchedule,
+)
 from irisu_rl.schema import TEACHER_V1
 from irisu_rl.torch_distribution import TorchConditionalActionDistribution
 from irisu_rl.vector_adapter import MacroVectorAdapter
@@ -161,6 +166,21 @@ class StaggeredTerminalVector(FakeActiveVector):
         return output, rewards, terminated, truncated, infos
 
 
+class MixedGaugeResetVector(FakeActiveVector):
+    """Gauge-changing lanes with lane zero ending on each semantic wait."""
+
+    def _step(self, indices, actions):
+        output, rewards, terminated, truncated, infos = super()._step(
+            indices, actions
+        )
+        for offset, lane in enumerate(indices):
+            output[offset].gauge = max(1, 100 - self.ticks[lane] * (lane + 1))
+            if lane == 0:
+                output[offset].terminated = True
+                terminated[offset] = True
+        return output, rewards, terminated, truncated, infos
+
+
 class WeakOnlyTask(ScoreTaskContract):
     def action_masks(self, action_spec: ActionSpec):
         kind = torch.zeros((self.lanes, 3), dtype=torch.bool)
@@ -184,6 +204,184 @@ def make_collector(model, env, *, decisions: int, sampler_seed: int = 13):
 
 
 class R3ACollectorTests(unittest.TestCase):
+    def test_gauge_shaping_requires_conditioned_critic_and_supports_mixed_weights(
+        self,
+    ) -> None:
+        base = curriculum()
+        composer = RewardComposer(shaping_spec=LinearGaugePotential())
+        coordinator = CurriculumCoordinator(base, 4, learner_seed=19)
+        task = CurriculumTaskContract(coordinator, composer, capture_events=False)
+        adapter = MacroVectorAdapter(
+            FakeActiveVector(), encoder=TeacherStateEncoder()
+        )
+        with self.assertRaisesRegex(ValueError, "critic-condition width"):
+            RecurrentCollector(
+                small_model(),
+                adapter,
+                task,
+                policy_sampler_seed=7,
+            )
+
+        conditioned = RecurrentActorCritic(
+            TEACHER_V1,
+            config=RecurrentModelConfig(
+                8, 8, 12, 12, 1, critic_condition_features=1
+            ),
+        )
+        RecurrentCollector(
+            conditioned,
+            adapter,
+            task,
+            policy_sampler_seed=7,
+        )
+        coordinator.lane_shaping_weight_ppm = [500_000, 0, 250_000, 100_000]
+        torch.testing.assert_close(
+            task.critic_condition(),
+            torch.tensor([[0.5], [0.0], [0.25], [0.1]]),
+            rtol=0,
+            atol=0,
+        )
+
+    def test_reward_identity_mismatch_is_rejected_on_task_restore(self) -> None:
+        base = curriculum()
+        shaped = CurriculumTaskContract(
+            CurriculumCoordinator(base, 4, learner_seed=19),
+            RewardComposer(shaping_spec=LinearGaugePotential()),
+            capture_events=False,
+        )
+        score_only = CurriculumTaskContract(
+            CurriculumCoordinator(base, 4, learner_seed=19),
+            RewardComposer(),
+            capture_events=False,
+        )
+        with self.assertRaisesRegex(ValueError, "reward identity mismatch"):
+            score_only.load_state_dict(shaped.state_dict())
+
+    def test_collector_binds_critic_condition_to_composed_reward_weight(self) -> None:
+        base = curriculum()
+        library = SnapshotLibrary(
+            tuple(replace(recipe, config_hash=99) for recipe in base.library.recipes)
+        )
+        spec = replace(base, curriculum_id="condition-bind-v1", library=library)
+
+        class IncorrectConditionTask(CurriculumTaskContract):
+            def critic_condition(self):
+                return torch.zeros((self.coordinator.lanes, 1), dtype=torch.float32)
+
+        task = IncorrectConditionTask(
+            CurriculumCoordinator(spec, 4, learner_seed=19),
+            RewardComposer(shaping_spec=LinearGaugePotential()),
+            capture_events=False,
+        )
+        model = RecurrentActorCritic(
+            TEACHER_V1,
+            config=RecurrentModelConfig(
+                8, 8, 12, 12, 1, critic_condition_features=1
+            ),
+        )
+        collector = RecurrentCollector(
+            model,
+            MacroVectorAdapter(FakeActiveVector(), encoder=TeacherStateEncoder()),
+            task,
+            config=CollectorConfig(max_decisions=1),
+            policy_sampler_seed=7,
+        )
+        collector.initialize()
+        with self.assertRaisesRegex(ValueError, "composed reward weight"):
+            collector.collect()
+
+    def test_collector_rejects_condition_change_across_rollout_boundary(self) -> None:
+        base = curriculum()
+        library = SnapshotLibrary(
+            tuple(replace(recipe, config_hash=99) for recipe in base.library.recipes)
+        )
+        spec = replace(base, curriculum_id="condition-continuity-v1", library=library)
+        coordinator = CurriculumCoordinator(spec, 4, learner_seed=19)
+        task = CurriculumTaskContract(
+            coordinator,
+            RewardComposer(shaping_spec=LinearGaugePotential()),
+            capture_events=False,
+        )
+        model = RecurrentActorCritic(
+            TEACHER_V1,
+            config=RecurrentModelConfig(
+                8, 8, 12, 12, 1, critic_condition_features=1
+            ),
+        )
+        collector = RecurrentCollector(
+            model,
+            MacroVectorAdapter(FakeActiveVector(), encoder=TeacherStateEncoder()),
+            task,
+            config=CollectorConfig(max_decisions=1),
+            policy_sampler_seed=7,
+        )
+        collector.initialize()
+        collector.collect()
+        coordinator.lane_shaping_weight_ppm = [250_000] * 4
+        with self.assertRaisesRegex(ValueError, "continuing episode"):
+            collector.collect()
+
+    def test_mixed_coefficients_collect_reset_and_update_end_to_end(self) -> None:
+        base = curriculum()
+        library = SnapshotLibrary(
+            tuple(replace(recipe, config_hash=99) for recipe in base.library.recipes)
+        )
+        spec = replace(base, curriculum_id="mixed-alpha-update-v1", library=library)
+        coordinator = CurriculumCoordinator(spec, 4, learner_seed=19)
+        coordinator.lane_shaping_weight_ppm = [250_000, 0, 500_000, 100_000]
+        task = CurriculumTaskContract(
+            coordinator,
+            RewardComposer(shaping_spec=LinearGaugePotential()),
+            capture_events=False,
+        )
+        model = RecurrentActorCritic(
+            TEACHER_V1,
+            config=RecurrentModelConfig(
+                8, 8, 12, 12, 1, critic_condition_features=1
+            ),
+        )
+        collector = RecurrentCollector(
+            model,
+            MacroVectorAdapter(
+                MixedGaugeResetVector(), encoder=TeacherStateEncoder()
+            ),
+            task,
+            config=CollectorConfig(max_decisions=2),
+            policy_sampler_seed=7,
+        )
+        collector.initialize()
+        rollout = collector.collect()
+        expected = torch.tensor(
+            [
+                [[0.25], [0.0], [0.5], [0.1]],
+                [[0.5], [0.0], [0.5], [0.1]],
+            ]
+        )
+        torch.testing.assert_close(
+            rollout.batch.critic_condition, expected, rtol=0, atol=0
+        )
+        self.assertTrue(rollout.batch.reset_before[1, 0])
+        self.assertEqual(
+            rollout.audit.decisions[0].shaping_weight_ppm,
+            (250_000, 0, 500_000, 100_000),
+        )
+        self.assertTrue(
+            any(
+                value != 0
+                for decision in rollout.audit.decisions
+                for value in decision.shaping_rewards
+            )
+        )
+        trainer = PPOTrainer(
+            model,
+            config=PPOConfig(
+                epochs=1, lane_minibatch_size=4, target_kl=1.0
+            ),
+            total_updates=1,
+            sampler_seed=11,
+        )
+        self.assertGreater(trainer.update(rollout.batch).optimizer_steps, 0)
+
     def setUp(self) -> None:
         torch.manual_seed(101)
 
@@ -203,6 +401,11 @@ class R3ACollectorTests(unittest.TestCase):
             [int(action.kind) for action in rollout.audit.decisions[0].actions],
             [0, 0, 1, 2],
         )
+        self.assertEqual(rollout.audit.decisions[0].start_gauges, (100,) * 4)
+        self.assertEqual(rollout.audit.decisions[0].end_gauges, (100,) * 4)
+        self.assertEqual(rollout.audit.decisions[0].gauge_maxes, (1000,) * 4)
+        self.assertEqual(len(rollout.audit.reward_sha256), 64)
+        self.assertEqual(rollout.audit.shaping_id, "none")
         self.assertEqual(rollout.audit.invalid_actions, 0)
         self.assertEqual(rollout.audit.completed_episodes, 2)
         self.assertTrue(torch.all(batch.train_mask))

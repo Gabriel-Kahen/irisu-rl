@@ -1,0 +1,45 @@
+version = "r3b-linear-gauge-potential-v1"
+status = "provisional_pre_readiness"
+final_metric = "held_out_raw_score_only"
+
+[potential]
+version = "linear-gauge-potential-v1"
+shaping_id = "linear-gauge-potential-v1"
+source = "authoritative_transition_int64"
+potential = "potential_scale*clamp(gauge,0,gauge_max)/gauge_max"
+potential_scale = 1.0
+gamma_tick = 1.0
+macro_discount = "gamma_tick**elapsed_ticks"
+terminal = "zero_on_true_termination"
+truncation = "retain_transition_end_potential"
+autoreset = "excluded"
+requires_events = false
+critic_condition = "shaping_weight_ppm/1000000"
+critic_condition_features = 1
+actor_condition_features = 0
+output = "detached_cpu_float32"
+
+[coefficient]
+unit = "integer_parts_per_million"
+lifetime = "one_complete_episode"
+candidate_weight_ppm = [0, 100000, 250000, 500000]
+starting_hypothesis_weight_ppm = 100000
+selection = "paired_multi_seed_held_out_raw_score"
+actor_access = false
+critic_access = true
+
+[score_only]
+final_weight_ppm = 0
+planned_minimum_fine_tune_updates = 400
+evaluation_ignores_shaping = true
+
+[implemented_checks]
+macro_partition_invariant = true
+terminal_rebound_unit_fixture = true
+native_terminal_boundary_fixture = true
+truncation_bootstrap_fixture = true
+nonzero_shaping_resume_fixture = true
+mixed_weight_collect_and_update_fixture = true
+
+[planned_experiment_gates]
+reject_if_raw_score_regresses = true

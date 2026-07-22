@@ -154,6 +154,9 @@ class AdapterResumeTests(unittest.TestCase):
             [
                 (
                     value.raw_reward,
+                    value.start_gauge,
+                    value.end_gauge,
+                    value.gauge_max,
                     value.elapsed_ticks,
                     value.terminated,
                     value.truncated,
@@ -163,6 +166,9 @@ class AdapterResumeTests(unittest.TestCase):
             [
                 (
                     value.raw_reward,
+                    value.start_gauge,
+                    value.end_gauge,
+                    value.gauge_max,
                     value.elapsed_ticks,
                     value.terminated,
                     value.truncated,

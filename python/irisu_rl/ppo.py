@@ -80,6 +80,7 @@ class RecurrentTrainingBatch:
     train_mask: Tensor
     kind_mask: Tensor
     wait_mask: Tensor
+    critic_condition: Tensor
 
     def validate(self, model: RecurrentActorCritic) -> tuple[int, int]:
         if self.global_features.ndim != 3:
@@ -107,6 +108,18 @@ class RecurrentTrainingBatch:
             raise ValueError("training observations do not match the model schema")
         if self.initial_state.shape != expected_state:
             raise ValueError("initial recurrent state does not match the model")
+        expected_condition = (
+            time,
+            batch,
+            model.config.critic_condition_features,
+        )
+        if (
+            self.critic_condition.shape != expected_condition
+            or not self.critic_condition.is_floating_point()
+        ):
+            raise ValueError(
+                "critic condition does not match the model's declared input"
+            )
         scalar_shape = (time, batch)
         for value in (
             self.old_log_prob,
@@ -160,6 +173,7 @@ class RecurrentTrainingBatch:
             self.train_mask,
             self.kind_mask,
             self.wait_mask,
+            self.critic_condition,
         )
         if len({value.device for value in tensors}) != 1:
             raise ValueError("all recurrent training tensors must share one device")
@@ -174,6 +188,7 @@ class RecurrentTrainingBatch:
             self.global_features,
             self.body_features,
             self.initial_state,
+            self.critic_condition,
             self.actions.xy,
             self.old_log_prob,
             self.old_kind_log_prob,
@@ -198,6 +213,7 @@ class RecurrentTrainingBatch:
                 self.advantages,
                 self.returns,
                 self.initial_state,
+                self.critic_condition,
             )
         ):
             raise ValueError("training batch contains nonfinite values")
@@ -400,6 +416,11 @@ class PPOTrainer:
                     batch.body_mask[:, lanes],
                     batch.initial_state[:, lanes],
                     reset_before=batch.reset_before[:, lanes],
+                    **(
+                        {"critic_condition": batch.critic_condition[:, lanes]}
+                        if self.model.config.critic_condition_features
+                        else {}
+                    ),
                 )
                 distribution = TorchConditionalActionDistribution(
                     output.kind_logits,
@@ -581,6 +602,11 @@ class PPOTrainer:
             batch.body_mask,
             batch.initial_state,
             reset_before=batch.reset_before,
+            **(
+                {"critic_condition": batch.critic_condition}
+                if self.model.config.critic_condition_features
+                else {}
+            ),
         )
         distribution = TorchConditionalActionDistribution(
             output.kind_logits,

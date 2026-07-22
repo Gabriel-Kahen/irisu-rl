@@ -506,6 +506,22 @@ Potential candidates for early curricula include:
 | Bonus orb | Progress toward a valid target color | Must not leak hidden future targets |
 | Gauge emergency | Bounded gauge/risk potential | Never add a permanent survival reward |
 
+R3b implements the first gauge candidate as a linear normalized potential over
+authoritative transition boundaries:
+
+```text
+Phi(s) = clamp(gauge(s), 0, gauge_max) / gauge_max
+F_t = (gamma_tick ** k_t) * Phi(s_(t+1)) - Phi(s_t)
+```
+
+True terminals have `Phi=0`; truncations retain the outgoing potential. The
+coefficient is frozen for each complete episode and supplied only to the value
+head, allowing curriculum lanes to use different coefficients without giving
+that privileged schedule state to the actor. It must reach exact zero before
+final score-only fine-tuning. See `docs/rl-reward-shaping.md` for the
+implementation, terminal-ordering, transfer, coefficient-selection, and audit
+contracts.
+
 Where a potential uses privileged state, it can pretrain a teacher or critic but
 must not become a required actor feature.
 

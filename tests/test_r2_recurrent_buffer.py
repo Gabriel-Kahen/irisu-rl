@@ -231,6 +231,44 @@ class RecurrentBufferTests(unittest.TestCase):
         self.assertTrue(buffer.reset_before[1, 3])
         self.assertEqual(buffer.episode_id[1, 3], buffer.episode_id[0, 3] + 1)
 
+    def test_critic_condition_is_constant_inside_each_episode(self) -> None:
+        adapter = MacroVectorAdapter(FakeActiveVector(), encoder=TeacherStateEncoder())
+        current = adapter.reset()
+        actions = tuple(SemanticAction.wait(1) for _ in range(4))
+        first = adapter.step(actions)
+        buffer = RecurrentRolloutBuffer(
+            2,
+            4,
+            current.schema,
+            torch.zeros((1, 4, 3)),
+            critic_condition_features=1,
+        )
+        condition = torch.full((4, 1), 0.5)
+        buffer.append(
+            current,
+            first,
+            torch.zeros(4),
+            torch.zeros(4),
+            old_log_prob_components=self.zero_components(4),
+            reset_before=torch.zeros(4, dtype=torch.bool),
+            critic_condition=condition,
+        )
+        second_observation = adapter.current_observation
+        second = adapter.step(actions)
+        changed = condition.clone()
+        changed[0] = 0.25
+        with self.assertRaisesRegex(ValueError, "continuing episode"):
+            buffer.append(
+                second_observation,
+                second,
+                torch.zeros(4),
+                torch.zeros(4),
+                old_log_prob_components=self.zero_components(4),
+                reset_before=torch.zeros(4, dtype=torch.bool),
+                critic_condition=changed,
+            )
+        self.assertEqual(buffer.size, 1)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -13,12 +13,19 @@ from irisu_rl.seeds import SeedAllocator
 from irisu_rl.vector_adapter import MacroVectorAdapter
 
 
-def observation(tick: int, *, terminated: bool = False, truncated: bool = False):
+def observation(
+    tick: int,
+    *,
+    gauge: int = 100,
+    gauge_max: int = 1000,
+    terminated: bool = False,
+    truncated: bool = False,
+):
     return types.SimpleNamespace(
         tick=tick,
         score=tick,
-        gauge=100,
-        gauge_max=1000,
+        gauge=gauge,
+        gauge_max=gauge_max,
         qualifying_clear_count=0,
         level=1,
         active_colors=3,
@@ -126,6 +133,9 @@ class AdapterTests(unittest.TestCase):
         self.assertEqual([value.elapsed_ticks for value in transitions], [1, 8, 2, 1])
         self.assertEqual(transitions[2].primitive_trace, ("press", "release"))
         self.assertEqual(transitions[2].raw_reward, 2)
+        self.assertEqual(transitions[2].start_gauge, 100)
+        self.assertEqual(transitions[2].end_gauge, 100)
+        self.assertEqual(transitions[2].gauge_max, 1000)
         self.assertEqual(transitions[3].primitive_trace, ("press",))
         self.assertTrue(transitions[3].terminated)
         self.assertTrue(transitions[3].macro_interrupted)
@@ -137,6 +147,75 @@ class AdapterTests(unittest.TestCase):
             transitions[3].final_observation.global_features, final
         )
         self.assertNotEqual(transitions[3].seed, env.seeds[3])
+
+    def test_gauge_maximum_drift_poisons_after_backend_mutation(self) -> None:
+        class GaugeDriftVector(FakeActiveVector):
+            def _step(self, indices, actions):
+                result = super()._step(indices, actions)
+                observations = result[0]
+                observations[0].gauge_max = 999
+                return result
+
+        adapter = MacroVectorAdapter(
+            GaugeDriftVector(), encoder=TeacherStateEncoder()
+        )
+        adapter.reset()
+        with self.assertRaisesRegex(RuntimeError, "gauge maximum changed"):
+            adapter.step((SemanticAction.wait(1),) * 4)
+        self.assertTrue(adapter.poisoned)
+
+        env = FakeActiveVector()
+        malformed = MacroVectorAdapter(env, encoder=TeacherStateEncoder())
+        malformed.reset()
+        original = env._step
+
+        def inexact_gauge(indices, actions):
+            result = original(indices, actions)
+            result[0][0].gauge = 99.5
+            return result
+
+        env._step = inexact_gauge  # type: ignore[method-assign]
+        with self.assertRaisesRegex(RuntimeError, "poisoned"):
+            malformed.step((SemanticAction.wait(1),) * 4)
+        self.assertTrue(malformed.poisoned)
+
+    def test_terminal_gauge_boundary_excludes_autoreset_state(self) -> None:
+        class TerminalGaugeVector(FakeActiveVector):
+            def _step(self, indices, actions):
+                result = super()._step(indices, actions)
+                for raw, terminal in zip(result[0], result[2]):
+                    if terminal:
+                        raw.gauge = 1
+                return result
+
+            def reset_many(self, indices, *, seeds):
+                reset = super().reset_many(indices, seeds=seeds)
+                for raw in reset:
+                    raw.gauge = 900
+                return reset
+
+        adapter = MacroVectorAdapter(
+            TerminalGaugeVector(), encoder=TeacherStateEncoder()
+        )
+        adapter.reset()
+        transition = adapter.step(
+            (
+                SemanticAction.wait(1),
+                SemanticAction.wait(1),
+                SemanticAction.wait(1),
+                SemanticAction.strong(0.5, 0.5),
+            )
+        )[3]
+        self.assertTrue(transition.terminated)
+        self.assertEqual(transition.start_gauge, 100)
+        self.assertEqual(transition.end_gauge, 1)
+        self.assertAlmostEqual(
+            float(transition.transition_next_observation.global_features[0, 2]),
+            0.001,
+        )
+        self.assertAlmostEqual(
+            float(transition.next_policy_observation.global_features[0, 2]), 0.9
+        )
 
     def test_preflight_failure_does_not_advance_and_backend_failure_poisons(
         self,
