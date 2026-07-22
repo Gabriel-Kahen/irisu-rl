@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import ctypes
 import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -30,6 +29,20 @@ class EncodedBatch:
     schema: TensorSchema
 
     def __post_init__(self) -> None:
+        self.validate()
+
+    def validate(self) -> None:
+        values = (
+            self.global_features,
+            self.body_features,
+            self.body_mask,
+            self.source_tick,
+            self.health_flags,
+        )
+        if any(not isinstance(value, np.ndarray) for value in values):
+            raise TypeError("encoded tensors must be NumPy arrays")
+        if self.global_features.ndim != 2:
+            raise ValueError("global features must have rank 2")
         batch = self.global_features.shape[0]
         expected = (batch, self.schema.capacity, len(self.schema.body_features))
         if self.global_features.shape != (batch, len(self.schema.global_features)):
@@ -38,7 +51,21 @@ class EncodedBatch:
             raise ValueError("invalid body feature shape")
         if self.body_mask.shape != expected[:2]:
             raise ValueError("invalid body mask shape")
-        for value in (self.global_features, self.body_features, self.body_mask):
+        if self.source_tick.shape != (batch,):
+            raise ValueError("invalid source tick shape")
+        if self.health_flags.shape != (batch,):
+            raise ValueError("invalid health flag shape")
+        if self.global_features.dtype != np.float32:
+            raise ValueError("global features must be float32")
+        if self.body_features.dtype != np.float32:
+            raise ValueError("body features must be float32")
+        if self.body_mask.dtype != np.bool_:
+            raise ValueError("body mask must be bool")
+        if self.source_tick.dtype != np.uint64:
+            raise ValueError("source ticks must be uint64")
+        if self.health_flags.dtype != np.uint32:
+            raise ValueError("health flags must be uint32")
+        for value in values:
             if not value.flags.c_contiguous or not value.flags.owndata:
                 raise ValueError("encoded tensors must be contiguous and owned")
 
@@ -66,9 +93,7 @@ class EncodedBatch:
 def _empty(schema: TensorSchema, batch: int) -> EncodedBatch:
     return EncodedBatch(
         np.zeros((batch, len(schema.global_features)), dtype=np.float32),
-        np.zeros(
-            (batch, schema.capacity, len(schema.body_features)), dtype=np.float32
-        ),
+        np.zeros((batch, schema.capacity, len(schema.body_features)), dtype=np.float32),
         np.zeros((batch, schema.capacity), dtype=np.bool_),
         np.zeros(batch, dtype=np.uint64),
         np.zeros(batch, dtype=np.uint32),
@@ -124,7 +149,12 @@ def _body_core(body: object, *, teacher: bool) -> tuple[np.ndarray, tuple[float,
     shape_names = ("circle", "box", "triangle", "unknown")
     color_names = ("0", "1", "2", "3", "4", "5", "bonus", "unknown")
     lifecycle_names = (
-        "falling", "fresh", "confirmed", "rotten", "ambiguous", "unknown"
+        "falling",
+        "fresh",
+        "confirmed",
+        "rotten",
+        "ambiguous",
+        "unknown",
     )
     kind_raw = _value(body, "kind", "unknown")
     shape_raw = _value(body, "shape", "unknown")
@@ -143,9 +173,15 @@ def _body_core(body: object, *, teacher: bool) -> tuple[np.ndarray, tuple[float,
     lifecycle_hard = lifecycle_alias.get(lifecycle_raw, lifecycle_raw)
     categories = np.concatenate(
         (
-            _probabilities(_value(body, "kind_probabilities", None), kind_names, kind_raw),
-            _probabilities(_value(body, "shape_probabilities", None), shape_names, shape_raw),
-            _probabilities(_value(body, "color_probabilities", None), color_names, color_hard),
+            _probabilities(
+                _value(body, "kind_probabilities", None), kind_names, kind_raw
+            ),
+            _probabilities(
+                _value(body, "shape_probabilities", None), shape_names, shape_raw
+            ),
+            _probabilities(
+                _value(body, "color_probabilities", None), color_names, color_hard
+            ),
             _probabilities(
                 _value(body, "lifecycle_probabilities", None),
                 lifecycle_names,
@@ -160,19 +196,22 @@ def _body_core(body: object, *, teacher: bool) -> tuple[np.ndarray, tuple[float,
             _value(body, "vx_display_per_second", None) is not None
             and _value(body, "vy_display_per_second", None) is not None
         )
-        vx = float(
-            _value(body, "vx_display_per_second", _value(body, "vx", 0.0))
-        )
-        vy = float(
-            _value(body, "vy_display_per_second", _value(body, "vy", 0.0))
-        )
+        vx = float(_value(body, "vx_display_per_second", _value(body, "vx", 0.0)))
+        vy = float(_value(body, "vy_display_per_second", _value(body, "vy", 0.0)))
     else:
         if not isinstance(body, Mapping):
             raise TypeError("actor body must be a causal track mapping")
-        required = ("effect_x", "effect_y", "vx_display_per_second", "vy_display_per_second")
+        required = (
+            "effect_x",
+            "effect_y",
+            "vx_display_per_second",
+            "vy_display_per_second",
+        )
         missing = [key for key in required if key not in body]
         if missing:
-            raise ValueError(f"actor track missing explicit effect-time fields: {missing}")
+            raise ValueError(
+                f"actor track missing explicit effect-time fields: {missing}"
+            )
         x = float(body["effect_x"])
         y = float(body["effect_y"])
         vx = float(body["vx_display_per_second"])
@@ -188,12 +227,20 @@ def _body_core(body: object, *, teacher: bool) -> tuple[np.ndarray, tuple[float,
     if shape_raw in ("circle", 0):
         orient_sin, orient_cos, orient_valid = 0.0, 0.0, 0.0
     elif shape_raw in ("box", 1):
-        orient_sin, orient_cos, orient_valid = math.sin(4 * angle), math.cos(4 * angle), 1.0
+        orient_sin, orient_cos, orient_valid = (
+            math.sin(4 * angle),
+            math.cos(4 * angle),
+            1.0,
+        )
     elif shape_raw in ("triangle", 2):
         orient_sin, orient_cos, orient_valid = math.sin(angle), math.cos(angle), 1.0
     else:
         orient_sin, orient_cos, orient_valid = 0.0, 0.0, 0.0
-    if not teacher and shape_probabilities is not None and explicit_orientation_valid is None:
+    if (
+        not teacher
+        and shape_probabilities is not None
+        and explicit_orientation_valid is None
+    ):
         orient_sin, orient_cos, orient_valid = 0.0, 0.0, 0.0
     if explicit_orientation_valid is not None and not bool(explicit_orientation_valid):
         orient_sin, orient_cos, orient_valid = 0.0, 0.0, 0.0
@@ -223,7 +270,11 @@ def _body_core(body: object, *, teacher: bool) -> tuple[np.ndarray, tuple[float,
     if not np.all(np.isfinite(combined)):
         raise ValueError("body features must be finite")
     return combined, (
-        x, y, width, height, float(numeric[10]),
+        x,
+        y,
+        width,
+        height,
+        float(numeric[10]),
         float(_value(body, "missing_age_seconds", 0.0)),
         float(_value(body, "occluded_probability", 0.0)),
     )
@@ -241,7 +292,9 @@ def _visible(meta: tuple[float, ...]) -> bool:
     )
 
 
-def _typed_teacher_bodies(observation: object, count: int, width: int) -> tuple[np.ndarray, np.ndarray]:
+def _typed_teacher_bodies(
+    observation: object, count: int, width: int
+) -> tuple[np.ndarray, np.ndarray]:
     """Vectorized aligned-or-packed ctypes extraction; returns owned rows."""
 
     bodies = np.ctypeslib.as_array(observation.bodies)[:count]
@@ -255,7 +308,9 @@ def _typed_teacher_bodies(observation: object, count: int, width: int) -> tuple[
     valid_shape = (shape >= 0) & (shape < 3)
     output[np.arange(count), 4 + np.where(valid_shape, shape, 3)] = 1.0
     color = bodies["color"].astype(np.int64)
-    color_index = np.where((color >= 0) & (color < 6), color, np.where(color == -2, 6, 7))
+    color_index = np.where(
+        (color >= 0) & (color < 6), color, np.where(color == -2, 6, 7)
+    )
     output[np.arange(count), 8 + color_index] = 1.0
     lifecycle = bodies["lifecycle"].astype(np.int64)
     lifecycle_index = np.where((lifecycle >= 0) & (lifecycle < 4), lifecycle, 5)
@@ -268,11 +323,15 @@ def _typed_teacher_bodies(observation: object, count: int, width: int) -> tuple[
     output[:, 24] = bodies["vx"] * velocity_factor / VELOCITY_SCALE
     output[:, 25] = bodies["vy"] * velocity_factor / VELOCITY_SCALE
     angle = bodies["angle"].astype(np.float64)
-    circle = shape == 0
     box = shape == 1
-    output[:, 26] = np.where(circle, 0.0, np.where(box, np.sin(4 * angle), np.sin(angle)))
-    output[:, 27] = np.where(circle, 0.0, np.where(box, np.cos(4 * angle), np.cos(angle)))
-    output[:, 28] = (~circle).astype(np.float32)
+    triangle = shape == 2
+    output[:, 26] = np.where(
+        box, np.sin(4 * angle), np.where(triangle, np.sin(angle), 0.0)
+    )
+    output[:, 27] = np.where(
+        box, np.cos(4 * angle), np.where(triangle, np.cos(angle), 0.0)
+    )
+    output[:, 28] = (box | triangle).astype(np.float32)
     output[:, 29] = bodies["angular_velocity"] / ANGULAR_VELOCITY_SCALE
     output[:, 30] = bodies["size"] / CLIENT_WIDTH
     output[:, 31] = bodies["size"] / CLIENT_HEIGHT
@@ -305,20 +364,51 @@ class ActorTrackEncoder:
             global_values = observation.get("global", observation)
             row = output.global_features[lane]
             gauge_max = max(float(_value(global_values, "gauge_max", 1000.0)), 1.0)
-            row[names["gauge_fraction"]] = float(_value(global_values, "gauge", 0.0)) / gauge_max
-            row[names["gauge_confidence"]] = float(_value(global_values, "gauge_confidence", 0.0))
-            row[names["level_log1p"]] = math.log1p(max(float(_value(global_values, "level", 0.0)), 0.0)) / 8.0
+            row[names["gauge_fraction"]] = (
+                float(_value(global_values, "gauge", 0.0)) / gauge_max
+            )
+            row[names["gauge_confidence"]] = float(
+                _value(global_values, "gauge_confidence", 0.0)
+            )
+            row[names["level_log1p"]] = (
+                math.log1p(max(float(_value(global_values, "level", 0.0)), 0.0)) / 8.0
+            )
             direct = set(self.schema.global_features) - {
-                "gauge_fraction", "gauge_confidence", "level_log1p"
+                "gauge_fraction",
+                "gauge_confidence",
+                "level_log1p",
             }
             scales = {
                 "elapsed_seconds_scaled": ("elapsed_seconds", "log8"),
                 "cursor_age_seconds_scaled": ("cursor_age_seconds", "log4"),
-                "previous_duration_seconds_scaled": ("previous_duration_seconds", "log4"),
+                "previous_requested_duration_seconds_scaled": (
+                    "previous_requested_duration_seconds",
+                    "log4",
+                ),
+                "previous_executed_duration_seconds_scaled": (
+                    "previous_executed_duration_seconds",
+                    "log4",
+                ),
+                "previous_down_age_seconds_scaled": (
+                    "previous_down_age_seconds",
+                    "log4",
+                ),
+                "previous_up_age_seconds_scaled": ("previous_up_age_seconds", "log4"),
+                "previous_injection_age_seconds_scaled": (
+                    "previous_injection_age_seconds",
+                    "log4",
+                ),
+                "previous_projectile_confirmation_age_seconds_scaled": (
+                    "previous_projectile_confirmation_age_seconds",
+                    "log4",
+                ),
                 "pending_age_seconds_scaled": ("pending_age_seconds", "log4"),
                 "frame_age_seconds_scaled": ("frame_age_seconds", "tenth"),
                 "effect_horizon_seconds_scaled": ("effect_horizon_seconds", "tenth"),
-                "effect_horizon_uncertainty_scaled": ("effect_horizon_uncertainty", "tenth"),
+                "effect_horizon_uncertainty_scaled": (
+                    "effect_horizon_uncertainty",
+                    "tenth",
+                ),
                 "recent_births_scaled": ("recent_births", "log4"),
                 "recent_deaths_scaled": ("recent_deaths", "log4"),
                 "recent_merges_scaled": ("recent_merges", "log4"),
@@ -334,13 +424,36 @@ class ActorTrackEncoder:
                 elif transform == "tenth":
                     value /= 0.1
                 row[names[feature]] = value
+            effect_features = (
+                "previous_effect_pending",
+                "previous_effect_confirmed",
+                "previous_effect_missed",
+                "previous_effect_ambiguous",
+            )
+            effect = np.asarray(
+                [row[names[feature]] for feature in effect_features],
+                dtype=np.float32,
+            )
+            if np.any(effect < 0) or not np.all(np.isfinite(effect)):
+                raise ValueError(
+                    "previous effect posterior must be finite and nonnegative"
+                )
+            effect_total = float(effect.sum())
+            if effect_total == 0:
+                row[names["previous_effect_ambiguous"]] = 1.0
+            else:
+                for feature, probability in zip(effect_features, effect / effect_total):
+                    row[names[feature]] = probability
             bodies = observation.get("tracks", ())
             candidates: list[tuple[tuple[float, ...], np.ndarray]] = []
             for body in bodies:
                 encoded, meta = _body_core(body, teacher=False)
                 if _visible(meta):
                     key = (
-                        -meta[4], meta[5], round(meta[1], 4), round(meta[0], 4),
+                        -meta[4],
+                        meta[5],
+                        meta[1],
+                        meta[0],
                         *encoded.tolist(),
                     )
                     candidates.append((key, encoded))
@@ -352,7 +465,9 @@ class ActorTrackEncoder:
             for index, (_, encoded) in enumerate(selected):
                 output.body_features[lane, index] = encoded
                 output.body_mask[lane, index] = True
-            row[names["detection_count_fraction"]] = len(selected) / self.schema.capacity
+            row[names["detection_count_fraction"]] = (
+                len(selected) / self.schema.capacity
+            )
             if selected:
                 conf_index = self.schema.body_features.index("detection_confidence")
                 row[names["mean_detection_confidence"]] = float(
@@ -362,9 +477,7 @@ class ActorTrackEncoder:
                 raise ValueError("global features must be finite")
             if np.any(np.abs(row) > 32.0) or (
                 selected
-                and np.any(
-                    np.abs(output.body_features[lane, : len(selected)]) > 32.0
-                )
+                and np.any(np.abs(output.body_features[lane, : len(selected)]) > 32.0)
             ):
                 output.health_flags[lane] |= np.uint32(2)
         return output
@@ -392,8 +505,24 @@ class TeacherStateEncoder:
                 math.log1p(level) / 8.0,
                 math.log1p(highest) / 8.0,
                 math.log1p(clears) / 8.0,
-                float(_nested(observation, "difficulty", "active_colors", _value(observation, "active_colors", 0))) / 6.0,
-                float(_nested(observation, "difficulty", "spawn_interval_ticks", _value(observation, "spawn_interval_ticks", 0))) / 100.0,
+                float(
+                    _nested(
+                        observation,
+                        "difficulty",
+                        "active_colors",
+                        _value(observation, "active_colors", 0),
+                    )
+                )
+                / 6.0,
+                float(
+                    _nested(
+                        observation,
+                        "difficulty",
+                        "spawn_interval_ticks",
+                        _value(observation, "spawn_interval_ticks", 0),
+                    )
+                )
+                / 100.0,
                 float(bool(_value(observation, "left_held", False))),
                 float(bool(_value(observation, "right_held", False))),
                 float(bool(_value(observation, "terminated", False))),
@@ -424,15 +553,17 @@ class TeacherStateEncoder:
                     (
                         int(_value(body, "id", 0)) / 2**32,
                         int(_value(body, "chain_id", 0)) / 2**32,
-                        math.log1p(max(int(_value(body, "projectile_hits", 0)), 0)) / 8.0,
+                        math.log1p(max(int(_value(body, "projectile_hits", 0)), 0))
+                        / 8.0,
                         math.log1p(max(int(_value(body, "age_ticks", 0)), 0)) / 16.0,
-                        _signed_log1p(float(_value(body, "remaining_lifetime", 0))) / 16.0,
+                        _signed_log1p(float(_value(body, "remaining_lifetime", 0)))
+                        / 16.0,
                         math.log1p(max(int(_value(body, "rot_timer", 0)), 0)) / 16.0,
                     ),
                     dtype=np.float32,
                 )
                 combined = np.concatenate((core, privileged))
-                key = (round(meta[1], 4), round(meta[0], 4), *combined.tolist())
+                key = (meta[1], meta[0], *combined.tolist())
                 encoded_bodies.append((key, combined))
             encoded_bodies.sort(key=lambda item: item[0])
             for index, (_, encoded) in enumerate(encoded_bodies):

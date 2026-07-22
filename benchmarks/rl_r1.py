@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Measure the complete R1 collection path, including encoding and storage."""
+"""Measure the R1 teacher-state collection path, including owned storage."""
 
 from __future__ import annotations
 
@@ -55,6 +55,8 @@ def main() -> None:
         initial = adapter.reset()
         buffer = RolloutBuffer(args.lanes * args.iterations, initial.schema)
         invalid = 0
+        native_ticks = 0
+        primitive_actions = 0
         config_hashes: set[int] = set()
         started = time.perf_counter()
         for _ in range(args.iterations):
@@ -63,26 +65,41 @@ def main() -> None:
                 if draw < 7:
                     actions.append(SemanticAction.wait((1, 2, 4, 8, 16, 32)[draw % 6]))
                 elif draw < 9:
-                    actions.append(SemanticAction.weak(float(rng.random()), float(rng.random())))
+                    actions.append(
+                        SemanticAction.weak(float(rng.random()), float(rng.random()))
+                    )
                 else:
-                    actions.append(SemanticAction.strong(float(rng.random()), float(rng.random())))
+                    actions.append(
+                        SemanticAction.strong(float(rng.random()), float(rng.random()))
+                    )
             transitions = adapter.step(actions)
             for transition in transitions:
                 buffer.append(transition)
                 invalid += int(transition.diagnostics.invalid_action)
+                native_ticks += transition.elapsed_ticks
+                primitive_actions += len(transition.primitive_trace)
                 config_hashes.add(transition.diagnostics.config_hash)
         buffer.seal(adapter.current_observation)
         elapsed = time.perf_counter() - started
     decisions = args.lanes * args.iterations
     result = {
-        "schema": "rl-r1-end-to-end-benchmark-v1",
+        "schema": "rl-r1-teacher-rollout-benchmark-v1",
         "recorded_at": date.today().isoformat(),
         "host": {"platform": platform.platform(), "python": platform.python_version()},
-        "parameters": {"backend": args.backend, "lanes": args.lanes, "iterations": args.iterations, "seed": 20260722},
+        "parameters": {
+            "backend": args.backend,
+            "lanes": args.lanes,
+            "iterations": args.iterations,
+            "seed": 20260722,
+        },
         "results": {
             "semantic_decisions": decisions,
             "elapsed_seconds": elapsed,
             "semantic_decisions_per_second": decisions / elapsed,
+            "native_ticks": native_ticks,
+            "native_ticks_per_second": native_ticks / elapsed,
+            "primitive_actions": primitive_actions,
+            "primitive_actions_per_second": primitive_actions / elapsed,
             "invalid_actions": invalid,
             "stored_transitions": buffer.size,
             "unique_initial_and_autoreset_seeds": adapter.seed_allocator.cursor,
@@ -90,11 +107,13 @@ def main() -> None:
         "identity": {
             "worker_sha256": (
                 ACCEPTED_EXACT_RUNTIME_2026_07_21.worker_sha256
-                if identity is not None else None
+                if identity is not None
+                else None
             ),
             "exact_library_sha256": (
                 ACCEPTED_EXACT_RUNTIME_2026_07_21.exact_library_sha256
-                if identity is not None else None
+                if identity is not None
+                else None
             ),
             "actor_schema_sha256": ACTOR_VISION_V1.sha256,
             "teacher_schema_sha256": TEACHER_V1.sha256,
@@ -104,7 +123,7 @@ def main() -> None:
             ).hexdigest(),
         },
         "scope": f"{args.backend} padded vector + semantic macros + vectorized teacher encoding + owned rollout writes",
-        "interpretation": "R1 engineering throughput only; not evidence of policy quality or sim-to-game fidelity",
+        "interpretation": "R1 teacher-state engineering throughput only; excludes actor tracking and model inference and is not evidence of policy quality or sim-to-game fidelity",
     }
     print(json.dumps(result, indent=2, sort_keys=True))
 

@@ -10,6 +10,12 @@ client_width = 640.0
 client_height = 480.0
 allow_both = false
 
+[wait_duration]
+status = "provisional"
+owner = "R4 input-rate and polling calibration"
+evidence = "development hypothesis from RL.md; not measured in the original game"
+decision_deadline = "before bulk transfer-oriented training"
+
 [click_macro]
 press_ticks = 1
 release_ticks = 1

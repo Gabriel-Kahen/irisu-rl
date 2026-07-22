@@ -52,7 +52,10 @@ class ActionSpec:
     allow_both: bool = False
 
     def __post_init__(self) -> None:
-        if not self.wait_choices or tuple(sorted(set(self.wait_choices))) != self.wait_choices:
+        if (
+            not self.wait_choices
+            or tuple(sorted(set(self.wait_choices))) != self.wait_choices
+        ):
             raise ValueError("wait choices must be unique and strictly increasing")
         if self.wait_choices[0] < 1 or self.wait_choices[-1] > 100_000:
             raise ValueError("wait choices must fit the native legal range")
@@ -78,7 +81,10 @@ class ActionSpec:
         except (TypeError, ValueError) as exc:
             raise ValueError("unknown semantic action kind") from exc
         if kind is SemanticActionKind.WAIT:
-            if isinstance(action.wait_ticks, bool) or action.wait_ticks not in self.wait_choices:
+            if (
+                isinstance(action.wait_ticks, bool)
+                or action.wait_ticks not in self.wait_choices
+            ):
                 raise ValueError("wait duration is not in the declared choices")
             return SemanticAction(kind, int(action.wait_ticks), 0.0, 0.0)
         if (
@@ -123,7 +129,11 @@ class ActionSpec:
             if not 0 <= wait_index < len(self.wait_choices):
                 raise ValueError("wait index out of range")
             return self.validate(SemanticAction.wait(self.wait_choices[wait_index]))
-        constructor = SemanticAction.weak if parsed is SemanticActionKind.FIRE_WEAK else SemanticAction.strong
+        constructor = (
+            SemanticAction.weak
+            if parsed is SemanticActionKind.FIRE_WEAK
+            else SemanticAction.strong
+        )
         return self.validate(constructor(x, y))
 
     def serialize(self, action: SemanticAction) -> bytes:
@@ -166,7 +176,9 @@ def _digamma(value: np.ndarray) -> np.ndarray:
     return result
 
 
-def _beta_log_prob(value: np.ndarray, alpha: np.ndarray, beta: np.ndarray) -> np.ndarray:
+def _beta_log_prob(
+    value: np.ndarray, alpha: np.ndarray, beta: np.ndarray
+) -> np.ndarray:
     epsilon = np.finfo(np.float64).eps
     x = np.clip(value, epsilon, 1.0 - epsilon)
     log_norm = np.vectorize(math.lgamma)(alpha) + np.vectorize(math.lgamma)(beta)
@@ -204,10 +216,10 @@ class ConditionalActionDistribution:
         wait_mask: Any | None = None,
     ) -> None:
         self.spec = spec or ActionSpec()
-        self.kind_logits = np.asarray(kind_logits, dtype=np.float64)
-        self.wait_logits = np.asarray(wait_logits, dtype=np.float64)
-        self.alpha = np.asarray(coordinate_alpha, dtype=np.float64)
-        self.beta = np.asarray(coordinate_beta, dtype=np.float64)
+        self.kind_logits = np.array(kind_logits, dtype=np.float64, copy=True)
+        self.wait_logits = np.array(wait_logits, dtype=np.float64, copy=True)
+        self.alpha = np.array(coordinate_alpha, dtype=np.float64, copy=True)
+        self.beta = np.array(coordinate_beta, dtype=np.float64, copy=True)
         batch = self.kind_logits.shape[0] if self.kind_logits.ndim == 2 else -1
         if batch <= 0 or self.kind_logits.shape != (batch, 3):
             raise ValueError("kind_logits must have shape [batch, 3]")
@@ -215,19 +227,22 @@ class ConditionalActionDistribution:
             raise ValueError("wait_logits shape does not match wait choices")
         if self.alpha.shape != (batch, 2, 2) or self.beta.shape != self.alpha.shape:
             raise ValueError("coordinate parameters must have shape [batch, 2, 2]")
-        if not all(np.all(np.isfinite(value)) for value in (self.kind_logits, self.wait_logits, self.alpha, self.beta)):
+        if not all(
+            np.all(np.isfinite(value))
+            for value in (self.kind_logits, self.wait_logits, self.alpha, self.beta)
+        ):
             raise ValueError("distribution parameters must be finite")
         if np.any(self.alpha <= 0) or np.any(self.beta <= 0):
             raise ValueError("Beta concentrations must be positive")
         self.kind_mask = (
             np.ones_like(self.kind_logits, dtype=np.bool_)
             if kind_mask is None
-            else np.asarray(kind_mask, dtype=np.bool_)
+            else np.array(kind_mask, dtype=np.bool_, copy=True)
         )
         self.wait_mask = (
             np.ones_like(self.wait_logits, dtype=np.bool_)
             if wait_mask is None
-            else np.asarray(wait_mask, dtype=np.bool_)
+            else np.array(wait_mask, dtype=np.bool_, copy=True)
         )
         self._kind_logp = _masked_log_softmax(self.kind_logits, self.kind_mask)
         if self.wait_mask.shape != self.wait_logits.shape:
@@ -237,15 +252,15 @@ class ConditionalActionDistribution:
             raise ValueError("all-masked active wait branch")
         effective_wait_mask = self.wait_mask.copy()
         effective_wait_mask[missing_wait, 0] = True
-        self._wait_logp = _masked_log_softmax(
-            self.wait_logits, effective_wait_mask
-        )
+        self._wait_logp = _masked_log_softmax(self.wait_logits, effective_wait_mask)
 
     @property
     def batch_size(self) -> int:
         return self.kind_logits.shape[0]
 
-    def log_prob(self, actions: list[SemanticAction] | tuple[SemanticAction, ...]) -> np.ndarray:
+    def log_prob(
+        self, actions: list[SemanticAction] | tuple[SemanticAction, ...]
+    ) -> np.ndarray:
         if len(actions) != self.batch_size:
             raise ValueError("action batch length mismatch")
         result = np.empty(self.batch_size, dtype=np.float64)
@@ -259,22 +274,20 @@ class ConditionalActionDistribution:
             else:
                 branch = kind - 1
                 xy = np.asarray((action.x_norm, action.y_norm), dtype=np.float64)
-                value += _beta_log_prob(xy, self.alpha[lane, branch], self.beta[lane, branch]).sum()
+                value += _beta_log_prob(
+                    xy, self.alpha[lane, branch], self.beta[lane, branch]
+                ).sum()
             result[lane] = value
         return result
 
     def entropy(self) -> np.ndarray:
         kind_p = np.exp(self._kind_logp)
         kind_terms = np.zeros_like(kind_p)
-        np.multiply(
-            kind_p, self._kind_logp, out=kind_terms, where=self.kind_mask
-        )
+        np.multiply(kind_p, self._kind_logp, out=kind_terms, where=self.kind_mask)
         result = -kind_terms.sum(axis=1)
         wait_p = np.exp(self._wait_logp)
         wait_terms = np.zeros_like(wait_p)
-        np.multiply(
-            wait_p, self._wait_logp, out=wait_terms, where=self.wait_mask
-        )
+        np.multiply(wait_p, self._wait_logp, out=wait_terms, where=self.wait_mask)
         wait_entropy = -wait_terms.sum(axis=1)
         result += kind_p[:, 0] * wait_entropy
         coordinate_entropy = _beta_entropy(self.alpha, self.beta).sum(axis=2)
@@ -287,12 +300,18 @@ class ConditionalActionDistribution:
         for lane in range(self.batch_size):
             kind = int(rng.choice(3, p=np.exp(self._kind_logp[lane])))
             if kind == 0:
-                index = int(rng.choice(len(self.spec.wait_choices), p=np.exp(self._wait_logp[lane])))
+                index = int(
+                    rng.choice(
+                        len(self.spec.wait_choices), p=np.exp(self._wait_logp[lane])
+                    )
+                )
                 actions.append(SemanticAction.wait(self.spec.wait_choices[index]))
             else:
                 branch = kind - 1
                 xy = rng.beta(self.alpha[lane, branch], self.beta[lane, branch])
-                constructor = SemanticAction.weak if kind == 1 else SemanticAction.strong
+                constructor = (
+                    SemanticAction.weak if kind == 1 else SemanticAction.strong
+                )
                 actions.append(constructor(float(xy[0]), float(xy[1])))
         return tuple(actions)
 
@@ -308,6 +327,8 @@ class ConditionalActionDistribution:
                 xy = self.alpha[lane, branch] / (
                     self.alpha[lane, branch] + self.beta[lane, branch]
                 )
-                constructor = SemanticAction.weak if kind == 1 else SemanticAction.strong
+                constructor = (
+                    SemanticAction.weak if kind == 1 else SemanticAction.strong
+                )
                 actions.append(constructor(float(xy[0]), float(xy[1])))
         return tuple(actions)

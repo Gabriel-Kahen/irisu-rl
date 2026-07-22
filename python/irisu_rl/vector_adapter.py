@@ -7,6 +7,7 @@ from typing import Any, Callable, Protocol, Sequence
 
 from .actions import ActionSpec, SemanticAction, SemanticActionKind
 from .encoding import EncodedBatch
+from .schema import TensorSchema
 from .seeds import SeedAllocator
 
 
@@ -66,9 +67,8 @@ class MacroVectorAdapter:
         env: Any,
         *,
         encoder: Encoder,
-        observation_transform: Callable[
-            [Sequence[ObservationInput]], Sequence[object]
-        ] | None = None,
+        observation_transform: Callable[[Sequence[ObservationInput]], Sequence[object]]
+        | None = None,
         seed_allocator: SeedAllocator | None = None,
         action_spec: ActionSpec | None = None,
     ) -> None:
@@ -81,6 +81,7 @@ class MacroVectorAdapter:
         self._poisoned = False
         self._initialized = False
         self._current: EncodedBatch | None = None
+        self._schema: TensorSchema | None = None
         self._raw_ticks = [0] * self.num_envs
         self._raw_scores = [0] * self.num_envs
         self._seeds = [0] * self.num_envs
@@ -106,15 +107,11 @@ class MacroVectorAdapter:
     ) -> EncodedBatch:
         if len(observations) != len(lane_ids):
             raise ValueError("observation and lane-id counts differ")
-        semantic_actions = (
-            (None,) * len(observations) if actions is None else actions
-        )
+        semantic_actions = (None,) * len(observations) if actions is None else actions
         if len(semantic_actions) != len(observations):
             raise ValueError("observation and action counts differ")
         inputs = tuple(
-            ObservationInput(
-                int(lane_id), phase, observation, action, phase == "reset"
-            )
+            ObservationInput(int(lane_id), phase, observation, action, phase == "reset")
             for lane_id, observation, action in zip(
                 lane_ids, observations, semantic_actions
             )
@@ -127,8 +124,11 @@ class MacroVectorAdapter:
         if len(values) != len(observations):
             raise ValueError("observation transform changed batch length")
         encoded = self.encoder.encode(values)
+        encoded.validate()
         if encoded.global_features.shape[0] != len(observations):
             raise ValueError("encoder changed batch length")
+        if self._schema is not None and encoded.schema != self._schema:
+            raise ValueError("encoder changed schema during a rollout")
         return encoded
 
     @staticmethod
@@ -160,6 +160,8 @@ class MacroVectorAdapter:
         except BaseException as exc:
             self._fail_closed(exc)
         self.seed_allocator.commit(reservation)
+        if self._schema is None:
+            self._schema = encoded.schema
         self._current = encoded
         self._raw_ticks = [int(getattr(value, "tick", 0)) for value in observations]
         self._raw_scores = [int(getattr(value, "score", 0)) for value in observations]
@@ -177,12 +179,16 @@ class MacroVectorAdapter:
             raise ValueError(f"actions must contain exactly {self.num_envs} items")
         # Entire-batch validation happens before any backend mutation.
         validated = tuple(self.action_spec.validate(action) for action in actions)
-        start_observations = tuple(self._current.row(index) for index in range(self.num_envs))
+        start_observations = tuple(
+            self._current.row(index) for index in range(self.num_envs)
+        )
         start_ticks = tuple(self._raw_ticks)
         start_scores = tuple(self._raw_scores)
         primitive_actions = [self.action_spec.press(action) for action in validated]
         try:
-            observations, rewards, terminated, truncated, infos = self.env.step(primitive_actions)
+            observations, rewards, terminated, truncated, infos = self.env.step(
+                primitive_actions
+            )
             self._require_lengths(
                 self.num_envs, observations, rewards, terminated, truncated, infos
             )
@@ -197,9 +203,7 @@ class MacroVectorAdapter:
 
         try:
             final_raw = list(observations)
-            final_encoded = [
-                first_encoded.row(index) for index in range(self.num_envs)
-            ]
+            final_encoded = [first_encoded.row(index) for index in range(self.num_envs)]
             total_rewards = [int(value) for value in rewards]
             total_events = [len(info.get("events", ())) for info in infos]
             invalid = [bool(info.get("invalid_action", False)) for info in infos]
@@ -226,10 +230,20 @@ class MacroVectorAdapter:
                     release_lanes,
                     [self.action_spec.release() for _ in release_lanes],
                 )
-                release_observations, release_rewards, release_terminated, release_truncated, release_infos = release_result
+                (
+                    release_observations,
+                    release_rewards,
+                    release_terminated,
+                    release_truncated,
+                    release_infos,
+                ) = release_result
                 self._require_lengths(
-                    len(release_lanes), release_observations, release_rewards,
-                    release_terminated, release_truncated, release_infos,
+                    len(release_lanes),
+                    release_observations,
+                    release_rewards,
+                    release_terminated,
+                    release_truncated,
+                    release_infos,
                 )
                 release_encoded = self._encode(
                     release_observations,
@@ -241,8 +255,7 @@ class MacroVectorAdapter:
                     len(info.get("events", ())) for info in release_infos
                 ]
                 release_invalid = [
-                    bool(info.get("invalid_action", False))
-                    for info in release_infos
+                    bool(info.get("invalid_action", False)) for info in release_infos
                 ]
                 release_hashes = [
                     int(info.get("config_hash", 0)) for info in release_infos
@@ -262,14 +275,18 @@ class MacroVectorAdapter:
 
         if any(invalid):
             self._poisoned = True
-            raise RuntimeError("validated semantic action produced a native invalid action")
+            raise RuntimeError(
+                "validated semantic action produced a native invalid action"
+            )
 
         end_ticks = [int(getattr(value, "tick", 0)) for value in final_raw]
         end_scores = [int(getattr(value, "score", 0)) for value in final_raw]
         elapsed = [end - start for start, end in zip(start_ticks, end_ticks)]
         if any(value <= 0 for value in elapsed):
             self._poisoned = True
-            raise RuntimeError("semantic macro did not advance a positive number of ticks")
+            raise RuntimeError(
+                "semantic macro did not advance a positive number of ticks"
+            )
         if any(
             reward != end - start
             for reward, start, end in zip(total_rewards, start_scores, end_scores)
@@ -309,58 +326,65 @@ class MacroVectorAdapter:
                     getattr(reset_observations[offset], "score", 0)
                 )
 
-        transitions: list[MacroTransition] = []
-        for lane, action in enumerate(validated):
-            interrupted = False
-            if final_truncated[lane]:
-                if action.kind is SemanticActionKind.WAIT:
-                    interrupted = elapsed[lane] < action.wait_ticks
-                else:
-                    interrupted = "release" not in traces[lane]
-            episode_done = final_terminated[lane] or final_truncated[lane]
-            next_policy = reset_encoded_by_lane.get(lane, final_encoded[lane])
-            transitions.append(
-                MacroTransition(
-                    lane_id=lane,
-                    episode_id=self._episode_ids[lane],
-                    seed=self._seeds[lane],
-                    observation=start_observations[lane],
-                    action=action,
-                    primitive_trace=tuple(traces[lane]),
-                    raw_reward=total_rewards[lane],
-                    elapsed_ticks=elapsed[lane],
-                    start_tick=start_ticks[lane],
-                    end_tick=end_ticks[lane],
-                    terminated=final_terminated[lane],
-                    truncated=final_truncated[lane],
-                    macro_interrupted=interrupted,
-                    transition_next_observation=final_encoded[lane],
-                    final_observation=final_encoded[lane] if episode_done else None,
-                    next_policy_observation=next_policy,
-                    bootstrap_mask=(
-                        not final_terminated[lane]
-                        and (
-                            not interrupted
-                            or action.kind is SemanticActionKind.WAIT
-                        )
-                    ),
-                    trace_mask=not episode_done,
-                    diagnostics=OwnedDiagnostics(
-                        config_hashes[lane], invalid[lane], total_events[lane]
-                    ),
+        try:
+            transitions: list[MacroTransition] = []
+            for lane, action in enumerate(validated):
+                interrupted = False
+                if final_terminated[lane] or final_truncated[lane]:
+                    if action.kind is SemanticActionKind.WAIT:
+                        interrupted = elapsed[lane] < action.wait_ticks
+                    else:
+                        interrupted = "release" not in traces[lane]
+                episode_done = final_terminated[lane] or final_truncated[lane]
+                next_policy = reset_encoded_by_lane.get(lane, final_encoded[lane])
+                transitions.append(
+                    MacroTransition(
+                        lane_id=lane,
+                        episode_id=self._episode_ids[lane],
+                        seed=self._seeds[lane],
+                        observation=start_observations[lane],
+                        action=action,
+                        primitive_trace=tuple(traces[lane]),
+                        raw_reward=total_rewards[lane],
+                        elapsed_ticks=elapsed[lane],
+                        start_tick=start_ticks[lane],
+                        end_tick=end_ticks[lane],
+                        terminated=final_terminated[lane],
+                        truncated=final_truncated[lane],
+                        macro_interrupted=interrupted,
+                        transition_next_observation=final_encoded[lane],
+                        final_observation=(
+                            final_encoded[lane] if episode_done else None
+                        ),
+                        next_policy_observation=next_policy,
+                        bootstrap_mask=(
+                            not final_terminated[lane]
+                            and (
+                                not interrupted
+                                or action.kind is SemanticActionKind.WAIT
+                            )
+                        ),
+                        trace_mask=not episode_done,
+                        diagnostics=OwnedDiagnostics(
+                            config_hashes[lane], invalid[lane], total_events[lane]
+                        ),
+                    )
                 )
-            )
-            self._current.global_features[lane] = next_policy.global_features[0]
-            self._current.body_features[lane] = next_policy.body_features[0]
-            self._current.body_mask[lane] = next_policy.body_mask[0]
-            self._current.source_tick[lane] = next_policy.source_tick[0]
-            self._current.health_flags[lane] = next_policy.health_flags[0]
-            if episode_done:
-                self._seeds[lane] = new_seed_by_lane[lane]
-                self._episode_ids[lane] += 1
-                self._raw_ticks[lane] = reset_tick_by_lane[lane]
-                self._raw_scores[lane] = reset_score_by_lane[lane]
-            else:
-                self._raw_ticks[lane] = end_ticks[lane]
-                self._raw_scores[lane] = end_scores[lane]
+            for lane, transition in enumerate(transitions):
+                next_policy = transition.next_policy_observation
+                self._current.global_features[lane] = next_policy.global_features[0]
+                self._current.body_features[lane] = next_policy.body_features[0]
+                self._current.body_mask[lane] = next_policy.body_mask[0]
+                self._current.source_tick[lane] = next_policy.source_tick[0]
+                self._current.health_flags[lane] = next_policy.health_flags[0]
+                if transition.terminated or transition.truncated:
+                    self._seeds[lane] = new_seed_by_lane[lane]
+                    self._episode_ids[lane] += 1
+                    self._raw_ticks[lane] = reset_tick_by_lane[lane]
+                    self._raw_scores[lane] = reset_score_by_lane[lane]
+                else:
+                    self._raw_ticks[lane] = end_ticks[lane]
+                    self._raw_scores[lane] = end_scores[lane]
+        except BaseException as exc:
+            self._fail_closed(exc)
         return tuple(transitions)

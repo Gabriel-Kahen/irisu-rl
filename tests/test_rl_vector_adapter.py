@@ -50,7 +50,9 @@ class FakeActiveVector:
 
     def _step(self, indices, actions):
         output, rewards, terminated, truncated, infos = [], [], [], [], []
-        self.calls.append((tuple(indices), tuple(int(action.kind) for action in actions)))
+        self.calls.append(
+            (tuple(indices), tuple(int(action.kind) for action in actions))
+        )
         for lane, action in zip(indices, actions):
             delta = action.wait_ticks if action.kind == ActionKind.WAIT else 1
             self.ticks[lane] += delta
@@ -59,7 +61,9 @@ class FakeActiveVector:
             rewards.append(delta)
             terminated.append(terminal)
             truncated.append(False)
-            infos.append({"events": [object()], "invalid_action": False, "config_hash": 99})
+            infos.append(
+                {"events": [object()], "invalid_action": False, "config_hash": 99}
+            )
         return output, rewards, terminated, truncated, infos
 
     def step(self, actions):
@@ -80,13 +84,21 @@ class FakeActiveVector:
 class FakeTruncatingVector(FakeActiveVector):
     def _step(self, indices, actions):
         output, rewards, terminated, truncated, infos = [], [], [], [], []
-        self.calls.append((tuple(indices), tuple(int(action.kind) for action in actions)))
+        self.calls.append(
+            (tuple(indices), tuple(int(action.kind) for action in actions))
+        )
         for lane, action in zip(indices, actions):
             is_wait_cut = lane == 1 and action.kind == ActionKind.WAIT
             is_press_cut = lane == 2 and action.kind != ActionKind.WAIT
-            delta = 2 if is_wait_cut else (action.wait_ticks if action.kind == ActionKind.WAIT else 1)
+            delta = (
+                2
+                if is_wait_cut
+                else (action.wait_ticks if action.kind == ActionKind.WAIT else 1)
+            )
             self.ticks[lane] += delta
-            output.append(observation(self.ticks[lane], truncated=is_wait_cut or is_press_cut))
+            output.append(
+                observation(self.ticks[lane], truncated=is_wait_cut or is_press_cut)
+            )
             rewards.append(delta)
             terminated.append(False)
             truncated.append(is_wait_cut or is_press_cut)
@@ -95,7 +107,9 @@ class FakeTruncatingVector(FakeActiveVector):
 
 
 class AdapterTests(unittest.TestCase):
-    def test_mixed_macros_release_only_shots_and_preserve_final_observation(self) -> None:
+    def test_mixed_macros_release_only_shots_and_preserve_final_observation(
+        self,
+    ) -> None:
         env = FakeActiveVector()
         adapter = MacroVectorAdapter(
             env, encoder=TeacherStateEncoder(), seed_allocator=SeedAllocator(key=3)
@@ -114,14 +128,19 @@ class AdapterTests(unittest.TestCase):
         self.assertEqual(transitions[2].raw_reward, 2)
         self.assertEqual(transitions[3].primitive_trace, ("press",))
         self.assertTrue(transitions[3].terminated)
+        self.assertTrue(transitions[3].macro_interrupted)
         self.assertFalse(transitions[3].bootstrap_mask)
         self.assertEqual(env.calls[1][0], (2,))
         final = transitions[3].final_observation.global_features.copy()
         adapter.step((SemanticAction.wait(1),) * 4)
-        np.testing.assert_array_equal(transitions[3].final_observation.global_features, final)
+        np.testing.assert_array_equal(
+            transitions[3].final_observation.global_features, final
+        )
         self.assertNotEqual(transitions[3].seed, env.seeds[3])
 
-    def test_preflight_failure_does_not_advance_and_backend_failure_poisons(self) -> None:
+    def test_preflight_failure_does_not_advance_and_backend_failure_poisons(
+        self,
+    ) -> None:
         env = FakeActiveVector()
         adapter = MacroVectorAdapter(env, encoder=TeacherStateEncoder())
         adapter.reset()
@@ -151,6 +170,31 @@ class AdapterTests(unittest.TestCase):
         self.assertEqual(buffer.rollout_end_observation.global_features.shape[0], 4)
         with self.assertRaisesRegex(RuntimeError, "sealed"):
             buffer.append(transition)
+        with self.assertRaisesRegex(ValueError, "positive"):
+            RolloutBuffer(2.5, current.schema)
+
+    def test_encoder_schema_change_after_dispatch_poisons_adapter(self) -> None:
+        class DriftingEncoder:
+            def __init__(self) -> None:
+                self.base = TeacherStateEncoder()
+                self.calls = 0
+
+            def encode(self, observations):
+                batch = self.base.encode(observations)
+                self.calls += 1
+                if self.calls > 1:
+                    batch.schema = types.SimpleNamespace(
+                        capacity=batch.schema.capacity,
+                        global_features=batch.schema.global_features,
+                        body_features=batch.schema.body_features,
+                    )
+                return batch
+
+        adapter = MacroVectorAdapter(FakeActiveVector(), encoder=DriftingEncoder())
+        adapter.reset()
+        with self.assertRaisesRegex(RuntimeError, "poisoned"):
+            adapter.step((SemanticAction.wait(1),) * 4)
+        self.assertTrue(adapter.poisoned)
 
     def test_transform_receives_lane_phase_context_and_current_isolation(self) -> None:
         calls = []
@@ -199,7 +243,9 @@ class AdapterTests(unittest.TestCase):
             adapter.step((SemanticAction.wait(1),) * 4)
         self.assertTrue(adapter.poisoned)
 
-    def test_truncation_bootstrap_distinguishes_neutral_wait_from_held_press(self) -> None:
+    def test_truncation_bootstrap_distinguishes_neutral_wait_from_held_press(
+        self,
+    ) -> None:
         adapter = MacroVectorAdapter(
             FakeTruncatingVector(), encoder=TeacherStateEncoder()
         )

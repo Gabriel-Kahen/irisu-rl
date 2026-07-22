@@ -25,7 +25,6 @@ from .exact_ipc import (
     _TRANSITION,
 )
 from .native import (
-    EVENT_DETAIL_CAPACITY,
     NativeError,
     NativeSimulator,
     PADDED_BODY_CAPACITY,

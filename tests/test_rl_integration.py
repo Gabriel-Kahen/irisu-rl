@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 import unittest
 from pathlib import Path
 
@@ -45,7 +44,9 @@ class PortableRlIntegrationTests(unittest.TestCase):
         self.assertEqual(first.transition_next_observation.global_features[0, left], 0)
         self.assertEqual(first.transition_next_observation.global_features[0, right], 0)
 
-    def test_long_random_rollout_is_reproducible_and_has_no_invalid_actions(self) -> None:
+    def test_long_random_rollout_is_reproducible_and_has_no_invalid_actions(
+        self,
+    ) -> None:
         def collect():
             with PaddedVectorEnv(
                 4, library_path=PORTABLE, config={"max_episode_ticks": 500}
@@ -86,23 +87,34 @@ class PortableRlIntegrationTests(unittest.TestCase):
         self.assertEqual(len(assignments), len(set(assignments.values())))
 
 
-@unittest.skipUnless(PORTABLE.exists() and EXACT.exists(), "exact integration artifacts not built")
+@unittest.skipUnless(
+    PORTABLE.exists() and EXACT.exists(), "exact integration artifacts not built"
+)
 class ExactRlIntegrationTests(unittest.TestCase):
     def test_portable_exact_and_dictionary_teacher_tensor_parity(self) -> None:
-        with PaddedVectorEnv(1, library_path=PORTABLE) as portable, PaddedVectorEnv(
-            1, physics_backend="exact", worker_path=EXACT
-        ) as exact:
+        with (
+            PaddedVectorEnv(1, library_path=PORTABLE) as portable,
+            PaddedVectorEnv(1, physics_backend="exact", worker_path=EXACT) as exact,
+        ):
             portable_observation, _ = portable.reset(seed=[41])
             exact_observation, _ = exact.reset(seed=[41])
             encoder = TeacherStateEncoder()
             portable_tensor = encoder.encode(portable_observation)
             exact_tensor = encoder.encode(exact_observation)
             dictionary_tensor = encoder.encode([portable_observation[0].to_dict()])
-        np.testing.assert_array_equal(portable_tensor.global_features, exact_tensor.global_features)
-        np.testing.assert_array_equal(portable_tensor.body_features, exact_tensor.body_features)
+        np.testing.assert_array_equal(
+            portable_tensor.global_features, exact_tensor.global_features
+        )
+        np.testing.assert_array_equal(
+            portable_tensor.body_features, exact_tensor.body_features
+        )
         np.testing.assert_array_equal(portable_tensor.body_mask, exact_tensor.body_mask)
-        np.testing.assert_array_equal(portable_tensor.global_features, dictionary_tensor.global_features)
-        np.testing.assert_array_equal(portable_tensor.body_features, dictionary_tensor.body_features)
+        np.testing.assert_array_equal(
+            portable_tensor.global_features, dictionary_tensor.global_features
+        )
+        np.testing.assert_array_equal(
+            portable_tensor.body_features, dictionary_tensor.body_features
+        )
 
     def test_accepted_exact_runtime_attests_live_mapping(self) -> None:
         with self.assertRaisesRegex(ValueError, "absolute"):

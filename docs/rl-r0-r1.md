@@ -15,8 +15,11 @@ and future/RNG state from becoming accidental deployment dependencies.
 
 The actor layout is fixed float32 `[B, G]` plus `[B, 196, F]` and a boolean
 mask. It includes confidence, missing/merge/occlusion state, timing uncertainty,
-prior executed input, and effect-time coordinates so the real detector/tracker
-can produce the same contract. The simulator cannot yet honestly produce this
+requested, injected, and acknowledged input state, separate effect evidence,
+and effect-time coordinates so the real detector/tracker can produce the same
+contract. Injection acknowledgment means only that the bridge accepted an
+input; it is never treated as evidence that the game produced the intended
+effect. The simulator cannot yet honestly produce this
 actor record directly; R4 must add a render-visible oracle/tracker and measured
 latency/input calibration before transfer-oriented bulk training.
 
@@ -26,7 +29,9 @@ The policy selects `WAIT(k)`, `FIRE_WEAK(x,y)`, or `FIRE_STRONG(x,y)`. A fire is
 lowered to one raw press tick and a forced neutral release tick. The vector API
 can step active lane subsets, so release completion never injects fake waits
 into lanes already at a decision boundary. Every adapter call returns all lanes
-at a clean policy/update boundary.
+at a clean policy/update boundary. Internally this is the atomic equivalent of
+the roadmap's READY/RELEASE_PENDING scheduler: only incomplete release lanes
+advance before the synchronous decision barrier is returned.
 
 Raw score delta is aggregated without clipping or shaping. Elapsed duration is
 the observed raw native tick difference. Terminal observations are encoded and
@@ -42,9 +47,12 @@ have committed; they are never converted into training truncations.
 The typed teacher encoder uses a vectorized structured NumPy view for both the
 aligned portable ABI and packed exact ABI, then copies into contiguous owned
 float32 storage. Collection batches the first primitive across every lane and
-executes only required releases concurrently. The rollout buffer stores each
+executes only required releases concurrently. The R1 smoke buffer stores each
 ordinary observation once and keeps additional final tensors only at episode
-boundaries.
+boundaries, plus the per-lane batch at the rollout cut. R2 must add recurrent
+states, action masks, old log-probabilities and values, optimizer rewards,
+advantages, returns, and critic-specific tensors before it is a complete PPO
+buffer.
 
 R0/R1 contains no optimizer, so claiming a tuned learning rate here would be
 false. The R2 handoff starts recurrent PPO at `3e-4`, compares `1e-4`, `3e-4`,

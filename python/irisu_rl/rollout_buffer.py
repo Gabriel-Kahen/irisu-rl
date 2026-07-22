@@ -1,6 +1,8 @@
-"""Preallocated owned storage shared by random smokes and the future trainer."""
+"""Preallocated owned core storage for R1 random-rollout smoke tests."""
 
 from __future__ import annotations
+
+from numbers import Integral
 
 import numpy as np
 
@@ -10,32 +12,40 @@ from .vector_adapter import MacroTransition
 
 class RolloutBuffer:
     def __init__(self, capacity: int, schema) -> None:
-        if isinstance(capacity, bool) or capacity <= 0:
+        if (
+            not isinstance(capacity, Integral)
+            or isinstance(capacity, bool)
+            or capacity <= 0
+        ):
             raise ValueError("capacity must be positive")
         self.capacity = int(capacity)
         self.schema = schema
-        g, f, b = len(schema.global_features), len(schema.body_features), schema.capacity
-        self.observations_global = np.zeros((capacity, g), dtype=np.float32)
-        self.observations_body = np.zeros((capacity, b, f), dtype=np.float32)
-        self.observations_mask = np.zeros((capacity, b), dtype=np.bool_)
-        self.action_kind = np.zeros(capacity, dtype=np.uint8)
-        self.action_wait_ticks = np.zeros(capacity, dtype=np.uint32)
-        self.action_xy = np.zeros((capacity, 2), dtype=np.float32)
-        self.raw_reward = np.zeros(capacity, dtype=np.int64)
-        self.elapsed_ticks = np.zeros(capacity, dtype=np.uint32)
-        self.terminated = np.zeros(capacity, dtype=np.bool_)
-        self.truncated = np.zeros(capacity, dtype=np.bool_)
-        self.macro_interrupted = np.zeros(capacity, dtype=np.bool_)
-        self.bootstrap_mask = np.zeros(capacity, dtype=np.bool_)
-        self.trace_mask = np.zeros(capacity, dtype=np.bool_)
-        self.lane_id = np.zeros(capacity, dtype=np.uint32)
-        self.episode_id = np.zeros(capacity, dtype=np.uint64)
-        self.seed = np.zeros(capacity, dtype=np.uint32)
-        self.config_hash = np.zeros(capacity, dtype=np.uint64)
-        self.event_count = np.zeros(capacity, dtype=np.uint32)
-        # Only episode-ending observations require durable bootstrap storage;
-        # ordinary next observations are the next lane record in an on-policy
-        # rollout and duplicating every 196-body tensor doubles memory traffic.
+        g, f, b = (
+            len(schema.global_features),
+            len(schema.body_features),
+            schema.capacity,
+        )
+        self.observations_global = np.zeros((self.capacity, g), dtype=np.float32)
+        self.observations_body = np.zeros((self.capacity, b, f), dtype=np.float32)
+        self.observations_mask = np.zeros((self.capacity, b), dtype=np.bool_)
+        self.action_kind = np.zeros(self.capacity, dtype=np.uint8)
+        self.action_wait_ticks = np.zeros(self.capacity, dtype=np.uint32)
+        self.action_xy = np.zeros((self.capacity, 2), dtype=np.float32)
+        self.raw_reward = np.zeros(self.capacity, dtype=np.int64)
+        self.elapsed_ticks = np.zeros(self.capacity, dtype=np.uint32)
+        self.terminated = np.zeros(self.capacity, dtype=np.bool_)
+        self.truncated = np.zeros(self.capacity, dtype=np.bool_)
+        self.macro_interrupted = np.zeros(self.capacity, dtype=np.bool_)
+        self.bootstrap_mask = np.zeros(self.capacity, dtype=np.bool_)
+        self.trace_mask = np.zeros(self.capacity, dtype=np.bool_)
+        self.lane_id = np.zeros(self.capacity, dtype=np.uint32)
+        self.episode_id = np.zeros(self.capacity, dtype=np.uint64)
+        self.seed = np.zeros(self.capacity, dtype=np.uint32)
+        self.config_hash = np.zeros(self.capacity, dtype=np.uint64)
+        self.event_count = np.zeros(self.capacity, dtype=np.uint32)
+        # R1 keeps episode-ending observations and one per-lane rollout-end
+        # batch without duplicating every ordinary next observation. R2 extends
+        # this core with recurrent state and PPO-specific training tensors.
         self.final_observations: dict[int, EncodedBatch] = {}
         self.rollout_end_observation: EncodedBatch | None = None
         self.size = 0

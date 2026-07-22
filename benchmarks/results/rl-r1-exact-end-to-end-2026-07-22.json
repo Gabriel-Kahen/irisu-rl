@@ -1,5 +1,5 @@
 {
-  "schema": "rl-r1-end-to-end-benchmark-v1",
+  "schema": "rl-r1-teacher-rollout-benchmark-v1",
   "recorded_at": "2026-07-22",
   "host": {
     "platform": "Linux-7.1.2-3-cachyos-x86_64-with-glibc2.43",
@@ -8,7 +8,7 @@
   "identity": {
     "worker_sha256": "4faa4508a89df3e1e62b80e2871b6a35b5913f220d53fe5de43408ad6512c261",
     "exact_library_sha256": "ce14d1cab9ce4331bf494fe92bf657029487aec9f7435e7479b3c7cb579fafb5",
-    "actor_schema_sha256": "6efa38fe06920afbcd6ab99b53e40811a782e59dbe45fc2c8fbe320b8c87afe6",
+    "actor_schema_sha256": "de5673d34707e11116e2211880c0be25abe639edaa496aac0c6527b49b7b9ac9",
     "teacher_schema_sha256": "7cba243c6517a195347ea5bb5c999cdd7eef165e8a91a32e1a2200630c5dc8fa",
     "config_hashes": [396835323231703618],
     "uv_lock_sha256": "5eedb9e518071dfac6b16ffad1d23de575bbab37459ce692635c8451f187e23d"
@@ -20,13 +20,17 @@
     "seed": 20260722
   },
   "results": {
-    "elapsed_seconds": 2.707780603000174,
+    "elapsed_seconds": 2.7310972390000643,
     "invalid_actions": 0,
+    "native_ticks": 33390,
+    "native_ticks_per_second": 12225.855426599555,
+    "primitive_actions": 6217,
+    "primitive_actions_per_second": 2276.374459034724,
     "semantic_decisions": 4800,
-    "semantic_decisions_per_second": 1772.669467637697,
+    "semantic_decisions_per_second": 1757.5353712991275,
     "stored_transitions": 4800,
     "unique_initial_and_autoreset_seeds": 35
   },
   "scope": "exact padded vector + semantic macros + vectorized teacher encoding + owned rollout writes",
-  "interpretation": "R1 engineering throughput only; not evidence of policy quality or sim-to-game fidelity"
+  "interpretation": "R1 teacher-state engineering throughput only; excludes actor tracking and model inference and is not evidence of policy quality or sim-to-game fidelity"
 }
