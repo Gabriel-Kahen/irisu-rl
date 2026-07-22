@@ -1,0 +1,88 @@
+{
+  "schema": "irisu-r2b-learning-proof-v1",
+  "source": {
+    "commit": "e7c3a0151b57c19166dc9e3fb1c6c2895a280ee6",
+    "dirty": false,
+    "uv_lock_sha256": "7ce69dab92473b73969a9eea706cbb95beccd40bf7a74c543518b3a883d8936d"
+  },
+  "runtime_files": {
+    "portable_library_sha256": "4f6928f18c83159b0db1cb895891007ac805d2542954b41d767619eedf3f7c79",
+    "exact_worker_sha256": "4faa4508a89df3e1e62b80e2871b6a35b5913f220d53fe5de43408ad6512c261"
+  },
+  "seed_manifest_sha256": "34ca46e7101c6533681b16e4829ada97153aacbd10b6763f6331fb0d6e9e5aa4",
+  "task": {
+    "version": "one-body-direct-hit-v1",
+    "sha256": "1d39d901e0a6292f64f2f0bfda6a764e1e51f7e13e3f5e692b30af3bc3a05aab",
+    "train_heights": [60.0, 80.0, 100.0, 120.0, 140.0],
+    "calibration_heights": [50.0, 150.0],
+    "validation_heights": [70.0, 130.0],
+    "test_heights": [90.0, 110.0],
+    "hit_weight": 0.75,
+    "aim_weight": 0.25,
+    "aim_sigma": 0.2,
+    "mechanics_config_hashes": {
+      "train": {"60.0": 14781606471736209291, "80.0": 3280161593930316757, "100.0": 10061968537004313076, "120.0": 15568462553128273595, "140.0": 6817356675361304508},
+      "calibration": {"50.0": 1416119056469898116, "150.0": 17204424401001208863},
+      "validation": {"70.0": 1868771626340682828, "130.0": 5503766685910062225},
+      "test": {"90.0": 630722673482494867, "110.0": 9912891724143216018}
+    }
+  },
+  "budgets": {
+    "bc_steps": 500,
+    "ppo_updates": 120,
+    "lanes_per_height": 8,
+    "evaluation_rounds": 8,
+    "model_seeds": [17, 29, 43],
+    "learning_rates": [0.0001, 0.0003, 0.0006]
+  },
+  "behavioral_cloning_validation": {
+    "episodes": 128,
+    "hit_rate": 1.0,
+    "aim_score": 0.9971336126327515,
+    "coordinate_rmse": 0.01071951910853386,
+    "policy_coordinate_std": 0.016170360846444964,
+    "raw_score_delta": 0.0
+  },
+  "random_validation": {
+    "episodes": 128,
+    "hit_rate": 0.0390625,
+    "aim_score": 0.24699944257736206,
+    "coordinate_rmse": 0.34224218130111694,
+    "raw_score_delta": 0.0
+  },
+  "ppo_validation": {
+    "0.0001": [
+      {"model_seed": 17, "pre_ppo_hit_rate": 0.9453125, "hit_rate": 0.9765625, "aim_score": 0.9834746718406677, "early_stopped_updates": 9},
+      {"model_seed": 29, "pre_ppo_hit_rate": 0.9609375, "hit_rate": 1.0, "aim_score": 0.9819440841674805, "early_stopped_updates": 17},
+      {"model_seed": 43, "pre_ppo_hit_rate": 0.9375, "hit_rate": 0.9921875, "aim_score": 0.9854727983474731, "early_stopped_updates": 9}
+    ],
+    "0.0003": [
+      {"model_seed": 17, "pre_ppo_hit_rate": 0.9453125, "hit_rate": 0.9921875, "aim_score": 0.9849562644958496, "early_stopped_updates": 76},
+      {"model_seed": 29, "pre_ppo_hit_rate": 0.9609375, "hit_rate": 0.984375, "aim_score": 0.9834388494491577, "early_stopped_updates": 72},
+      {"model_seed": 43, "pre_ppo_hit_rate": 0.9375, "hit_rate": 0.984375, "aim_score": 0.986200749874115, "early_stopped_updates": 74}
+    ],
+    "0.0006": [
+      {"model_seed": 17, "pre_ppo_hit_rate": 0.9453125, "hit_rate": 0.96875, "aim_score": 0.983404278755188, "early_stopped_updates": 110},
+      {"model_seed": 29, "pre_ppo_hit_rate": 0.9609375, "hit_rate": 0.9921875, "aim_score": 0.9810276031494141, "early_stopped_updates": 108},
+      {"model_seed": 43, "pre_ppo_hit_rate": 0.9375, "hit_rate": 0.9921875, "aim_score": 0.9861200451850891, "early_stopped_updates": 108}
+    ]
+  },
+  "selection": {
+    "rule": "median validation hit rate, then median aim score, then lower learning rate",
+    "selected_learning_rate": 0.0001
+  },
+  "held_out_test": {
+    "backend": "exact",
+    "pass": true,
+    "median_policy_hit_rate": 1.0,
+    "policy_runs": [
+      {"model_seed": 17, "episodes": 128, "hit_rate": 1.0, "aim_score": 0.9887723922729492, "coordinate_rmse": 0.021298831328749657, "raw_score_delta": 0.0},
+      {"model_seed": 29, "episodes": 128, "hit_rate": 1.0, "aim_score": 0.9902258515357971, "coordinate_rmse": 0.01988702453672886, "raw_score_delta": 0.0},
+      {"model_seed": 43, "episodes": 128, "hit_rate": 1.0, "aim_score": 0.9929377436637878, "coordinate_rmse": 0.016865085810422897, "raw_score_delta": 0.0}
+    ],
+    "random": {"episodes": 128, "hit_rate": 0.015625, "aim_score": 0.22584420442581177, "coordinate_rmse": 0.3579370081424713, "raw_score_delta": 0.0}
+  },
+  "deployable": false,
+  "observation_provenance": "privileged_simulator",
+  "transfer_gate": "R4 causal tracker and real input calibration pending"
+}

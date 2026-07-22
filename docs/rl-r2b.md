@@ -79,7 +79,8 @@ test split is opened only after that selection.
 
 ## Acceptance evidence
 
-The checked result artifact records source, dependency lock, portable library,
+The checked [result artifact](../benchmarks/results/rl-r2b-one-body-2026-07-22.json)
+records source, dependency lock, portable library,
 exact worker, mechanics-config, task, action/schema, and seed identities. The
 acceptance gates are:
 

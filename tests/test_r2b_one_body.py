@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import json
 import tempfile
 import tomllib
 import unittest
@@ -68,6 +69,15 @@ class OneBodyContractTests(unittest.TestCase):
         self.assertTrue(torch.all(output.coordinate_alpha > 1))
         self.assertTrue(torch.all(output.coordinate_beta > 1))
         self.assertEqual(model.manifest()["architecture"], "recurrent-actor-critic-v2")
+
+    def test_checked_learning_artifact_passes_without_claiming_deployment(self) -> None:
+        artifact = json.loads(
+            (ROOT / "benchmarks/results/rl-r2b-one-body-2026-07-22.json").read_text()
+        )
+        self.assertTrue(artifact["held_out_test"]["pass"])
+        self.assertEqual(artifact["selection"]["selected_learning_rate"], 1e-4)
+        self.assertFalse(artifact["deployable"])
+        self.assertEqual(artifact["task"]["sha256"], OneBodySpec().sha256)
 
     @unittest.skipUnless(PORTABLE.exists(), "portable integration library not built")
     def test_expert_hits_and_raw_reward_remains_separate(self) -> None:
