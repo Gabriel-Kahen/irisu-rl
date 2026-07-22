@@ -1,0 +1,323 @@
+{
+  "schema_version": 1,
+  "artifact_kind": "exact_padded_python_hot_path_paired_ab",
+  "status": "attribution-only-not-a-full-performance-gate",
+  "recorded_at": "2026-07-21T19:24:33-04:00",
+  "experiment_time": {
+    "local_date": "2026-07-21",
+    "timezone": "America/New_York",
+    "started_at": "unavailable",
+    "finished_at": "unavailable",
+    "note": "The exact experiment timestamps were not captured; recorded_at is the later artifact-construction timestamp."
+  },
+  "repository": {
+    "cwd": "/home/gabe/Documents/irisu",
+    "branch": "main",
+    "head": "3ac7121f029cbcbc01a3e114e68da6f1d62589de",
+    "worktree_clean": false
+  },
+  "host": {
+    "hostname": "gabelinux",
+    "logical_cpus": 16,
+    "machine": "x86_64",
+    "platform": "Linux-7.1.2-3-cachyos-x86_64-with-glibc2.43",
+    "python": "3.14.6",
+    "affinity_during_experiment": "unavailable",
+    "affinity_observed_after_experiment": "0-15",
+    "affinity_observation_command": "taskset -pc $$",
+    "affinity_note": "The post-run shell affinity is recorded for context but is not claimed as contemporaneous proof of every benchmark child affinity.",
+    "load_average_during_experiment": "unavailable"
+  },
+  "runtime_artifacts": {
+    "worker": {
+      "path": "/home/gabe/Documents/irisu/build-physics-integration-exact-multiworld-2/irisu-exact-worker",
+      "sha256": "4faa4508a89df3e1e62b80e2871b6a35b5913f220d53fe5de43408ad6512c261"
+    },
+    "exact_library": {
+      "backend": "exact-msvc9-r58-multiworld-forward",
+      "sha256": "ce14d1cab9ce4331bf494fe92bf657029487aec9f7435e7479b3c7cb579fafb5",
+      "pointer_bits": 32,
+      "protocol_version": 1,
+      "x87_control_word": 639,
+      "config_hash": 17009678407634462320
+    },
+    "identity_evidence": "benchmarks/results/exact-pipeline-parity-safe-perf-2026-07-21.json plus a post-run worker sha256sum; no runtime binary changed between that report and this paired experiment"
+  },
+  "source_identity": {
+    "benchmark_driver": {
+      "path": "benchmarks/exact_pipeline.py",
+      "sha256": "db0cf3332f4965dd16cec0661158eb1febd2c83cc0b687a0114694fc88c0fc3c"
+    },
+    "old_reference_worktree": {
+      "description": "The source-current worktree immediately before the two hot-path edits. The old arm loaded the new module and monkey-patched the two timed functions with their old implementations; new import-time layout assertions were therefore present but outside the timed hot path.",
+      "files": {
+        "python/irisu_env/exact_ipc.py": "f811c22b0f2b450d2d8620fe06fec9eb7bf76c473436b74151acbb8666f63b07",
+        "python/irisu_env/padded.py": "a43db24bc2d43e641b9187fed1c180bc48436ea2956963a67562f98cfb4c37c7"
+      },
+      "hash_evidence": "artifacts.sources in benchmarks/results/exact-pipeline-parity-safe-perf-2026-07-21.json"
+    },
+    "new_worktree": {
+      "description": "Canonical builtin action request fast path plus direct copy of the validated packed transition suffix.",
+      "files": {
+        "python/irisu_env/exact_ipc.py": "ac7a4b5c7e589eefa07c58b12d9c33c50cd04b14396a912eaafd879cfb3e7a3b",
+        "python/irisu_env/padded.py": "46f1c849b81af60873e28e1220abecb9a10ad7859802b9813c2f58c2f50d1f16"
+      },
+      "hash_evidence": "post-edit sha256sum before artifact construction"
+    },
+    "variant_switch": {
+      "old": "ipc._pack_step_request=old_pack; pad._decode_exact_transition=old_decode",
+      "new": "ipc._pack_step_request=new_pack; pad._decode_exact_transition=new_decode"
+    }
+  },
+  "invocation": {
+    "cwd": "/home/gabe/Documents/irisu",
+    "shell_command": "PYTHONPATH=python python -",
+    "stdin_transport": "bash heredoc",
+    "driver_source_capture": "transcribed from the executed tool call",
+    "driver_source_lines": [
+      "import ctypes, importlib.util, json, statistics",
+      "from numbers import Integral, Real",
+      "from pathlib import Path",
+      "import irisu_env.exact_ipc as ipc",
+      "import irisu_env.padded as pad",
+      "p=Path('benchmarks/exact_pipeline.py').resolve(); spec=importlib.util.spec_from_file_location('bench',p); bench=importlib.util.module_from_spec(spec); spec.loader.exec_module(bench)",
+      "w=Path('build-physics-integration-exact-multiworld-2/irisu-exact-worker').resolve()",
+      "new_pack=ipc._pack_step_request; new_decode=pad._decode_exact_transition",
+      "fields=('reward','event_count','config_hash','finish_call_count','recorded_final_score','recorded_final_clears','latest_final_score','latest_final_clears','recorded_final_highest_chain','recorded_final_level','latest_final_highest_chain','latest_final_level','terminated','truncated','terminal_metadata_recorded','invalid_action')",
+      "def old_pack(kind,x,y,wait_ticks,suppress_fresh_edges=False):",
+      " if not isinstance(kind,Integral) or isinstance(kind,bool): raise TypeError",
+      " if not isinstance(wait_ticks,Integral) or isinstance(wait_ticks,bool): raise TypeError",
+      " if not isinstance(x,Real) or isinstance(x,bool): raise TypeError",
+      " if not isinstance(y,Real) or isinstance(y,bool): raise TypeError",
+      " kind,wait_ticks=int(kind),int(wait_ticks)",
+      " if not 0<=kind<=3: raise ValueError",
+      " if not 0<=wait_ticks<=0xffffffff: raise ValueError",
+      " return ipc._STEP_REQUEST.pack(kind,float(x),float(y),wait_ticks,int(bool(suppress_fresh_edges)))",
+      "def old_decode(payload,destination):",
+      " body_count=ipc._OBSERVATION_HEADER.unpack_from(payload)[15]; body_end=ipc._OBSERVATION_HEADER.size+body_count*ipc._BODY.size",
+      " ctypes.memmove(ctypes.addressof(destination.observation),payload,body_end)",
+      " for name,value in zip(fields,ipc._TRANSITION.unpack_from(payload,body_end)): setattr(destination,name,value)",
+      " generation=ipc._EVENT_GENERATION.unpack_from(payload,body_end+ipc._TRANSITION.size)[0]",
+      " return destination,int(generation)",
+      "def run(label,iters):",
+      " ipc._pack_step_request=old_pack if label=='old' else new_pack; pad._decode_exact_transition=old_decode if label=='old' else new_decode",
+      " r=bench.padded_lazy_pipeline(w,iters,[32])['32']; print(json.dumps({'variant':label,'ops_s':r['operations_per_second'],'seconds':r['elapsed_seconds'],'bodies':r['observed_body_count'],'events':r['observed_event_count']}),flush=True); return r['operations_per_second']",
+      "try:",
+      " run('new',1000)",
+      " vals={'old':[],'new':[]}",
+      " for label in ('old','new','new','old','old','new'):",
+      "  vals[label].append(run(label,2500))",
+      " print(json.dumps({'values':vals,'medians':{k:statistics.median(v) for k,v in vals.items()},'ratio':statistics.median(vals['new'])/statistics.median(vals['old'])}),flush=True)",
+      "finally: ipc._pack_step_request=new_pack;pad._decode_exact_transition=new_decode"
+    ],
+    "transcribed_driver_sha256": "e88401e8249ec1960d0de84f29cce660c5f9bda12381ab7a01d59066830059fc",
+    "transcribed_driver_sha256_scope": "UTF-8 encoding of driver_source_lines joined by LF with one trailing LF",
+    "benchmark_call": "bench.padded_lazy_pipeline(worker, iterations, [32])['32']",
+    "warmup": {
+      "variant": "new",
+      "iterations": 1000,
+      "included_in_results": false
+    },
+    "measured_variant_order": [
+      "old",
+      "new",
+      "new",
+      "old",
+      "old",
+      "new"
+    ],
+    "parameters": {
+      "iterations_per_run": 2500,
+      "lanes": 32,
+      "workers": 32,
+      "decisions_per_run": 80000,
+      "physics_backend": "exact",
+      "policy": "RandomPolicy(max_wait_ticks=1)",
+      "initial_environment_seed": "41 + lane_index",
+      "initial_policy_seed": "0x52574157 + lane_index",
+      "wire_mode": "STEP_PADDED with live bodies and lazy event count",
+      "event_access": "lazy count only; no FETCH_EVENTS request"
+    },
+    "inline_variant_definitions": {
+      "old_pack": "The pre-edit Integral/Real validation, int/float coercion, bounds checks, and _STEP_REQUEST.pack implementation from python/irisu_env/exact_ipc.py sha256 f811c22b...",
+      "old_decode": "The pre-edit observation memmove, _TRANSITION.unpack_from plus sixteen setattr calls, and generation unpack implementation from python/irisu_env/padded.py sha256 a43db24b...",
+      "new_pack": "irisu_env.exact_ipc._pack_step_request from the imported new worktree",
+      "new_decode": "irisu_env.padded._decode_exact_transition from the imported new worktree"
+    },
+    "unavailable": [
+      "A contemporaneously computed SHA-256 of the inline stdin driver bytes before transcription"
+    ]
+  },
+  "workload_equivalence": {
+    "canonical_captured_fields": {
+      "observed_body_count": {
+        "min": 11,
+        "mean": 102.158275,
+        "max": 196
+      },
+      "observed_event_count": {
+        "min": 1,
+        "mean": 154.1985,
+        "max": 496
+      }
+    },
+    "canonical_json": "{\"observed_body_count\":{\"max\":196,\"mean\":102.158275,\"min\":11},\"observed_event_count\":{\"max\":496,\"mean\":154.1985,\"min\":1}}",
+    "canonical_sha256": "3075b4d1831f1e979cca51a777b62a9e553965b5375a34bcef82f9bd75933c7d",
+    "equal_for_all_six_measured_runs": {
+      "observed_body_count": true,
+      "observed_event_count": true
+    },
+    "not_captured_by_the_printed_run_record": [
+      "action_counts",
+      "episode_resets",
+      "worker_response_frame_bytes",
+      "worker_response_size_mismatches",
+      "per-run state hashes"
+    ],
+    "claim_boundary": "Only the two printed distributions are claimed as measured workload equivalence for this paired attribution experiment. Broader semantic equivalence is supplied by the separate unit, replay, snapshot, and getter parity gates."
+  },
+  "runs": [
+    {
+      "sequence": 0,
+      "variant": "new",
+      "kind": "warmup-excluded",
+      "iterations": 1000,
+      "decisions": 32000,
+      "elapsed_seconds": 5.643431233,
+      "decisions_per_second": 5670.309192903742
+    },
+    {
+      "sequence": 1,
+      "variant": "old",
+      "kind": "measured",
+      "iterations": 2500,
+      "decisions": 80000,
+      "elapsed_seconds": 10.512085258,
+      "decisions_per_second": 7610.288352552858,
+      "workload_equivalence_sha256": "3075b4d1831f1e979cca51a777b62a9e553965b5375a34bcef82f9bd75933c7d"
+    },
+    {
+      "sequence": 2,
+      "variant": "new",
+      "kind": "measured",
+      "iterations": 2500,
+      "decisions": 80000,
+      "elapsed_seconds": 9.91735135,
+      "decisions_per_second": 8066.6699380374375,
+      "workload_equivalence_sha256": "3075b4d1831f1e979cca51a777b62a9e553965b5375a34bcef82f9bd75933c7d"
+    },
+    {
+      "sequence": 3,
+      "variant": "new",
+      "kind": "measured",
+      "iterations": 2500,
+      "decisions": 80000,
+      "elapsed_seconds": 9.887635358,
+      "decisions_per_second": 8090.913257159376,
+      "workload_equivalence_sha256": "3075b4d1831f1e979cca51a777b62a9e553965b5375a34bcef82f9bd75933c7d"
+    },
+    {
+      "sequence": 4,
+      "variant": "old",
+      "kind": "measured",
+      "iterations": 2500,
+      "decisions": 80000,
+      "elapsed_seconds": 10.356821254,
+      "decisions_per_second": 7724.377783299339,
+      "workload_equivalence_sha256": "3075b4d1831f1e979cca51a777b62a9e553965b5375a34bcef82f9bd75933c7d"
+    },
+    {
+      "sequence": 5,
+      "variant": "old",
+      "kind": "measured",
+      "iterations": 2500,
+      "decisions": 80000,
+      "elapsed_seconds": 10.66445154,
+      "decisions_per_second": 7501.557834450059,
+      "workload_equivalence_sha256": "3075b4d1831f1e979cca51a777b62a9e553965b5375a34bcef82f9bd75933c7d"
+    },
+    {
+      "sequence": 6,
+      "variant": "new",
+      "kind": "measured",
+      "iterations": 2500,
+      "decisions": 80000,
+      "elapsed_seconds": 10.295425631,
+      "decisions_per_second": 7770.4412490840905,
+      "workload_equivalence_sha256": "3075b4d1831f1e979cca51a777b62a9e553965b5375a34bcef82f9bd75933c7d"
+    }
+  ],
+  "results": {
+    "old": {
+      "raw_decisions_per_second": [
+        7610.288352552858,
+        7724.377783299339,
+        7501.557834450059
+      ],
+      "median_decisions_per_second": 7610.288352552858
+    },
+    "new": {
+      "raw_decisions_per_second": [
+        8066.6699380374375,
+        8090.913257159376,
+        7770.4412490840905
+      ],
+      "median_decisions_per_second": 8066.6699380374375
+    },
+    "new_over_old_median_ratio": 1.0599690267099389,
+    "median_improvement_percent": 5.996902670993887
+  },
+  "contamination": {
+    "accepted_clean_window": {
+      "known_exact_jobs_quiet": true,
+      "evidence": "The full exact ASAN run had completed; the parent agent withheld additional CPU-heavy jobs for two minutes; an immediate process check found no irisu-exact-worker, replay evaluator, exact_pipeline, getter comparator, or CTest process.",
+      "global_host_idle_proven": false,
+      "note": "No full process/load snapshot was captured during the accepted window, so clean means free of known competing IriSu jobs, not a laboratory-grade globally idle host."
+    },
+    "excluded_preclean_interleaved_attempt": {
+      "reason": "Recurring exact-ASAN replay workers overlapped the attempt and produced strong warm/load drift.",
+      "iterations_per_run": 3000,
+      "old_raw_decisions_per_second": [
+        6149.352224190853,
+        7657.189327941211,
+        7746.44380546565
+      ],
+      "new_raw_decisions_per_second": [
+        5877.9880473799785,
+        7272.040089178979,
+        7745.71359559979
+      ],
+      "included_in_results": false
+    },
+    "excluded_postclean_standalone_run": {
+      "reason": "Several unrelated cargo/rustc jobs and a simultaneous irisu-physics-benchmark saturated cores after the accepted paired window.",
+      "variant": "new",
+      "iterations": 3000,
+      "decisions_per_second": 6353.94073053816,
+      "included_in_results": false
+    }
+  },
+  "validation": {
+    "python_unittest_discovery": {
+      "tests_run": 195,
+      "passed": 195,
+      "skipped_optional": 7
+    },
+    "focused_exact_protocol_and_environment": {
+      "tests_run": 48,
+      "passed": 48,
+      "skipped_optional": 4
+    },
+    "exact_padded_stress": {
+      "tests_run": 2,
+      "passed": 2
+    },
+    "microbenchmarks": {
+      "canonical_request_pack_old_median_ns": 1949.175069,
+      "canonical_request_pack_new_median_ns": 332.096861,
+      "dense_transition_decode_old_median_ns": 3520.31324,
+      "dense_transition_decode_new_median_ns": 2808.82132
+    }
+  },
+  "claim_boundary": "This artifact attributes a measured Python hot-path improvement. It does not replace the durable full exact-pipeline performance report, does not establish the 20,000 decisions/s gate, and must not be combined with excluded contaminated measurements."
+}

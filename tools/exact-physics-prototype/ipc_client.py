@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import statistics
 import struct
 import subprocess
@@ -21,6 +22,7 @@ MAGIC = 0x43505249
 VERSION = 1
 BODY_CAPACITY = 196
 EXACT_BACKEND = "exact-msvc9-r58-multiworld-forward"
+CANONICAL_X87_CONTROL_WORD = 0x027F
 
 HELLO = 1
 RESET = 2
@@ -324,12 +326,22 @@ class ExactWorkerClient:
         executable = Path(worker).expanduser().resolve()
         if not executable.is_file():
             raise FileNotFoundError(executable)
+        environment = {
+            key: value
+            for key, value in os.environ.items()
+            if not key.startswith("LD_") and key != "GLIBC_TUNABLES"
+        }
+        if trace_path := environment.get("IRISU_EXACT_TRACE"):
+            environment["IRISU_EXACT_TRACE"] = os.path.abspath(trace_path)
+        environment["IRISU_EXACT_CW"] = hex(CANONICAL_X87_CONTROL_WORD)
         self._process = subprocess.Popen(
             [str(executable)],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             bufsize=0,
+            cwd=os.sep,
+            env=environment,
         )
         if self._process.stdin is None or self._process.stdout is None:
             raise RuntimeError("worker pipes were not created")
@@ -349,6 +361,11 @@ class ExactWorkerClient:
         ):
             self.close()
             raise ProtocolError("worker does not expose the expected exact ABI")
+        if self.info.x87_control_word != CANONICAL_X87_CONTROL_WORD:
+            self.close()
+            raise ProtocolError(
+                "worker does not expose the canonical x87 control word"
+            )
         if self.info.backend != EXACT_BACKEND:
             self.close()
             raise ProtocolError(

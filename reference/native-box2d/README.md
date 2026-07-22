@@ -2,13 +2,13 @@
 
 `tools/host-msvc9-box2d.py` converts a user-provided MSVC 9 RTM build of
 pristine Box2D SVN r58 into a native ELF32 shared library. The resulting code
-runs without Wine. In the exact-forward simulator it matches all active
-per-operation wrapper streams through the complete 47,019-step `0x027f`
+runs without Wine. In the exact-forward simulator it matches every active
+mutation/step/contact wrapper stream through all 47,019 steps of the `0x027f`
 replay, including all 573,557 contact results. The older 14,706-step `0x137f`
 harness remains independent corroboration. See `validation.json` for the exact
 bounded claims.
 
-The full comparison uses `tools/compare-exact-wrapper-trace.py`. It streams the
+The active-stream comparison uses `tools/compare-exact-wrapper-trace.py`. It streams the
 10,777,298-record original JSONL once, ignores getter-only observations, and
 compares each wrapper operation kind independently because the original game
 interleaves actor destruction with contact iteration. It removes two native
@@ -16,6 +16,27 @@ constructor/bootstrap generations (96 records). After all 47,019 physics steps
 match, the original process alone performs a teardown suffix of 153,500
 transform writes, 24 destroys, and one dispose; those calls are not gameplay
 physics and are reported rather than silently counted as matches.
+
+The independent `tools/compare-exact-getter-trace.py` closes that getter gap.
+It compiles a 32-bit streaming helper, scrubs loader-control environment
+variables, fixes x87 to `0x027f`, and replays all 10,777,297 recorded commands
+after the proxy header in original global order against the exact host. It
+directly matched all 9,810,360 getter records (7,357,770 scalar and 2,452,590
+velocity), all 12,262,950 returned binary32 words, and all 573,557 contact
+results through step 47,019. There were zero mismatches and no first mismatch.
+The tracked
+[`getter-parity-2026-07-21.json`](./getter-parity-2026-07-21.json) report has SHA-256
+`815e8805ea777fdcecc265ee1a669c4664e993a74f92a05cfe2f134195703ef8`.
+The proxy does not log the wrapper's `b2d_test` export, so this claim is exact
+for every recorded call and returned value, not a call-count claim for that
+unobserved export.
+
+```sh
+TMPDIR="$PWD/.tmp/compiler-temp" python3 tools/compare-exact-getter-trace.py \
+  reference/runs/replay-41449-getters-gdb-20260720-005/data/dll/box2d-trace.jsonl \
+  /path/to/libirisu_box2d_msvc_exact_multiworld.so \
+  --output reference/native-box2d/getter-parity-2026-07-21.json
+```
 
 This establishes parity for the legacy physics wrapper only. It does not
 validate the simulator's spawning, lifecycle, gauge, chain, or scoring rules,
@@ -80,6 +101,11 @@ iteration/order semantics.
   replay execution uses `0x027f`; the older component harness uses `0x137f`.
 - The C API is the 16-function `b2d_*` wrapper in
   `box2d-wrapper-msvc.cpp`. It owns one global world and is forward-only.
+- Calls from that public wrapper to its renamed private `msvc_b2d_*`
+  implementations are linked with `-Bsymbolic-functions`. The hosting tool
+  rejects every `R_386_*` relocation naming those helpers, and exact-backend
+  CMake repeats the check, so the tested preload cannot redirect the internal
+  bridge layer.
 - Concurrent calls to this legacy single-world host are unsupported. Its
   paired-trig runtime state, world, contact cursor, lazy tables, and allocator
   state are process-global.
@@ -87,7 +113,7 @@ iteration/order semantics.
   components by magnification; `b2d_get_v` returns native, unmagnified velocity.
 - This adapter has no snapshot/restore API and repeated world teardown in one
   process is unsafe in pristine r58. Use it only for one isolated forward
-  episode; the worker-backed multiworld frontend is the trainable lifecycle.
+  episode; the worker-backed multiworld path is the trainable lifecycle.
 
 ## Retained exact-runtime trig optimizations
 
@@ -104,7 +130,15 @@ rounded sine for a matching key and otherwise executes the standalone
 instruction. A pinned seven-run comparison improves the dense core from
 1,246.873 to 1,448.173 decisions/s (+16.14%). No solver iteration, operation
 order, or public wrapper result changed. Production validation remains exact on
-all four replay oracles and the complete 47,019-step stream.
+all four replay oracles and every active mutation/step/contact stream through
+all 47,019 steps.
+
+The public production `IrisuEnv` exact-worker path also runs those four replays
+directly and matches all 1,111 available score/rot/clear/level state
+checkpoints. Its report is
+[`exact-production-replay-parity-2026-07-21.json`](../../benchmarks/results/exact-production-replay-parity-2026-07-21.json),
+SHA-256
+`b0e5def9d05eab34f76a43c0bdc23a2ecb83e414223a5ad06bb1d06c500d1848`.
 
 Of the 13,096,069 measured pair inputs, 833,228 (6.362%) are raw positive zero.
 The retained `FCOS(+0)` fast path produces the same raw float results while
@@ -125,18 +159,22 @@ SHA-256 `cde35ca60b5511678edf128ed8f3ae09c8cf00e240696325c4acc8681f829eb0`,
 covering every traced mutation, step, and contact-cursor result.
 
 The current production multiworld
-[`exact-pipeline-range-safe-wide-2026-07-20.json`](../../benchmarks/results/exact-pipeline-range-safe-wide-2026-07-20.json)
-records 37/37 current source hashes, 64/64 true cross-path equivalence leaves,
-and SHA-256
-`91c8db5feb9d3c8339d101940f05a42d93a4490641745964a0ca427553b8b8e9`.
-It measures 7,199.041 decisions/s at an explicit 32 exact lanes, 35.995% of the
-20,000-decision/s gate (2.778x short), plus 1,498.136 dense native decisions/s
-and 75,819.177 ticks/s on the directly comparable 30,000-tick 48-body physics
-workload.
+[`exact-pipeline-adaptive-wide-perf-2026-07-21.json`](../../benchmarks/results/exact-pipeline-adaptive-wide-perf-2026-07-21.json)
+records 38/38 current runtime-source hashes, 88/88 true cross-path equivalence
+leaves, and SHA-256
+`4067fdff9360989adb696bdc5ad7d98983729f9fa424271fbd7e3e1fb9164eef`.
+It records worker SHA-256
+`4faa4508a89df3e1e62b80e2871b6a35b5913f220d53fe5de43408ad6512c261`
+and host SHA-256
+`ce14d1cab9ce4331bf494fe92bf657029487aec9f7435e7479b3c7cb579fafb5`.
+It measures 9,685.170 decisions/s at an explicit 64 exact lanes, 48.426% of the
+20,000-decision/s gate (2.065x short), plus 1,447.881 dense native wall
+decisions/s (1,485.277/s for step plus observation) and 74,853.849 ticks/s on
+the directly comparable 30,000-tick 48-body physics workload.
 
-The earlier
+The July 20
 [`exact-pipeline-paired-trig-2026-07-20.json`](../../benchmarks/results/exact-pipeline-paired-trig-2026-07-20.json)
-remains the direct paired-versus-pre-trig comparison: its dense native
+remains the historical direct paired-versus-pre-trig comparison: its dense native
 simulator improved 16.82%, 48-body physics improved 14.37%, and eight-lane
 padded throughput improved 13.50% over
 [`exact-pipeline-final-2026-07-20.json`](../../benchmarks/results/exact-pipeline-final-2026-07-20.json).

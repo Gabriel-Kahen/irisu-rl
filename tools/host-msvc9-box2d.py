@@ -332,10 +332,11 @@ def interposable_msvc_b2d_relocations(readelf: str, path: Path) -> set[str]:
     result: set[str] = set()
     for line in output.splitlines():
         fields = line.split()
-        if len(fields) >= 5 and fields[2] in {
-            "R_386_JUMP_SLOT",
-            "R_386_GLOB_DAT",
-        } and fields[4].startswith("msvc_b2d_"):
+        if (
+            len(fields) >= 5
+            and fields[2].startswith("R_386_")
+            and fields[4].startswith("msvc_b2d_")
+        ):
             result.add(fields[4].split("@", 1)[0])
     return result
 

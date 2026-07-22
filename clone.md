@@ -6,7 +6,7 @@ Create a fast, deterministic, testable, clean-room clone of the **normal puzzle 
 
 The clone is not a visual remake and does not include story progression, original art, music, menus, endings, file-changing behavior, or Metsu mode. It is a physics-and-rules simulator plus optional diagnostic rendering.
 
-The clone is successful when policies learned in it retain their skills in the original executable. Exact long-duration pixel synchronization is neither expected nor required, but legal actions, short-horizon physics, discrete game events, scoring, gauge behavior, spawning, and difficulty progression must be sufficiently faithful for transfer.
+The clone is successful when policies learned in it retain their skills in the original executable. Exact long-duration pixel synchronization is not a cross-machine claim, but the supported exact backend must preserve every available authoritative replay and physics-stream oracle; legal actions, local physics, discrete events, scoring, gauge, spawning, and difficulty must also remain faithful enough for transfer.
 
 ## Implemented evidence update (v2.03)
 
@@ -26,7 +26,15 @@ two `+8` events at tick 304 and final score 16. The score formula was unchanged;
 the prior zero came from using the separate nonzero-mode/Metsu-side INI table.
 An opt-in 32-bit MSVC9-r58 backend now removes the measured long-horizon
 numerical drift: it matches every score/rot event and terminal outcome in all
-four observed v2.03 replay oracles, including the full 47,019-step trace. It is
+four observed v2.03 replay oracles through all 47,019 ticks of the longest
+trace. The RL-facing production `IrisuEnv` worker path independently passes the
+same gate and matches all 1,111 available original state checkpoints: 536
+score, 103 rot, 431 qualifying-clear, and 41 level events. Its attested report
+is
+[`exact-production-replay-parity-2026-07-21.json`](benchmarks/results/exact-production-replay-parity-2026-07-21.json),
+SHA-256
+`b0e5def9d05eab34f76a43c0bdc23a2ecb83e414223a5ad06bb1d06c500d1848`.
+The exact backend is
 available through `IrisuEnv`, independent worker-backed vector environments,
 configuration overrides, exact packed/lazy-event padded vectors, durable
 seed/action-log snapshots, and Linux fork/COW checkpoint branches. Production
@@ -35,8 +43,16 @@ under repeated in-process world teardown. A 50-episode stress run completed
 58,534 decisions and 11,843,733 events, and randomized ordinary-versus-padded
 testing matched 1,906 steps and 190,501 events. The five-category controlled
 golden gate and qualitative policy transfer remain unmet; the main remaining
-training risks are dense exact-backend throughput, formal controlled coverage,
-external replay-build provenance, and out-of-scope modes.
+training risks are formal controlled coverage, the absent original-game
+spawn/difficulty distribution comparison, and out-of-scope modes. The measured
+exact-backend throughput limitation was explicitly accepted as sufficient for
+RL on 2026-07-21.
+
+The full active stream comparison covers 813,412 mutation, step, and contact
+records, including 573,557 contact results. The original trace's 9,810,360
+getter-only records were independently replayed in their original global call
+order against the exact host. All 12,262,950 returned binary32 words match
+bit-for-bit through step 47,019, with no getter or contact mismatch.
 
 The formal scorer can now execute the same exact backend with `--worker` (or
 the portable backend with the mutually exclusive `--library`) and records both
@@ -48,12 +64,28 @@ Exact worker identity is fail-closed. A valid Hello precedes hashing the
 executed `/proc/<pid>/exe`, which avoids observing the parent during
 `posix_spawn`; the client then verifies the live mapped host's path, device,
 inode, segments, worker/client mount identities, and bytes against the worker's
-handshake hash. Before simulator construction, the worker verifies that all 15
-resolved `b2d_*` call targets are unique executable addresses owned by that
-same host, and Python requires its opcode-13 device/inode attestation to match
-the independently captured mapping. Fork/COW branches authenticate their keeper and direct ancestry
+handshake hash. Production launch uses working directory `/`, removes every
+inherited `LD_*` variable and `GLIBC_TUNABLES`, and forces x87 control word
+`0x027f`. Before simulator construction, the forward wrapper stores 15 typed
+`b2d_*` pointers and uses that table for every physics call. The targets must be
+unique executable addresses owned by the same host; each `dladdr1` symbol name
+and exact symbol-start address must match the requested entrypoint, and its
+global binding must equal the stored target. Regressions reject ordinary
+`b2d_*` preload interposition and an interposed-`dlsym` same-host X/Y
+permutation. Worker opcode 13 reports their device/inode mapping, and Python
+requires it to match the independently captured live library. The host's
+internal `msvc_b2d_*` bridge functions are linked with
+`-Bsymbolic-functions`, and generation/configuration reject every `R_386_*`
+relocation naming those helpers. These are fail-closed provenance checks for
+the tested loader attacks, not a general in-process sandbox. Fork/COW branches authenticate their keeper and direct ancestry
 before inheriting that launch-verified provenance; an explicit provenance call
 rehashes the branch's mapped library.
+
+The host's stable `DT_SONAME` is retained as `DT_NEEDED`; the wrapper reopens it
+with `RTLD_NOLOAD`. Exact post-link validation requires nonempty search paths
+whose components are absolute or `$ORIGIN`-relative, never empty/current-dir or
+bare relative. Installed exact executables use origin-relative lookup and are
+relocated with the generated host as one tree.
 
 Durable `clone_state()` refuses while an exact split-step request is in flight.
 This prevents a worker-accepted state advance from being serialized before its
@@ -69,13 +101,34 @@ multi-episode backend.
 The packed exact path removes event records from the normal step response and
 fetches them lazily on demand. It sends each capped worker wave before polling
 and draining response-ready lanes, while preserving full-drain and deterministic
-lowest-lane failure semantics. The current wide run measures
-1,334.810/1,933.338/3,292.397/5,391.293/7,199.041 decisions/s for explicit
-1/4/8/16/32-lane exact vectors, with raw packed IPC reaching 7,995.455/s at 32
-lanes. The 32-lane packed/lazy result is 35.995% of the 20,000 decision/s gate
-(2.778x short). `PaddedVectorEnv` still defaults to at most eight workers, and
-portable vectors remain capped at eight; widths above eight require both the
-exact backend and an explicit `workers=` request.
+lowest-lane failure semantics. The current formal wide run measures
+1,370.539/1,988.302/3,569.759/5,679.407/7,977.156/8,917.207/9,685.170
+decisions/s for explicit 1/4/8/16/32/48/64-lane exact vectors, with raw packed
+IPC reaching 10,333.568/s at 64 lanes. The 64-lane packed/lazy result is 48.426%
+of the 20,000 decision/s gate (2.065x short). Exact
+`PaddedVectorEnv(workers=None)` now resolves to
+`min(num_envs, 4 * process-visible logical CPUs)`; explicit `workers=` remains
+authoritative and portable vectors remain capped at eight. A focused
+[64-lane probe](benchmarks/results/exact-padded-scaling-ceiling-2026-07-21.json)
+measured 10,975.352/s with 64 workers versus 4,606.714/s with the old
+eight-worker behavior on the 16-logical-CPU development host. This is
+single-sample supplemental scheduling evidence, not proof that four workers per
+logical CPU is universally optimal, and it does not replace the formal gate.
+The numerical 20,000-decision/s result remains a failed benchmark and is not
+being relabeled. The project owner explicitly accepted the measured current
+throughput as sufficient for RL on 2026-07-21, satisfying M5's alternative
+criterion that a measured limitation may be accepted; further speed work is
+not a training-readiness blocker.
+
+An experimental barrier-free actor collector runs an independent policy for a
+multi-decision horizon inside each lane task. Across 16/32/64 exact lanes, its
+[three-repeat, 64-decision-horizon A/B](benchmarks/results/exact-actor-rollout-ab-2026-07-21.json)
+matched every trajectory digest, state hash, and event count against synchronous
+stepping in all 9 paired samples; median paired speedups were
+1.211x/1.097x/1.057x. It is supplemental architecture evidence, not a batched
+policy interface or a performance-gate result. Policy state must be lane-private
+or thread-safe because calls execute concurrently; transport/protocol failures
+require recreating the pool.
 
 The directly comparable paired-trig run improved a stable pinned dense-core A/B
 from 1,246.873 to 1,448.173 decisions/s (+16.14%), the dense native simulator
@@ -86,17 +139,32 @@ against the paired host; that isolated measurement is not stored in the wide
 pipeline artifact. Profiling continues to place the solver/runtime core far
 above IPC as the dominant cost.
 
-At a 1,000-action history, a local fork/COW branch takes 0.480 ms median versus
-95.933 ms for durable replay restore, a
-200.0x advantage, while the durable bytes remain the portable snapshot
-representation. The current wide measurements come from
-[`exact-pipeline-range-safe-wide-2026-07-20.json`](benchmarks/results/exact-pipeline-range-safe-wide-2026-07-20.json),
+Two exact-preserving source candidates were rejected under a predeclared 3%
+integration threshold. The
+[solver artifact](benchmarks/results/exact-core-solver-source-optimizations-2026-07-21.json)
+records 0.648% for skipping static-body position updates and 0.472% for caching
+velocity anchors. Both match the full 47,019-step replay and 813,508-record
+wrapper trace, but neither was integrated; the 10,777,297-command full getter
+replay was not spent on already rejected variants. Their source/binary inputs
+were local and unarchived, so the artifact is not a clean-checkout reproduction
+bundle.
+
+At a 1,000-action history, a local fork/COW branch takes 0.284 ms median versus
+95.479 ms for durable replay restore, a 336.274x advantage, while the durable
+28,104-byte snapshot remains the portable representation. The current wide
+measurements come from
+[`exact-pipeline-adaptive-wide-perf-2026-07-21.json`](benchmarks/results/exact-pipeline-adaptive-wide-perf-2026-07-21.json),
 SHA-256
-`91c8db5feb9d3c8339d101940f05a42d93a4490641745964a0ca427553b8b8e9`.
-It measures 1,498.136 dense native decisions/s and 75,819.177 ticks/s on the
-directly comparable 30,000-tick 48-body physics workload.
+`4067fdff9360989adb696bdc5ad7d98983729f9fa424271fbd7e3e1fb9164eef`.
+It records 38/38 runtime-source hashes, worker SHA-256
+`4faa4508a89df3e1e62b80e2871b6a35b5913f220d53fe5de43408ad6512c261`,
+host SHA-256
+`ce14d1cab9ce4331bf494fe92bf657029487aec9f7435e7479b3c7cb579fafb5`,
+and 88/88 true equivalence leaves. It measures 1,447.881 dense native wall
+decisions/s (1,485.277/s for step plus observation) and 74,853.849 ticks/s on
+the directly comparable 30,000-tick 48-body physics workload.
 [`exact-pipeline-paired-trig-2026-07-20.json`](benchmarks/results/exact-pipeline-paired-trig-2026-07-20.json)
-is the comparable post-trig artifact, and
+is the historical comparable post-trig artifact, and
 [`exact-pipeline-final-2026-07-20.json`](benchmarks/results/exact-pipeline-final-2026-07-20.json)
 is its pre-trig baseline.
 

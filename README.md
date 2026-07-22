@@ -3,13 +3,12 @@
 This is the complete project repository for IriSu mechanics research and
 reinforcement-learning work. It includes a deterministic, asset-free C++20
 normal-mode simulator, a dependency-free Python environment, validation and
-benchmark tooling, and a playable browser frontend. It is intended for policy
+benchmark tooling. It is intended for policy
 search and eventual transfer testing against an authorized local copy of the
 original game.
 
 ## Project map
 
-- [`apps/web`](apps/web/README.md): playable, host-ready web app
 - [`clone`](clone): native C++ simulator and C API
 - [`python/irisu_env`](python/irisu_env): Python and Gymnasium-shaped environment
 - [`tests`](tests): native, Python, integration, and fidelity tests
@@ -17,17 +16,6 @@ original game.
 - [`configs`](configs): measured mechanics configurations
 - [`tools`](tools): capture, validation, and exact-physics tooling
 - [`docs`](docs) and [`reference`](reference/README.md): design and clean-room research records
-
-## Play in a browser
-
-```bash
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build -j
-python3 apps/web/server.py
-```
-
-Open <http://127.0.0.1:8000>. Deployment notes live in
-[`apps/web/README.md`](apps/web/README.md).
 
 ## Simulator details
 
@@ -45,7 +33,20 @@ With the separately generated 32-bit exact-MSVC physics host, all four eligible,
 instrumented original v2.03 playbacks now match the headless simulator on every
 score and rot event and on score, gauge, level, chain, clears, and tick at the
 same terminal or replay-exhaustion checkpoint. This covers 536 score calls and
-57,921 ticks; the longest trace is exact through all 47,019 updates. The
+57,921 ticks; the longest trace is exact through all 47,019 updates. The same
+gate now runs through the public production `IrisuEnv` exact-worker backend,
+not only the standalone native runner. It matches all 1,111 original state
+checkpoints: 536 score, 103 rot, 431 qualifying-clear, and 41 level events,
+including the reconstructible score/gauge/level/clear state at each event. The
+[production replay artifact](benchmarks/results/exact-production-replay-parity-2026-07-21.json)
+has SHA-256
+`b0e5def9d05eab34f76a43c0bdc23a2ecb83e414223a5ad06bb1d06c500d1848`.
+The
+low-level stream comparison covers all 813,412 active mutation, step, and
+contact records, including 573,557 contact results. The original trace's
+9,810,360 getter-only records were also replayed in their original global call
+order against that exact host. All 12,262,950 returned binary32 words match
+bit-for-bit through step 47,019, with no getter or contact mismatch. The
 ordinary GNU physics build remains the portable default and is not claimed to
 preserve chaotic long-horizon trajectories bit-for-bit. The exact host is
 available as an opt-in Python backend through one isolated 32-bit worker per
@@ -155,6 +156,12 @@ cmake --build build-exact -j
 The exact host is a local artifact and is not stored in this repository; see
 [`reference/native-box2d/multiworld/README.md`](reference/native-box2d/multiworld/README.md)
 for the source-build form and validation boundary.
+The generated host has a stable `DT_SONAME`, is retained as a `DT_NEEDED`
+dependency, and is reopened by the forward wrapper with `RTLD_NOLOAD`. Exact
+post-link checks require a nonempty `RPATH`/`RUNPATH` made only of absolute or
+`$ORIGIN`-relative components; empty/current-directory and bare relative search
+components fail the build. Installed executables use origin-relative lookup and
+the exact host is installed in the configured library directory.
 
 ```python
 from irisu_env import Action, IrisuEnv
@@ -169,6 +176,10 @@ with IrisuEnv(
 
 `IRISU_EXACT_WORKER` can replace `worker_path`. The exact backend supports the
 same configuration overrides and public observation/event/diagnostic shapes.
+Production Python launches the worker with working directory `/`, removes every
+inherited `LD_*` variable and `GLIBC_TUNABLES`, and forces x87 control word
+`0x027f`, so caller loader injection and a hostile control-word override do not
+cross the process boundary.
 Its snapshots store the seed and complete accepted action log, then restore
 atomically into a fresh worker by replaying that log. This preserves otherwise
 unserializable legacy solver state exactly. Snapshot identity includes the
@@ -178,12 +189,24 @@ proves `exec` completed, avoiding a `posix_spawn` race with the parent Python
 executable. The client also identifies the exact library actually mapped by
 the live worker and checks its path, device, inode, ELF segments, worker and
 client mount identities, and bytes against the handshake SHA-256. Before
-constructing a simulator, the worker also attests that all 15 resolved `b2d_*`
-call targets are unique executable addresses owned by that one captured host;
-Python requires the opcode-13 device/inode attestation to match its independent
-map capture. Restore time still grows linearly with episode age. `state_hash()` is therefore a
-stable restorable-history identity, not a canonical hash proving that two
-different action histories reached the same physical state.
+constructing a simulator, the forward wrapper resolves 15 public `b2d_*`
+symbols into typed function pointers; those stored pointers are the actual
+physics call path. Every target must be a unique executable address owned by
+that one captured host. Its `dladdr1` symbol name and exact symbol-start address
+must equal the requested entrypoint, and its process-global binding must equal
+the stored pointer. Tests reject both an ordinary `LD_PRELOAD` definition such
+as `b2d_world_step` and an interposed-`dlsym` same-library X/Y permutation before
+simulation. Worker opcode 13 reports the attested target count and device/inode
+mapping, which Python requires to equal its independently captured live library.
+The host's private `msvc_b2d_*` bridge calls are separately linked with
+`-Bsymbolic-functions`; the host generator and exact build reject every
+`R_386_*` relocation naming those helpers. These are fail-closed provenance
+checks against the tested loader attacks, not a sandbox for arbitrary code
+already executing inside the worker. Restore time still grows linearly with
+episode age.
+`state_hash()` is therefore a stable restorable-history identity, not a
+canonical hash proving that two different action histories reached the same
+physical state.
 `clone_state()` also refuses while a split exact step is pending, so a request
 already accepted by the worker cannot be omitted from the durable action log.
 
@@ -215,10 +238,18 @@ The public multiworld bridge remains serialized, so this small runtime cache
 cannot interleave across worlds. No Box2D solver iteration, operation order, or
 game rule changed. The exact replay gate remains 4/4 through all 47,019 steps.
 
-The retained host passes 10/10 exact CTest targets, including its dedicated trig
-runtime test and full replay corpus. The portable Release and ASAN/UBSAN builds
-each pass 8/8 CTest targets, and the combined Python suite passes 159 tests with
-two optional Gym skips.
+The retained host passes 14/14 exact Release and 14/14 exact ASAN/UBSAN CTest
+targets, including its dedicated trig runtime test, both replay execution paths,
+production `IrisuEnv`, packed fast-path, vector snapshot/concurrency, and hostile
+`LD_PRELOAD` fixtures, plus the experimental actor-rollout regression. Sanitized
+preload tests put the worker-linked ELF32
+`libasan` first, then exercise the instrumented fixture. A regression explicitly
+records the boundary: the GNU worker, wrapper, API, and fixtures are
+ASAN/UBSAN-instrumented; immutable MSVC9 host instructions are not, although
+their allocations cross ASAN's interposed allocator. Portable Release and
+ASAN/UBSAN builds each pass 8/8 CTest targets. The combined Python suite passes
+204 tests with three expected skips (two optional Gym checks and the
+sanitizer-only boundary assertion in a normal build).
 
 Linux exact workers also provide an opt-in constant-time local branch path:
 
@@ -245,9 +276,9 @@ authenticates the checkpoint keeper, verifies direct ancestry and inherited
 worker/library file identities, and inherits the launch-verified hashes; an
 explicit provenance request rehashes the library mapped by that live branch.
 At an action history of
-1,000 steps, local measurements put checkpoint creation at 0.188 ms, median
-branch creation at 0.480 ms, and durable restore at 95.933 ms: a 200.0x median
-branch advantage.
+1,000 steps, the current source-manifested local measurement puts checkpoint
+creation at 0.171 ms, median branch creation at 0.284 ms, and median durable
+restore at 95.479 ms: a 336.274x median branch advantage.
 
 Seeds use the target game's unsigned 32-bit RNG domain. Values outside
 `0..2**32-1` are rejected instead of silently aliasing another run.
@@ -265,6 +296,20 @@ and exact action counts. One replay record is one 0.020-second gameplay update,
 including during fast-forward. Header offset `+0x10` records mode; the supported
 target is mode 0. External score headers remain diagnostic metadata unless the
 same bytes have an observed playback on the supported executable.
+
+To exercise the actual production exact backend and compare the full local
+corpus with the observed v2.03 event bundles:
+
+```bash
+python3 tools/evaluate-exact-replay-corpus.py \
+  --worker build-exact/irisu-exact-worker \
+  --require-observed-parity
+```
+
+This path launches `IrisuEnv(physics_backend="exact")`, verifies the executable
+and live mapped host before and after each replay, reconstructs every score,
+gauge, level, and qualifying-clear checkpoint, and fails if any available
+original-playback checkpoint differs.
 
 Regenerate the exact original-observed seed-41 score regression with:
 
@@ -323,12 +368,27 @@ expose the wrapper's raw Box2D world units (weak/strong shots begin at -25/-50
 with magnification 10); scripted falling actors retain their display-unit
 float32 descent velocity until activation.
 
-`PaddedVectorEnv` keeps a conservative eight-worker default, and the portable
-backend is capped at eight workers. Wider exact vectors are explicit because
-each exact lane is an independent worker process: for example, use
-`PaddedVectorEnv(32, physics_backend="exact", workers=32, ...)` to allow all 32
-lanes to advance concurrently. Omitting `workers=` still caps concurrency at
-eight even when `num_envs` is larger.
+Exact `PaddedVectorEnv` chooses an adaptive default of
+`min(num_envs, 4 * process-visible logical CPUs)` because each lane owns an
+independent worker process. This is a topology heuristic from one supplemental
+scaling sample per width, not a demonstrated universal optimum. Process
+affinity is honored when available; `workers=` remains authoritative. Portable
+vectors retain their eight-thread
+ceiling. A supplemental 16-logical-CPU scaling probe measured 4,606.714
+decisions/s for the old eight-worker behavior and 10,975.352/s for 64 workers
+at 64 lanes. That probe is scheduling evidence, not the formal performance
+gate, and hard CPU affinity is not enabled by default.
+
+The experimental `irisu_env.rollout.ExactActorRolloutPool` can run an
+independent policy for several consecutive decisions inside each lane task,
+removing the cross-lane barrier at every decision. It preserves exact packed
+payloads, state hashes, event counts, lane order, snapshots, and deterministic
+failure selection; `event_mode="full"` retains event bytes before advancing and
+defers only their Python decode. It is useful for independent actor collection,
+not a drop-in batched neural-policy API. Policy calls execute concurrently, so
+stateful policies must be lane-private or thread-safe. A failed collection can
+commit successful sibling lanes; restore a known checkpoint after a policy
+failure, and recreate the pool after a worker transport/protocol failure.
 
 Transfer robustness is opt-in and separately seeded. Mechanics uncertainty is
 sampled with `randomized_config`; action/perception uncertainty uses the public
@@ -372,26 +432,73 @@ PYTHONPATH=python python3 benchmarks/throughput.py \
 Benchmark results are local engineering measurements, not evidence of gameplay
 fidelity or policy-transfer readiness. The benchmark contract and recorded
 baseline are documented in [`benchmarks/README.md`](benchmarks/README.md).
-The current [wide source-manifested exact profile](benchmarks/results/exact-pipeline-range-safe-wide-2026-07-20.json)
-measures 1,334.810/1,933.338/3,292.397/5,391.293/7,199.041 packed/lazy
-decisions/s for 1/4/8/16/32 lanes; raw packed IPC reaches 7,995.455/s at 32
-lanes. The explicit 32-lane result is 35.995% of the 20,000 decisions/s RL
-target, or 2.778x short. Its SHA-256 is
-`91c8db5feb9d3c8339d101940f05a42d93a4490641745964a0ca427553b8b8e9`.
-The run measures 1,498.136 dense native decisions/s and 75,819.177 physics
-ticks/s on the directly comparable 30,000-tick 48-body workload.
+The current [adaptive-wide source-manifested exact profile](benchmarks/results/exact-pipeline-adaptive-wide-perf-2026-07-21.json)
+measures 1,370.539/1,988.302/3,569.759/5,679.407/7,977.156/8,917.207/
+9,685.170 packed/lazy decisions/s for 1/4/8/16/32/48/64 lanes; raw packed IPC
+reaches 10,333.568/s at 64 lanes. The 64-lane result is 48.426% of the 20,000
+decisions/s RL target, or 2.065x short. Its SHA-256 is
+`4067fdff9360989adb696bdc5ad7d98983729f9fa424271fbd7e3e1fb9164eef`.
+The artifact records 38/38 current runtime-source hashes, worker SHA-256
+`4faa4508a89df3e1e62b80e2871b6a35b5913f220d53fe5de43408ad6512c261`,
+host SHA-256
+`ce14d1cab9ce4331bf494fe92bf657029487aec9f7435e7479b3c7cb579fafb5`,
+and 88/88 true cross-path equivalence leaves. The run measures 1,447.881 dense
+native wall decisions/s (1,485.277/s for step plus observation) and 74,853.849
+physics ticks/s on the directly comparable 30,000-tick 48-body workload.
 
-The [paired-trig artifact](benchmarks/results/exact-pipeline-paired-trig-2026-07-20.json)
-remains the directly comparable post-trig run: against the
+The isolated [paired Python hot-path A/B](benchmarks/results/exact-padded-python-hot-path-ab-2026-07-21.json)
+measures 7,610.288 to 8,066.670 decisions/s at 32 lanes (+5.997%) on six
+interleaved, workload-equivalent 80,000-decision samples. Its SHA-256 is
+`0f7a5c6820cd002d190f177f45ba0f0db44c7cf7387c4527d154c8a30299fbbd`;
+it attributes the action-packing and packed-suffix changes but does not replace
+the full performance gate.
+
+The supplemental [scaling and scheduling probe](benchmarks/results/exact-padded-scaling-ceiling-2026-07-21.json)
+scales equal exact lanes/workers from 4,674.992/s at 8 to 10,975.352/s at 64
+without reaching a ceiling on this 8-core/16-thread host. Its SHA-256 is
+`2938d3e072ee99e39ba408f0dd934e5e5caa82993e8e1d7472a6b3322d4f4657`.
+The separate [actor-rollout A/B](benchmarks/results/exact-actor-rollout-ab-2026-07-21.json)
+matches synchronous trajectory payloads, state hashes, and event counts at
+16/32/64 lanes. All 9 paired samples are exact; with 64-decision horizons, its
+median paired speedups are 1.211x/1.097x/1.057x. Its SHA-256 is
+`2f247f1222f0423475bdcffc185ea893c0b31eb204a7fb6df55030c396d6fc4f`.
+Both artifacts use focused workloads and supplement rather than replace the
+source-manifested gate.
+
+A separate [exact-core cache investigation](benchmarks/results/exact-core-trig-cache-investigation-2026-07-21.json)
+rejects broader raw-angle memoization: 10,080,004 of 13,096,069 observed inputs
+are unique, a 4,096-entry cache improves the dense median by only about 1.04%,
+and the immutable contact solver accounts for 58.36% of fresh profile samples.
+Two exact-preserving solver-source candidates were also rejected. The
+[solver optimization artifact](benchmarks/results/exact-core-solver-source-optimizations-2026-07-21.json)
+records only +0.648% for skipping static-body position stores and +0.472% for
+caching velocity anchors, below the predeclared 3% integration threshold. Both
+matched the full 47,019-step exact replay and 813,508-record wrapper trace, but
+the expensive full getter replay was intentionally not run for rejected
+candidates and no engine change was retained. Artifact SHA-256:
+`6fe2b8c482e8764ff64577261d839d552ae7c4a5a996c538bbead2a135ffcb71`.
+The candidate sources and binaries were local, unarchived experiment inputs;
+the artifact preserves their hashes and descriptions but is not independently
+rebuildable from a clean checkout.
+
+The July 20 [paired-trig artifact](benchmarks/results/exact-pipeline-paired-trig-2026-07-20.json)
+remains the historical directly comparable post-trig run: against the
 [pre-trig baseline](benchmarks/results/exact-pipeline-final-2026-07-20.json), its
 pinned core A/B improved 16.14%, dense native simulation improved 16.82%, and
 the 48-body 30,000-tick physics workload improved 14.37%. The retained `+0`
 fast path adds 1.287% in a controlled local dense-core A/B against that paired
 host.
-The board density and complete public transition stream remain equivalent, but
-solver work still dominates.
-The formal five-category golden gate and qualitative policy-transfer gate also
-remain open.
+The recorded action/reset counts and body/event density summaries remain
+equivalent across all benchmark paths, but solver work still dominates.
+Observed replay physics and reward parity are passing gates, but bulk-RL
+readiness is not. The representative exact backend remains below the numerical
+20,000 decisions/s target, but the measured limitation was explicitly accepted
+as sufficient for RL on 2026-07-21 and is no longer a blocker. The tracked
+five-category controlled manifest is empty and `not_evaluable`; no hashed
+original-game spawn/difficulty distribution comparison exists; and no scripted
+policy has demonstrated qualitative transfer.
+The default portable backend also remains unsuitable when replay-exact physics
+is required.
 
 ## Evidence boundary
 

@@ -1,0 +1,500 @@
+{
+  "artifact": "exact_core_trig_cache_investigation",
+  "conclusion": {
+    "land_tracked_runtime_change": false,
+    "reasons": [
+      "The controlled eight-pair 3,000-decision A/B improved median native wall throughput by only 1.04% (1,434.86 to 1,449.84 decisions/s, rounded).",
+      "A 4,096-entry direct cache hit only 9.747211107% of nonzero cosine inputs in the complete 3,000-decision key stream; an idealized LRU cache of the same size reached only 10.126250516%.",
+      "The cache adds mutable process-global state and snapshot/concurrency invariants for a gain far too small to close the existing 2.594x 32-lane throughput gap.",
+      "A fresh profile assigns 58.361284140% of samples to the two immutable exact MSVC9 contact-solver loops, so the dominant remaining cost is not removable by a runtime shim cache."
+    ],
+    "status": "rejected"
+  },
+  "environment": {
+    "architecture": "ELF32 i386 exact host on x86_64 Linux",
+    "cpu": "AMD Ryzen 7 3700X 8-Core Processor",
+    "kernel": "Linux 7.1.2-3-cachyos x86_64 GNU/Linux",
+    "x87_control_word": "0x027f"
+  },
+  "generated_utc": "2026-07-21T23:40:35Z",
+  "glibc_sincosf_experiment": {
+    "corrected_candidate": {
+      "dense_3000_observation": {
+        "action_trace_hash": "0x9594f819f23fb980",
+        "baseline_action_trace_hash": "0xce87de1d75705d2a",
+        "baseline_event_trace_hash": "0xa30d32f84b6a6957",
+        "baseline_final": {
+          "gauge": 3474,
+          "score": 48,
+          "tick": 926
+        },
+        "baseline_wall_decisions_per_second_nonpaired": 1457.09231698,
+        "candidate_event_trace_hash": "0x02bdaee8c97a8ef7",
+        "candidate_final": {
+          "gauge": 3483,
+          "score": 16,
+          "tick": 217
+        },
+        "candidate_wall_decisions_per_second": 1277.38835056,
+        "performance_comparison_valid": false,
+        "performance_caveat": "The baseline rate was a nearby but non-paired observation under changing external load. The candidate was directionally slower, but no percentage claim is made."
+      },
+      "implementation": "force_align_arg_pointer C helper calling glibc sincosf; standalone mismatched sine calls retained x87 FSIN",
+      "randomized_boundary_trig_test_exit_code": 1,
+      "randomized_boundary_trig_test_passed": false,
+      "rejection": "Failed x87 binary32 result parity and immediately changed the canonical dense trajectory; it was also not faster in the observed run."
+    },
+    "first_mismatch": null,
+    "first_mismatch_unavailable_reason": "The existing trig executable returns status only and does not print the failing raw input.",
+    "initial_unaligned_prototype": {
+      "exit_code": 139,
+      "included_in_correctness_or_performance_conclusion": false,
+      "result": "segmentation_fault",
+      "resolution": "Replaced by a force-aligned helper before the recorded parity and dense checks."
+    },
+    "status": "rejected"
+  },
+  "key_corpus": {
+    "angle_representation_check": {
+      "checked_inputs": 13096069,
+      "non_binary32_extended_inputs": 0,
+      "result": "Every observed x87 input was exactly equal to reloading its stored binary32 key."
+    },
+    "capture": {
+      "action_trace_hash": "0xce87de1d75705d2a",
+      "decision_steps": 3000,
+      "dropped_keys": 0,
+      "event_trace_hash": "0xa30d32f84b6a6957",
+      "final_gauge": 3474,
+      "final_score": 48,
+      "final_tick": 926,
+      "policy_seed": 1381450071,
+      "seed": 41,
+      "workload": "simulator_random_policy_one_tick_v1"
+    },
+    "counts": {
+      "negative_zero": 0,
+      "nonzero": 12262841,
+      "positive_zero": 833228,
+      "positive_zero_fraction_of_all": 0.063624282981,
+      "positive_zero_percent_of_all": 6.362428298,
+      "total": 13096069,
+      "unique_all": 10080004,
+      "unique_fraction_of_all": 0.769696922031,
+      "unique_nonzero": 10080003
+    },
+    "direct_mapped_cache": [
+      {
+        "entries": 1,
+        "hit_percent_of_nonzero": 0.901479518,
+        "hit_rate_of_all": 0.008441235305,
+        "hit_rate_of_nonzero": 0.009014795185,
+        "hits": 110547
+      },
+      {
+        "entries": 2,
+        "hit_percent_of_nonzero": 2.755487085,
+        "hit_rate_of_all": 0.025801711949,
+        "hit_rate_of_nonzero": 0.027554870849,
+        "hits": 337901
+      },
+      {
+        "entries": 4,
+        "hit_percent_of_nonzero": 3.888397477,
+        "hit_rate_of_all": 0.036410009752,
+        "hit_rate_of_nonzero": 0.038883974766,
+        "hits": 476828
+      },
+      {
+        "entries": 8,
+        "hit_percent_of_nonzero": 4.639773116,
+        "hit_rate_of_all": 0.043445708785,
+        "hit_rate_of_nonzero": 0.046397731162,
+        "hits": 568968
+      },
+      {
+        "entries": 16,
+        "hit_percent_of_nonzero": 5.171419902,
+        "hit_rate_of_all": 0.048423920186,
+        "hit_rate_of_nonzero": 0.051714199018,
+        "hits": 634163
+      },
+      {
+        "entries": 32,
+        "hit_percent_of_nonzero": 5.581838662,
+        "hit_rate_of_all": 0.052266981794,
+        "hit_rate_of_nonzero": 0.05581838662,
+        "hits": 684492
+      },
+      {
+        "entries": 64,
+        "hit_percent_of_nonzero": 5.974904184,
+        "hit_rate_of_all": 0.055947551895,
+        "hit_rate_of_nonzero": 0.059749041841,
+        "hits": 732693
+      },
+      {
+        "entries": 128,
+        "hit_percent_of_nonzero": 6.463412516,
+        "hit_rate_of_all": 0.06052182529,
+        "hit_rate_of_nonzero": 0.064634125159,
+        "hits": 792598
+      },
+      {
+        "entries": 256,
+        "hit_percent_of_nonzero": 7.097596715,
+        "hit_rate_of_all": 0.066460172133,
+        "hit_rate_of_nonzero": 0.070975967151,
+        "hits": 870367
+      },
+      {
+        "entries": 512,
+        "hit_percent_of_nonzero": 7.813303622,
+        "hit_rate_of_all": 0.073161877812,
+        "hit_rate_of_nonzero": 0.078133036219,
+        "hits": 958133
+      },
+      {
+        "entries": 1024,
+        "hit_percent_of_nonzero": 8.504954113,
+        "hit_rate_of_all": 0.079638325058,
+        "hit_rate_of_nonzero": 0.08504954113,
+        "hits": 1042949
+      },
+      {
+        "entries": 4096,
+        "hit_percent_of_nonzero": 9.747211107,
+        "hit_rate_of_all": 0.091270517894,
+        "hit_rate_of_nonzero": 0.097472111071,
+        "hits": 1195285
+      }
+    ],
+    "idealized_fully_associative_lru": [
+      {
+        "entries": 1,
+        "hit_percent_of_nonzero": 0.901479518,
+        "hit_rate_of_nonzero": 0.009014795185,
+        "hits": 110547
+      },
+      {
+        "entries": 2,
+        "hit_percent_of_nonzero": 4.345420445,
+        "hit_rate_of_nonzero": 0.043454204454,
+        "hits": 532872
+      },
+      {
+        "entries": 4,
+        "hit_percent_of_nonzero": 4.894803741,
+        "hit_rate_of_nonzero": 0.048948037408,
+        "hits": 600242
+      },
+      {
+        "entries": 8,
+        "hit_percent_of_nonzero": 5.309993011,
+        "hit_rate_of_nonzero": 0.053099930106,
+        "hits": 651156
+      },
+      {
+        "entries": 16,
+        "hit_percent_of_nonzero": 5.671010494,
+        "hit_rate_of_nonzero": 0.056710104942,
+        "hits": 695427
+      },
+      {
+        "entries": 32,
+        "hit_percent_of_nonzero": 5.951116874,
+        "hit_rate_of_nonzero": 0.059511168741,
+        "hits": 729776
+      },
+      {
+        "entries": 64,
+        "hit_percent_of_nonzero": 6.166140456,
+        "hit_rate_of_nonzero": 0.061661404564,
+        "hits": 756144
+      },
+      {
+        "entries": 128,
+        "hit_percent_of_nonzero": 6.585456013,
+        "hit_rate_of_nonzero": 0.06585456013,
+        "hits": 807564
+      },
+      {
+        "entries": 256,
+        "hit_percent_of_nonzero": 7.458744674,
+        "hit_rate_of_nonzero": 0.074587446743,
+        "hits": 914654
+      },
+      {
+        "entries": 512,
+        "hit_percent_of_nonzero": 8.535020555,
+        "hit_rate_of_nonzero": 0.085350205552,
+        "hits": 1046636
+      },
+      {
+        "entries": 1024,
+        "hit_percent_of_nonzero": 9.232526133,
+        "hit_rate_of_nonzero": 0.092325261332,
+        "hits": 1132170
+      },
+      {
+        "entries": 4096,
+        "hit_percent_of_nonzero": 10.126250516,
+        "hit_rate_of_nonzero": 0.101262505157,
+        "hits": 1241766
+      }
+    ],
+    "retention": {
+      "durable_in_this_artifact": "All aggregate counts and hashes needed for the conclusion are embedded here.",
+      "raw_binary_currently_present": true,
+      "raw_binary_path": ".tmp/exact-core-perf-20260721/trig-keys-3000.bin",
+      "raw_binary_tracked_or_durable": false
+    }
+  },
+  "method": {
+    "commands": {
+      "cache_build_shape": "gcc -m32 -fPIC -DCACHE_BITS=12 -c .tmp/exact-core-perf-20260721/cache-runtime.S; gcc -m32 -shared -Wl,-z,notext -Wl,--allow-multiple-definition -Wl,-Bsymbolic-functions -Wl,--build-id=none -Wl,-soname,libirisu_box2d_msvc_exact_multiworld.so <exact-localized-object> <bridge-object> <runtime-object> -lm",
+      "cache_replay": "env LD_LIBRARY_PATH=$PWD/.tmp/exact-core-perf-20260721/cache-12 build-physics-integration-exact-multiworld-2/irisu-exact-replay reference/replays/raw/internet/irisu_00041449_20100725_182435_7.rpy",
+      "cache_trig_test": "env LD_LIBRARY_PATH=$PWD/.tmp/exact-core-perf-20260721/cache-12 build-physics-integration-exact-multiworld-2/irisu-exact-trig-runtime-tests",
+      "key_analysis": "g++ -O3 -std=c++20 -Wall -Wextra -Wpedantic .tmp/exact-core-perf-20260721/analyze-keys.cpp; analyze-keys .tmp/exact-core-perf-20260721/trig-keys-3000.bin",
+      "key_capture": "env LD_LIBRARY_PATH=$PWD/.tmp/exact-core-perf-20260721/trace-host IRISU_TRIG_KEYS_OUT=$PWD/.tmp/exact-core-perf-20260721/trig-keys-3000.bin build-physics-integration-exact-multiworld-2/irisu-physics-benchmark --simulator-decisions 3000 --seed 41 --policy-seed 1381450071",
+      "profile": "env LD_LIBRARY_PATH=<current-exact-host>:<libunwind32> LD_PRELOAD=<libprofiler32> CPUPROFILE=<dense-current.prof> CPUPROFILE_FREQUENCY=1000 taskset -c 0 build-physics-integration-exact-multiworld-2/irisu-physics-benchmark --simulator-decisions 3000 --seed 41 --policy-seed 1381450071",
+      "profile_symbolization": "pprof --text --addresses <benchmark> <profile>; subtract host load bias and map each address to the nearest preceding named text symbol from nm -an",
+      "runtime_reproduction": "Compile the tracked msvc-runtime.S and relink it with the captured localized exact object and bridge using the host tool's flags; the reproduced DSO SHA-256 exactly equaled the current production host SHA-256."
+    },
+    "hashes": {
+      "authoritative_replay_input": {
+        "path": "reference/replays/raw/internet/irisu_00041449_20100725_182435_7.rpy",
+        "sha256": "73bf5b5d4a478c9bf73b62a6df98f16a01fde2cf97eb751438cd0ae857e3362d"
+      },
+      "benchmark_executable": {
+        "path": "build-physics-integration-exact-multiworld-2/irisu-physics-benchmark",
+        "sha256": "719adc014fc78516065c9efb7bb3ae479c88d2f5bc78f503b4f14a15be36a990"
+      },
+      "benchmark_source": {
+        "path": "benchmarks/native_physics.cpp",
+        "sha256": "65cc0704748379e40118862d55845f9224f701ed6d01423a53c2f07eaf339e2e"
+      },
+      "cache_4096_host": {
+        "path": ".tmp/exact-core-perf-20260721/cache-12/libirisu_box2d_msvc_exact_multiworld.so",
+        "sha256": "863574d55f72236a8c336c33eac843a4f6afb575da38c7efde22f50b4237c1c6"
+      },
+      "cache_4096_runtime_object": {
+        "path": ".tmp/exact-core-perf-20260721/cache-12/msvc-runtime.o",
+        "sha256": "e3d307795f807613642e0af32450a1a0aca941b26d939ea4a0ec2504f4e32208"
+      },
+      "cache_runtime_source": {
+        "path": ".tmp/exact-core-perf-20260721/cache-runtime.S",
+        "sha256": "eccd8ca3bff7fe6d37fada52f9e9283cbe15d2709be7989d48feea7e2e96025b"
+      },
+      "current_exact_host": {
+        "path": ".tmp/exact-range-host-symbolic-20260721/libirisu_box2d_msvc_exact_multiworld.so",
+        "sha256": "ce14d1cab9ce4331bf494fe92bf657029487aec9f7435e7479b3c7cb579fafb5"
+      },
+      "current_runtime_source": {
+        "path": "reference/native-box2d/msvc-runtime.S",
+        "sha256": "6f702907fa64050aaa97cffb90514fabe2709616a32a71ce8fcc04acf8c1fb70"
+      },
+      "exact_bridge_object": {
+        "path": ".tmp/exact-range-host-final-20260720/msvc-bridge.o",
+        "sha256": "ea40051fcef66910013d4d5ac258d34ca55551265683b7763306d1249d356481"
+      },
+      "exact_localized_engine_object": {
+        "path": ".tmp/exact-range-host-final-20260720/box2d-msvc-combined-local.o",
+        "sha256": "790dbea807b2e782e2f4413725a8809fdc491c4809b5f6e3d29130935be34b40"
+      },
+      "exact_replay_executable": {
+        "path": "build-physics-integration-exact-multiworld-2/irisu-exact-replay",
+        "sha256": "d06e1ff08811b21047b827bebb27ea39295445b64d3b56c772617befb1bc22f9"
+      },
+      "exact_trig_test_executable": {
+        "path": "build-physics-integration-exact-multiworld-2/irisu-exact-trig-runtime-tests",
+        "sha256": "8ab7d0d1f0097ae92063e15cd165744b440d1670064dcfa49a8bbc9da420876e"
+      },
+      "exact_trig_test_source": {
+        "path": "tests/native/test_exact_trig_runtime.cpp",
+        "sha256": "bda086f6e406e05679af7e991351525bc299a1c8d0070bdc1e65f42ece8b8579"
+      },
+      "key_analyzer_source": {
+        "path": ".tmp/exact-core-perf-20260721/analyze-keys.cpp",
+        "sha256": "28055582ff30289f2cf15d82459468956f52b7338224a365039f3afa5f7c20d4"
+      },
+      "key_stream": {
+        "bytes": 52384276,
+        "path": ".tmp/exact-core-perf-20260721/trig-keys-3000.bin",
+        "sha256": "f431ad78a502f3438d20a19e8751db62da8a2d6b11dec57cc45031056b799b11"
+      },
+      "libm_candidate_host": {
+        "path": ".tmp/exact-core-perf-20260721/libm-host/libirisu_box2d_msvc_exact_multiworld.so",
+        "sha256": "5d6ce93adf1ee2623996fcf3cf217c608740c144938ec5d47562e97477c29f8c"
+      },
+      "libm_candidate_helper_source": {
+        "path": ".tmp/exact-core-perf-20260721/libm-helper.c",
+        "sha256": "b5172ff2730bbd4dd6da4c01690b984e9ae27753acfa3def4e987bc37a9c634a"
+      },
+      "libm_candidate_runtime_source": {
+        "path": ".tmp/exact-core-perf-20260721/libm-runtime.S",
+        "sha256": "ed060a2acff87f0813c87122f61973cc33ff622c16748ff68a871896215ebf1d"
+      },
+      "profile": {
+        "bytes": 14375,
+        "path": ".tmp/exact-core-perf-20260721/profile-current/dense-current.prof",
+        "sha256": "01f83a56eb0f5e37a0c157f30433ce725f8c87711415ac1dcdb942146d98f751"
+      },
+      "profile_tool": {
+        "path": ".tmp/core-profile.pGKtzr/pprof",
+        "sha256": "8c2162b36ecb0d9129ab9035103ccd0a8ca7d674eb5042a8cb201026de98253e"
+      },
+      "reproduced_current_host": {
+        "path": ".tmp/exact-core-perf-20260721/repro/libirisu_box2d_msvc_exact_multiworld.so",
+        "sha256": "ce14d1cab9ce4331bf494fe92bf657029487aec9f7435e7479b3c7cb579fafb5"
+      }
+    },
+    "tool_versions": {
+      "binutils": "GNU Binutils 2.46.1",
+      "gcc": "gcc (GCC) 16.1.1 20260625",
+      "gxx": "g++ (GCC) 16.1.1 20260625",
+      "python": "Python 3.14.6"
+    }
+  },
+  "parity_evidence": {
+    "authoritative_replay": {
+      "cache_entries": 4096,
+      "candidate_stdout_bytes": 993804,
+      "candidate_stdout_sha256": "bb8a81554cfc03bbfa186fdba6ee080f691eaabb451e1f562627050ed2fdf236",
+      "expected_current_exact_stdout_sha256": "bb8a81554cfc03bbfa186fdba6ee080f691eaabb451e1f562627050ed2fdf236",
+      "final_clears": 379,
+      "final_score": 41449,
+      "final_score_calls": 455,
+      "final_tick": 47019,
+      "result": "byte_identical"
+    },
+    "canonical_dense_trace": {
+      "action_trace_hash": "0xce87de1d75705d2a",
+      "cache_entry_counts_checked": [
+        16,
+        256,
+        1024,
+        4096
+      ],
+      "decision_steps": 3000,
+      "event_trace_hash": "0xa30d32f84b6a6957",
+      "final_gauge": 3474,
+      "final_score": 48,
+      "final_tick": 926,
+      "result": "matching_hashes_and_terminal_scalars"
+    },
+    "randomized_boundary_trig": {
+      "boundary_vectors": 12,
+      "cache_entry_counts_checked": [
+        16,
+        256,
+        1024,
+        4096
+      ],
+      "generated_raw_bit_cases": 100000,
+      "result": "passed_all_four_cache_sizes",
+      "standalone_and_paired_sequences_checked": true
+    },
+    "unavailable": {
+      "all_four_replay_corpus_with_cache": "not_run",
+      "full_10777297_command_getter_contact_stream_with_cache": "not_run",
+      "reason": "The authoritative full replay hash plus randomized runtime gate were sufficient to reject the cache on performance/complexity grounds; no broader parity claim is made."
+    }
+  },
+  "performance": {
+    "cache_4096_controlled_ab": {
+      "baseline_median_wall_decisions_per_second_rounded": 1434.86,
+      "cache_median_wall_decisions_per_second_rounded": 1449.84,
+      "computed_percent_from_rounded_medians": 1.044004293,
+      "decision_steps_per_sample": 3000,
+      "paired_samples": 8,
+      "raw_pair_samples": null,
+      "raw_pair_samples_unavailable_reason": "The controlled pair summary was reported in-session, but the raw per-pair values were not copied into this artifact.",
+      "reported_improvement_percent_rounded": 1.04,
+      "result": "too_small_to_land"
+    },
+    "existing_pipeline_context": {
+      "actual_32_lane_decisions_per_second": 7709.353,
+      "artifact_path": "benchmarks/results/exact-pipeline-parity-safe-perf-2026-07-21.json",
+      "artifact_sha256": "c5c2ff9c7ca35d1e3664cba9ad2722b354ddc60b4934cd09522396cd6c3e9350",
+      "shortfall_factor": 2.594,
+      "target_decisions_per_second": 20000.0
+    },
+    "uncontrolled_measurements": {
+      "retained": false,
+      "reason": "An early multi-size round-robin was affected by concurrent rustc and exact-worker load and is not used for any rate conclusion."
+    }
+  },
+  "profile": {
+    "classification_method": "Flat sample addresses were rebased to the current exact host and assigned to the nearest preceding named text symbol from nm -an.",
+    "dense_result": {
+      "action_trace_hash": "0xce87de1d75705d2a",
+      "decision_steps": 3000,
+      "event_trace_hash": "0xa30d32f84b6a6957",
+      "wall_decisions_per_second_noncontrolled": 1430.39999403
+    },
+    "distribution": [
+      {
+        "percent_of_all_samples": 34.163871586,
+        "samples": 713,
+        "symbol": "b2ContactSolver::SolveVelocityConstraints"
+      },
+      {
+        "percent_of_all_samples": 24.197412554,
+        "samples": 505,
+        "symbol": "b2ContactSolver::SolvePositionConstraints"
+      },
+      {
+        "percent_of_all_samples": 16.770483948,
+        "samples": 350,
+        "symbol": "msvc_CIcos"
+      },
+      {
+        "percent_of_all_samples": 3.737422137,
+        "samples": 78,
+        "symbol": "EdgeSeparation"
+      },
+      {
+        "percent_of_all_samples": 2.060373742,
+        "samples": 43,
+        "symbol": "FindMaxSeparation"
+      },
+      {
+        "percent_of_all_samples": 1.916626737,
+        "samples": 40,
+        "symbol": "FindIncidentEdge"
+      },
+      {
+        "percent_of_all_samples": 1.245807379,
+        "samples": 26,
+        "symbol": "b2ContactSolver::b2ContactSolver"
+      },
+      {
+        "percent_of_all_samples": 0.670819358,
+        "samples": 14,
+        "symbol": "msvc_CIsin"
+      },
+      {
+        "percent_of_all_samples": 0.143747005,
+        "samples": 3,
+        "symbol": "msvc_CIsqrt"
+      }
+    ],
+    "exact_host": {
+      "percent_of_all_samples": 92.668902731,
+      "samples": 1934
+    },
+    "public_bridge_getter_caveat": "No individual public bridge/getter symbol had more than two flat samples (0.095831337%); sampling resolution is insufficient for a precise aggregate bridge-cost claim.",
+    "sample_count": 2087,
+    "solver_combined": {
+      "percent_of_all_samples": 58.36128414,
+      "samples": 1218
+    },
+    "trig_cos_sin_combined": {
+      "percent_of_all_samples": 17.441303306,
+      "samples": 364
+    },
+    "workload_rate_caveat": "The profile was pinned to logical CPU 0, but other compilation/worker activity existed on the host. Distribution is used diagnostically; its wall rate is not a controlled throughput result."
+  },
+  "schema_version": 1
+}

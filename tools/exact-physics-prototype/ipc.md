@@ -38,6 +38,8 @@ The worker reports its pointer width, x87 control word, mechanics config hash,
 backend name, compiler, and exact-library SHA-256 during its handshake. The
 client rejects incompatible pointer width, protocol version, body capacity,
 process model, backend identity, or a missing/placeholder library SHA-256.
+Production launch uses working directory `/`, removes every inherited `LD_*`
+variable and `GLIBC_TUNABLES`, and forces x87 control word `0x027f`.
 Only after a valid Hello proves `exec` completed does the client hash
 `/proc/<pid>/exe`, avoiding a `posix_spawn` race that could otherwise identify
 the parent Python executable. It also locates the one exact library in the live
@@ -46,11 +48,26 @@ segments, worker and client mount identities, stable metadata, and complete
 bytes against the handshake SHA-256.
 
 Before constructing `Simulator`, the forward wrapper resolves its typed table
-of 15 `b2d_*` entrypoints and requires every target to be a unique executable
-address owned by the genuine exact-library link-map object. All targets must
-share one `/proc` device/inode mapping, and each process-global binding must
-equal the attested call target. This rejects symbol interposition even when the
-genuine SONAME is also mapped.
+of 15 `b2d_*` entrypoints and performs every later physics call through those
+stored pointers. Each target must be a unique executable address owned by the
+genuine exact-library link-map object. All targets must share one `/proc`
+device/inode mapping, and each process-global binding must equal the attested
+call target. Each `dladdr1` name and exact symbol-start address must equal the
+requested entrypoint. An ordinary `b2d_*` preload therefore fails closed even
+when the genuine SONAME is also mapped, and a tested interposed-`dlsym`
+same-host X/Y permutation fails the symbol-identity check. The exact host's
+internal `msvc_b2d_*` calls are bound locally with `-Bsymbolic-functions`; its
+generator and the consuming CMake configuration reject every `R_386_*`
+relocation naming those helpers. These are fail-closed provenance checks for
+the tested loader attacks, not a general sandbox for arbitrary code already
+executing inside the worker.
+
+The generated host has a stable `DT_SONAME`, is retained as a `DT_NEEDED`
+dependency, and is reopened only with `RTLD_NOLOAD`. Exact post-link validation
+requires a nonempty `RPATH`/`RUNPATH` whose components are absolute or
+`$ORIGIN`-relative; empty/current-directory and bare relative components fail
+the build. Installed exact executables use origin-relative lookup for the host
+installed with the relocatable tree.
 
 ## Wire contract
 
@@ -81,9 +98,9 @@ Opcode 13 (`ExactAttestation`) is a backward-compatible protocol-v1 extension.
 Its response contains little-endian schema `u32` (currently 1), entrypoint
 count `u32` (15), inode `u64`, and a standard length-prefixed ASCII device
 string. Python requires valid schema/count/device/inode values and an exact
-device/inode match with its independent live-map capture. Older workers that do
-not implement opcode 13 therefore fail closed rather than silently losing this
-guarantee. Exact `build_info` records
+device/inode match with its independently captured live exact library. Older
+workers that do not implement opcode 13 therefore fail closed rather than
+silently losing this guarantee. Exact `build_info` records
 `exact_call_targets_runtime_verified=true` and `exact_entrypoint_count=15`.
 
 `send_step`/`receive_step` split a round trip. A vector coordinator sends one
@@ -98,8 +115,8 @@ deterministically.
 
 On the representative dense `RandomPolicy(max_wait_ticks=1)` workload, explicit
 1/4/8/16/32-lane exact packed/lazy-event vectors sustain
-1,334.810/1,933.338/3,292.397/5,391.293/7,199.041 decisions/s on the development
-host. Raw packed IPC reaches 7,995.455/s at 32 lanes. At eight lanes the
+1,364.451/2,009.342/3,516.100/5,630.998/7,894.265 decisions/s on the development
+host. Raw packed IPC reaches 7,955.692/s at 32 lanes. At eight lanes the
 workload averages 110.865 live bodies and 172.954 events per decision and
 reaches maxima of 196 bodies and 484 events. Packed
 response content averages 11,291 bytes and peaks at 19,804, versus
@@ -132,30 +149,48 @@ native simulator improves 16.82%, the 48-body physics workload 14.37%, and
 eight-lane padded throughput 13.50%. An attempted combined wrapper getter
 changed representative throughput by only +0.009% and the dense case by
 +0.187%, both noise-sized, so it remains rejected. The current explicit
-32-lane padded result is 35.995% of the 20,000 aggregate-decision/s target, or
-2.778x short; solver work remains dominant.
+64-lane padded result is 48.426% of the 20,000 aggregate-decision/s target, or
+2.065x short; solver work remains dominant.
 
 The checked-in source-manifested result is
-[`exact-pipeline-range-safe-wide-2026-07-20.json`](../../benchmarks/results/exact-pipeline-range-safe-wide-2026-07-20.json),
-SHA-256 `91c8db5feb9d3c8339d101940f05a42d93a4490641745964a0ca427553b8b8e9`.
-It records 37/37 current source hashes and 64/64 true equivalence leaves, plus
-1,498.136 dense native decisions/s and 75,819.177 ticks/s on the directly
-comparable 30,000-tick 48-body physics workload. The earlier
+[`exact-pipeline-adaptive-wide-perf-2026-07-21.json`](../../benchmarks/results/exact-pipeline-adaptive-wide-perf-2026-07-21.json),
+SHA-256 `4067fdff9360989adb696bdc5ad7d98983729f9fa424271fbd7e3e1fb9164eef`.
+It records 38/38 current runtime-source hashes and 88/88 true equivalence leaves,
+worker SHA-256
+`4faa4508a89df3e1e62b80e2871b6a35b5913f220d53fe5de43408ad6512c261`,
+host SHA-256
+`ce14d1cab9ce4331bf494fe92bf657029487aec9f7435e7479b3c7cb579fafb5`,
+1,447.881 dense native wall decisions/s (1,485.277/s for step plus observation),
+and 74,853.849 ticks/s on the directly comparable 30,000-tick 48-body physics
+workload. The July 20
 [`exact-pipeline-paired-trig-2026-07-20.json`](../../benchmarks/results/exact-pipeline-paired-trig-2026-07-20.json)
-remains the comparable post-pair artifact; the
+remains the historical comparable post-pair artifact; the
 [`exact-pipeline-final-2026-07-20.json`](../../benchmarks/results/exact-pipeline-final-2026-07-20.json)
 run is its pre-trig baseline. Timing is a local-host measurement, not a portable
 performance guarantee.
 
 All four authoritative v2.03 replays reproduce through the IPC path, including
-the complete 47,019-step physics stream. The longest reaches score 41,449,
+the active mutation/step/contact stream through all 47,019 physics steps. The
+longest reaches score 41,449,
 gauge 1, level 38, highest chain 5, 379 clears, 455 score events, and terminal
 replay frame 47,018. Score and gauge events reconstruct the observation after
 every step in the corpus. Randomized `Step`/`StepPadded` validation additionally
 matched 1,906 steps and every one of 190,501 events across five boundary seeds.
-The retained range-safe positive-zero build passes 10/10 exact CTest targets,
-portable Release and ASAN/UBSAN builds each pass 8/8, and the Python suite
-passes 159 tests with two optional Gym skips.
+The production `IrisuEnv` corpus gate further compares all 1,111 original
+score/rot/clear/level state checkpoints and passes 4/4 with an attested worker
+and live mapped host. Its report SHA-256 is
+`b0e5def9d05eab34f76a43c0bdc23a2ecb83e414223a5ad06bb1d06c500d1848`.
+The low-level comparator checks 813,412 active mutation/step/contact records,
+including 573,557 contacts. The original trace's 9,810,360 getter-only records
+were independently replayed in original global call order against the exact
+host. All 12,262,950 returned binary32 words match bit-for-bit through step
+47,019, with no getter or contact mismatch.
+The retained range-safe positive-zero build passes 14/14 exact Release and
+14/14 exact ASAN/UBSAN CTest targets. Portable Release and ASAN/UBSAN builds
+each pass 8/8, and the Python suite passes 204 tests with three expected
+normal-build skips. Sanitized hostile-preload tests put the worker-linked ELF32
+`libasan` first. The GNU layers are instrumented; immutable MSVC9 host
+instructions are explicitly verified as uninstrumented.
 
 ## Production mapping
 
@@ -168,12 +203,13 @@ uses split send/drain calls so worker processes advance concurrently.
 and use packed `StepPadded` responses plus lazy `FetchEvents`; their capped
 waves use readiness-ordered response draining.
 
-Both the default exact path and every portable padded vector use at most eight
-concurrent workers. An explicit exact request may use more independent worker
-processes—for example,
-`PaddedVectorEnv(32, physics_backend="exact", workers=32)`. Merely setting
-`num_envs=32` without `workers=32` leaves the conservative eight-worker cap in
-place.
+Exact padded vectors default to
+`min(num_envs, 4 * process-visible logical CPUs)` concurrent worker processes;
+`os.sched_getaffinity(0)` supplies the CPU count when available. An explicit
+exact `workers=` request remains authoritative. Portable padded vectors retain
+their conservative eight-worker cap. The exact default is a measured topology
+heuristic, not a claim that four workers per logical CPU is universally
+optimal.
 
 The new exact library supports independent world handles, but its host bridge
 currently serializes calls because pristine r58 contains shared lazy state and
@@ -236,9 +272,9 @@ already accepted by the worker from being omitted from that action log.
 `IrisuEnv.fast_checkpoint()` wraps the same capability and returns fully usable
 independent `IrisuEnv` branches with the source configuration, render mode,
 diagnostic setting, spaces, and exact backend. At a 1,000-action history,
-checkpoint creation is 187.828 us, median branch creation is 479.742 us
-(2,056.212/s), and durable restore is 95.933 ms (10.413/s) locally, a 199.968x
-median branch advantage.
+checkpoint creation is 171.215 us, median branch creation is 283.931 us
+(3,521.982/s), and median durable restore is 95.479 ms (10.474/s) locally, a
+336.274x median branch advantage. The durable snapshot is 28,104 bytes.
 Branch connection authenticates the keeper with peer credentials, verifies
 direct parentage and inherited executable/library file identities, and then
 accepts the launch-verified hashes reported by the inherited worker. An

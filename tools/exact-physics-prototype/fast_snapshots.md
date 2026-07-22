@@ -75,10 +75,10 @@ level APIs, reusable checkpoints after source divergence, independently usable
 closed calls before reset or from the portable backend.
 
 At a history of 1,000 actions, the current
-[source-manifested measurement](../../benchmarks/results/exact-pipeline-range-safe-wide-2026-07-20.json)
-produced a 28,104-byte durable snapshot, 187.828 us checkpoint, 479.742 us
-median branch creation (2,056.212/s), and 95.933 ms durable restore (10.413/s).
-The local branch was therefore 199.968x faster at the median.
+[source-manifested measurement](../../benchmarks/results/exact-pipeline-adaptive-wide-perf-2026-07-21.json)
+produced a 28,104-byte durable snapshot, 171.215 us checkpoint, 283.931 us
+median branch creation (3,521.982/s), and 95.479 ms durable restore (10.474/s).
+The local branch was therefore 336.274x faster at the median.
 These timings establish the scaling difference; they are not a portable
 performance guarantee.
 

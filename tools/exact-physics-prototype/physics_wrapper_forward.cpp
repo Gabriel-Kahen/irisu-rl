@@ -223,10 +223,13 @@ void attest_symbols(ExactApi& api,
     if (::dladdr1(symbol.address, &dynamic_info, &extra_info,
                   RTLD_DL_LINKMAP) == 0 ||
         static_cast<link_map*>(extra_info) != api.link_map_identity ||
-        dynamic_info.dli_fname == nullptr) {
+        dynamic_info.dli_fname == nullptr || dynamic_info.dli_sname == nullptr ||
+        std::strcmp(dynamic_info.dli_sname, symbol.name) != 0 ||
+        dynamic_info.dli_saddr != symbol.address) {
       throw std::runtime_error(std::string("exact physics entrypoint ") +
                                symbol.name +
-                               " is not owned by the loaded exact object");
+                               " does not have the expected symbol identity in "
+                               "the loaded exact object");
     }
     if (mapping.permissions.size() < 3 || mapping.permissions[2] != 'x' ||
         mapping.inode == 0 ||

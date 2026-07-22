@@ -1,6 +1,6 @@
 # Exact-physics snapshot/restore
 
-Date: 2026-07-20
+Date: 2026-07-20; production benchmark updated 2026-07-21
 
 Implementation status: the Linux fork/COW keeper described below is now
 available through worker opcodes 10-12 and
@@ -61,9 +61,10 @@ important scaling result is that `fork()` stayed approximately constant while
 action replay grew linearly with checkpoint age.
 
 The production Python benchmark repeats the comparison through the public
-worker API. At a 1,000-action history, checkpoint creation is 187.828 us,
-median branch creation is 479.742 us (2,056.212/s), and durable restore is
-95.933 ms (10.413/s), a 199.968x median branch advantage. Each branch matches
+worker API. The current source-manifested July 21 run reports, at a 1,000-action
+history, checkpoint creation of 171.215 us, median branch creation of 283.931 us
+(3,521.982/s), and median durable restore of 95.479 ms (10.474/s), a 336.274x
+median branch advantage. Each branch matches
 both the source state hash and durable snapshot bytes. The production raw
 protocol regression
 also compares 1,000 complete encoded responses from two frame-30,000 branches
