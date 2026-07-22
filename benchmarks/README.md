@@ -11,6 +11,12 @@ does not include actor-side capture/tracking or model inference, and the R2 PPO
 buffer will add training-specific tensors. Run with `uv run --extra training
 python benchmarks/rl_r1.py`.
 
+`rl_r2a.py` measures the deterministic CPU model path separately from
+environment collection. It covers the schema-bound masked set encoder and GRU
+heads for both one-step collection inference and recurrent training sequences.
+The checked result is engineering throughput only: it excludes environment
+collection and is not evidence of learning quality or transfer.
+
 Build and run the default benchmark from the repository root:
 
 ```bash
