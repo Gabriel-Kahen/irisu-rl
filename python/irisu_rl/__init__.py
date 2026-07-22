@@ -11,7 +11,12 @@ from .rollout_buffer import RolloutBuffer
 from .runtime_identity import ACCEPTED_EXACT_RUNTIME_2026_07_21, ExactRuntimeIdentity
 from .schema import ACTOR_VISION_V1, TEACHER_V1, TensorSchema
 from .seeds import SEED_SPLITS_V1, SeedAllocator, SeedReservation
-from .vector_adapter import MacroTransition, MacroVectorAdapter, ObservationInput
+from .vector_adapter import (
+    MacroTransition,
+    MacroVectorAdapter,
+    ObservationInput,
+    OwnedEvent,
+)
 
 __all__ = [
     "ACTOR_VISION_V1",
@@ -24,6 +29,7 @@ __all__ = [
     "MacroTransition",
     "MacroVectorAdapter",
     "ObservationInput",
+    "OwnedEvent",
     "RolloutBuffer",
     "SEED_SPLITS_V1",
     "SemanticAction",

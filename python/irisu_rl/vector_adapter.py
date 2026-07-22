@@ -27,10 +27,23 @@ class ObservationInput:
 
 
 @dataclass(frozen=True, slots=True)
+class OwnedEvent:
+    tick: int
+    sequence: int
+    kind: int
+    a: int
+    b: int
+    value: int
+    detail: str
+    primitive_phase: str
+
+
+@dataclass(frozen=True, slots=True)
 class OwnedDiagnostics:
     config_hash: int
     invalid_action: bool
     event_count: int
+    events: tuple[OwnedEvent, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -62,6 +75,7 @@ class AdapterCheckpoint:
     schema_sha256: str
     action_sha256: str
     num_envs: int
+    capture_events: bool
     current: EncodedBatch
     raw_ticks: tuple[int, ...]
     raw_scores: tuple[int, ...]
@@ -89,12 +103,14 @@ class MacroVectorAdapter:
         | None = None,
         seed_allocator: SeedAllocator | None = None,
         action_spec: ActionSpec | None = None,
+        capture_events: bool = False,
     ) -> None:
         self.env = env
         self.encoder = encoder
         self.observation_transform = observation_transform
         self.seed_allocator = seed_allocator or SeedAllocator()
         self.action_spec = action_spec or ActionSpec()
+        self.capture_events = bool(capture_events)
         self.num_envs = int(env.num_envs)
         self._poisoned = False
         self._initialized = False
@@ -154,6 +170,34 @@ class MacroVectorAdapter:
         if any(len(value) != expected for value in values):
             raise ValueError("backend returned a malformed lane batch")
 
+    @staticmethod
+    def _own_events(info: object, primitive_phase: str) -> tuple[OwnedEvent, ...]:
+        if not isinstance(info, dict):
+            raise TypeError("backend info must be a dictionary")
+        owned: list[OwnedEvent] = []
+        for raw in info.get("events", ()):
+            getter = (
+                raw.get
+                if isinstance(raw, dict)
+                else lambda key, default=0: getattr(raw, key, default)
+            )
+            detail = getter("detail", "")
+            if not detail:
+                detail = getattr(raw, "detail_text", "")
+            owned.append(
+                OwnedEvent(
+                    int(getter("tick", 0)),
+                    int(getter("sequence", 0)),
+                    int(getter("kind", -1)),
+                    int(getter("a", 0)),
+                    int(getter("b", 0)),
+                    int(getter("value", 0)),
+                    str(detail),
+                    primitive_phase,
+                )
+            )
+        return tuple(owned)
+
     def _fail_closed(self, exc: BaseException) -> None:
         self._poisoned = True
         raise RuntimeError(
@@ -203,10 +247,11 @@ class MacroVectorAdapter:
         state_hashes = tuple(int(value) for value in self.env.state_hash())
         self._require_lengths(self.num_envs, snapshots, state_hashes)
         return AdapterCheckpoint(
-            "macro-vector-adapter-checkpoint-v1",
+            "macro-vector-adapter-checkpoint-v2",
             self._schema.sha256,
             self.action_spec.sha256,
             self.num_envs,
+            self.capture_events,
             self._current.copy(),
             tuple(self._raw_ticks),
             tuple(self._raw_scores),
@@ -224,10 +269,12 @@ class MacroVectorAdapter:
             raise RuntimeError("cannot restore a poisoned adapter")
         if not self._initialized:
             raise RuntimeError("reset the fresh backend once before checkpoint restore")
-        if checkpoint.version != "macro-vector-adapter-checkpoint-v1":
+        if checkpoint.version != "macro-vector-adapter-checkpoint-v2":
             raise ValueError("adapter checkpoint version mismatch")
         if checkpoint.num_envs != self.num_envs:
             raise ValueError("adapter checkpoint lane count mismatch")
+        if checkpoint.capture_events != self.capture_events:
+            raise ValueError("adapter checkpoint event-capture mode mismatch")
         if checkpoint.action_sha256 != self.action_spec.sha256:
             raise ValueError("adapter checkpoint action identity mismatch")
         checkpoint.current.validate()
@@ -354,7 +401,18 @@ class MacroVectorAdapter:
             final_raw = list(observations)
             final_encoded = [first_encoded.row(index) for index in range(self.num_envs)]
             total_rewards = [int(value) for value in rewards]
-            total_events = [len(info.get("events", ())) for info in infos]
+            event_counts = [len(info.get("events", ())) for info in infos]
+            total_events = (
+                [
+                    self._own_events(
+                        info,
+                        "wait" if action.kind is SemanticActionKind.WAIT else "press",
+                    )
+                    for info, action in zip(infos, validated)
+                ]
+                if self.capture_events
+                else [()] * self.num_envs
+            )
             invalid = [bool(info.get("invalid_action", False)) for info in infos]
             config_hashes = [int(info.get("config_hash", 0)) for info in infos]
             final_terminated = [bool(value) for value in terminated]
@@ -403,6 +461,11 @@ class MacroVectorAdapter:
                 release_event_counts = [
                     len(info.get("events", ())) for info in release_infos
                 ]
+                release_events = (
+                    [self._own_events(info, "release") for info in release_infos]
+                    if self.capture_events
+                    else [()] * len(release_infos)
+                )
                 release_invalid = [
                     bool(info.get("invalid_action", False)) for info in release_infos
                 ]
@@ -415,7 +478,8 @@ class MacroVectorAdapter:
                 final_raw[lane] = release_observations[offset]
                 final_encoded[lane] = release_encoded.row(offset)
                 total_rewards[lane] += int(release_rewards[offset])
-                total_events[lane] += release_event_counts[offset]
+                total_events[lane] += release_events[offset]
+                event_counts[lane] += release_event_counts[offset]
                 invalid[lane] |= release_invalid[offset]
                 config_hashes[lane] = release_hashes[offset]
                 final_terminated[lane] = bool(release_terminated[offset])
@@ -515,7 +579,10 @@ class MacroVectorAdapter:
                         ),
                         trace_mask=not episode_done,
                         diagnostics=OwnedDiagnostics(
-                            config_hashes[lane], invalid[lane], total_events[lane]
+                            config_hashes[lane],
+                            invalid[lane],
+                            event_counts[lane],
+                            total_events[lane],
                         ),
                     )
                 )

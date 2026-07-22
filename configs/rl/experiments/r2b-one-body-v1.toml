@@ -1,0 +1,85 @@
+version = "r2b-one-body-v1"
+task_version = "one-body-direct-hit-v1"
+policy_schema = "teacher-v1"
+action_schema = "deployment-v1"
+deployable = false
+observation_provenance = "privileged_simulator"
+transfer_gate = "R4 causal tracker and real input calibration pending"
+diagnostic_scope = "coordinate BC and one-step PPO only"
+
+[runtime]
+torch_threads = 8
+torch_interop_threads = 1
+deterministic_algorithms = true
+
+[model]
+global_hidden = 32
+body_hidden = 32
+fused_hidden = 64
+recurrent_hidden = 64
+recurrent_layers = 1
+minimum_concentration = 1.001
+coordinate_parameterization = "mean-log-concentration"
+coordinate_concentration_log_bias = 2.0
+
+[mechanics]
+initial_rotten_count = 0
+initial_falling_count = 1
+spawn_y = -200.0
+noncanonical_spawn_suppression = true
+max_episode_ticks = 500
+train_heights = [60.0, 80.0, 100.0, 120.0, 140.0]
+calibration_heights = [50.0, 150.0]
+validation_heights = [70.0, 130.0]
+test_heights = [90.0, 110.0]
+
+[reward]
+raw = "score_after - score_before"
+optimizer = "0.75 * projectile_hit + 0.25 * gaussian_aim"
+projectile_hit_weight = 0.75
+gaussian_aim_weight = 0.25
+gaussian_aim_sigma_normalized = 0.20
+clip = false
+
+[behavioral_cloning]
+steps = 500
+dataset_rounds = 8
+objective = "75%: 100*mse; 25%: 1000*mse + nll + 100*beta_variance"
+learning_rate = 0.001
+seed = 7
+
+[ppo]
+updates = 120
+lanes_per_height = 8
+model_seeds = [17, 29, 43]
+candidate_learning_rates = [0.0001, 0.0003, 0.0006]
+learning_rate_scope = "provisional for one-body-direct-hit-v1 only"
+final_learning_rate_fraction = 0.2
+epochs = 3
+lane_minibatch_size = 20
+clip_ratio = 0.2
+value_clip = 0.2
+value_coefficient = 0.5
+entropy_coefficient = 0.002
+max_gradient_norm = 0.5
+target_kl = 0.08
+expert_warm_start_steps = 200
+expert_warm_start_dataset_rounds = 4
+
+[seeds]
+calibration_allocator_key = 701
+validation_allocator_key = 702
+final_test_allocator_key = 20260722
+random_validation = 703
+random_test = 705
+ppo_sampler_xor = 42405
+
+[evaluation]
+rounds = 8
+episodes_per_height = 64
+selection = "median validation hit rate, then median aim score, then lower LR"
+test_backend = "exact"
+minimum_each_seed_test_hit_rate = 0.90
+minimum_median_margin_over_random = 0.70
+test_opened_only_after_learning_rate_selection = true
+minimum_selected_seed_ppo_validation_delta = 0.0
