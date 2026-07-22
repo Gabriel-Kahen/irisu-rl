@@ -4,15 +4,18 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import asdict, dataclass
 from numbers import Integral
-from typing import Mapping, Sequence
+from pathlib import Path
+from typing import Any, Mapping, Sequence
 
 import torch
 from torch import Tensor
 
-from .actions import ActionSpec
+from .actions import ActionSpec, SemanticActionKind
 from .rewards import RewardSchedule
+from .vector_adapter import EpisodeInitialization
 
 
 _SHA256_ZERO = "0" * 64
@@ -25,6 +28,7 @@ _PHASES = {
     "complete",
     "budget_exhausted",
 }
+_SAFE_IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 
 
 def _canonical_sha256(value: object) -> str:
@@ -68,6 +72,41 @@ class SnapshotRecipe:
     generator_version: str
     version: str = "curriculum-snapshot-recipe-v1"
 
+    @classmethod
+    def from_manifest(cls, value: Mapping[str, object]) -> SnapshotRecipe:
+        expected = {
+            "snapshot_id",
+            "stage_id",
+            "split",
+            "scenario_family",
+            "environment_pool",
+            "config_sha256",
+            "config_hash",
+            "reset_seed",
+            "action_spec_sha256",
+            "semantic_actions_hex",
+            "expected_tick",
+            "expected_score",
+            "expected_state_hash",
+            "snapshot_sha256",
+            "runtime_identity_sha256",
+            "generator_version",
+            "version",
+        }
+        if set(value) != expected:
+            raise ValueError("snapshot recipe manifest keys differ")
+        trace = value["semantic_actions_hex"]
+        if not isinstance(trace, list) or any(
+            not isinstance(item, str) for item in trace
+        ):
+            raise ValueError("snapshot recipe trace must be a string array")
+        arguments = dict(value)
+        arguments["semantic_actions_hex"] = tuple(trace)
+        try:
+            return cls(**arguments)  # type: ignore[arg-type]
+        except TypeError as exc:
+            raise ValueError("snapshot recipe manifest types are malformed") from exc
+
     def __post_init__(self) -> None:
         identifiers = (
             self.snapshot_id,
@@ -76,10 +115,18 @@ class SnapshotRecipe:
             self.environment_pool,
             self.generator_version,
         )
-        if any(not value or not value.isascii() for value in identifiers):
-            raise ValueError("recipe identifiers must be nonempty ASCII")
-        if self.split not in _SPLITS:
+        if any(
+            not isinstance(value, str)
+            or not value
+            or not value.isascii()
+            or _SAFE_IDENTIFIER.fullmatch(value) is None
+            for value in identifiers
+        ):
+            raise ValueError("recipe identifiers must be safe nonempty ASCII")
+        if self.version != "curriculum-snapshot-recipe-v1" or self.split not in _SPLITS:
             raise ValueError("unknown curriculum recipe split")
+        if not isinstance(self.semantic_actions_hex, tuple):
+            raise TypeError("snapshot recipe trace must be an immutable tuple")
         for value in (
             self.config_sha256,
             self.action_spec_sha256,
@@ -198,6 +245,31 @@ class SnapshotLibrary:
         self.recipes = ordered
         self._by_id = {recipe.snapshot_id: recipe for recipe in ordered}
 
+    @classmethod
+    def from_manifest(cls, value: Mapping[str, object]) -> SnapshotLibrary:
+        if set(value) != {"version", "recipes"} or value.get("version") != cls.version:
+            raise ValueError("snapshot library manifest identity or keys differ")
+        recipes = value["recipes"]
+        if not isinstance(recipes, list) or any(
+            not isinstance(recipe, Mapping) for recipe in recipes
+        ):
+            raise ValueError("snapshot library recipes must be an array of tables")
+        library = cls(tuple(SnapshotRecipe.from_manifest(recipe) for recipe in recipes))
+        if library.manifest() != dict(value):
+            raise ValueError("snapshot library manifest is not canonical")
+        return library
+
+    @classmethod
+    def from_json(cls, path: str | Path) -> SnapshotLibrary:
+        with Path(path).open("rb") as handle:
+            try:
+                value = json.load(handle)
+            except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+                raise ValueError("snapshot library JSON is malformed") from exc
+        if not isinstance(value, Mapping):
+            raise ValueError("snapshot library JSON root must be an object")
+        return cls.from_manifest(value)
+
     def __getitem__(self, snapshot_id: str) -> SnapshotRecipe:
         try:
             return self._by_id[snapshot_id]
@@ -218,6 +290,106 @@ class SnapshotLibrary:
         recipe = self[snapshot_id]
         if hashlib.sha256(bytes(payload)).hexdigest() != recipe.snapshot_sha256:
             raise ValueError("curriculum snapshot blob hash mismatch")
+
+
+class SnapshotBlobStore:
+    """Owned, eagerly verified snapshot bytes bound to one immutable library."""
+
+    version = "curriculum-snapshot-store-v1"
+
+    def __init__(self, library: SnapshotLibrary, blobs: Mapping[str, bytes]) -> None:
+        if set(blobs) != {recipe.snapshot_id for recipe in library.recipes}:
+            raise ValueError("snapshot blob set does not match the library")
+        owned: dict[str, bytes] = {}
+        for recipe in library.recipes:
+            payload = blobs[recipe.snapshot_id]
+            if not isinstance(payload, bytes):
+                raise TypeError("snapshot blobs must be owned bytes")
+            library.verify_snapshot_blob(recipe.snapshot_id, payload)
+            owned[recipe.snapshot_id] = payload
+        self.library = library
+        self._blobs = owned
+
+    @classmethod
+    def from_directory(
+        cls, library: SnapshotLibrary, directory: str | Path
+    ) -> SnapshotBlobStore:
+        root = Path(directory).resolve(strict=True)
+        if root.is_symlink() or not root.is_dir():
+            raise ValueError("snapshot root must be a real directory")
+        blobs: dict[str, bytes] = {}
+        for recipe in library.recipes:
+            path = root / f"{recipe.snapshot_id}.snapshot"
+            if path.is_symlink() or not path.is_file() or path.parent != root:
+                raise ValueError("snapshot blob path is missing or unsafe")
+            blobs[recipe.snapshot_id] = path.read_bytes()
+        return cls(library, blobs)
+
+    def __getitem__(self, snapshot_id: str) -> bytes:
+        try:
+            return self._blobs[snapshot_id]
+        except KeyError as exc:
+            raise KeyError(f"unknown curriculum snapshot: {snapshot_id}") from exc
+
+    def manifest(self) -> dict[str, object]:
+        return {
+            "version": self.version,
+            "library_sha256": self.library.sha256,
+            "blobs": {
+                key: hashlib.sha256(value).hexdigest()
+                for key, value in sorted(self._blobs.items())
+            },
+        }
+
+    @property
+    def sha256(self) -> str:
+        return _canonical_sha256(self.manifest())
+
+
+def replay_snapshot_recipe(simulator: Any, recipe: SnapshotRecipe) -> bytes:
+    """Rebuild and verify a cached snapshot from reset seed plus legal macros."""
+
+    action_spec = ActionSpec()
+    if recipe.action_spec_sha256 != action_spec.sha256:
+        raise ValueError("snapshot recipe action identity mismatch")
+    if int(simulator.config_hash()) != recipe.config_hash:
+        raise ValueError("snapshot recipe simulator config mismatch")
+    if _canonical_sha256(simulator.config()) != recipe.config_sha256:
+        raise ValueError("snapshot recipe canonical config mismatch")
+    reset_result = simulator.reset(seed=recipe.reset_seed)
+    observation = reset_result[0] if isinstance(reset_result, tuple) else reset_result
+    done = False
+    for payload in recipe.semantic_actions_hex:
+        if done:
+            raise ValueError("snapshot recipe continues after episode completion")
+        semantic = action_spec.deserialize(bytes.fromhex(payload))
+        primitives = [action_spec.press(semantic)]
+        if semantic.kind is not SemanticActionKind.WAIT:
+            primitives.append(action_spec.release())
+        for primitive in primitives:
+            result = simulator.step(primitive)
+            if not isinstance(result, tuple) or len(result) < 4:
+                raise TypeError("snapshot replay simulator returned a malformed step")
+            observation = result[0]
+            done = bool(result[2]) or bool(result[3])
+            if done:
+                break
+    getter = (
+        observation.get
+        if isinstance(observation, Mapping)
+        else lambda key: getattr(observation, key)
+    )
+    if done:
+        raise ValueError("snapshot recipe ends outside a live decision boundary")
+    snapshot = bytes(simulator.clone_state())
+    if (
+        int(getter("tick")) != recipe.expected_tick
+        or int(getter("score")) != recipe.expected_score
+        or int(simulator.state_hash()) != recipe.expected_state_hash
+        or hashlib.sha256(snapshot).hexdigest() != recipe.snapshot_sha256
+    ):
+        raise ValueError("snapshot recipe replay identity mismatch")
+    return snapshot
 
 
 @dataclass(frozen=True, slots=True)
@@ -386,7 +558,31 @@ class CurriculumSpec:
             "evaluation_seed": int(self.evaluation_seed),
             "prior_stage_mix_ppm": self.prior_stage_mix_ppm,
             "stages": [stage.manifest() for stage in self.stages],
+            "assignment_sha256": self.assignment_sha256,
         }
+
+    def assignment_manifest(self) -> dict[str, object]:
+        """Identity for episode pairing, deliberately excluding reward/optimizer data."""
+
+        return {
+            "version": "curriculum-assignment-v1",
+            "curriculum_id": self.curriculum_id,
+            "library_sha256": self.library.sha256,
+            "prior_stage_mix_ppm": self.prior_stage_mix_ppm,
+            "stages": [
+                {
+                    "rank": stage.rank,
+                    "stage_id": stage.stage_id,
+                    "environment_pool": stage.environment_pool,
+                    "train_snapshot_ids": list(stage.train_snapshot_ids),
+                }
+                for stage in self.stages
+            ],
+        }
+
+    @property
+    def assignment_sha256(self) -> str:
+        return _canonical_sha256(self.assignment_manifest())
 
     @property
     def sha256(self) -> str:
@@ -660,7 +856,7 @@ class GateDecision:
 class CurriculumCoordinator:
     """Transactional assignment sampler and monotone promotion state machine."""
 
-    version = "curriculum-coordinator-v1"
+    version = "curriculum-coordinator-v2"
 
     def __init__(self, spec: CurriculumSpec, lanes: int, *, learner_seed: int) -> None:
         if isinstance(lanes, bool) or not isinstance(lanes, Integral) or lanes <= 0:
@@ -681,6 +877,7 @@ class CurriculumCoordinator:
         self.unlock_updates = [0] + [-1] * (len(spec.stages) - 1)
         self.promotion_streak = 0
         self.lane_stage = [0] * self.lanes
+        self.lane_snapshot_id = [""] * self.lanes
         initial_weight = spec.stages[0].reward_schedule.weight_ppm(0)
         self.lane_shaping_weight_ppm = [initial_weight] * self.lanes
         self.episode_ordinals = [0] * self.lanes
@@ -712,7 +909,7 @@ class CurriculumCoordinator:
         limit = (1 << 256) - ((1 << 256) % size)
         while True:
             payload = (
-                f"{self.spec.sha256}:{self.learner_seed}:{lane}:{ordinal}:{counter}"
+                f"{self.spec.assignment_sha256}:{self.learner_seed}:{lane}:{ordinal}:{counter}"
             ).encode()
             value = int.from_bytes(hashlib.sha256(payload).digest(), "big")
             if value < limit:
@@ -759,7 +956,7 @@ class CurriculumCoordinator:
             tuple(assignments),
             _canonical_sha256(
                 {
-                    "spec": self.spec.sha256,
+                    "assignment": self.spec.assignment_sha256,
                     "assignments": [asdict(value) for value in assignments],
                 }
             ),
@@ -773,19 +970,46 @@ class CurriculumCoordinator:
         for assignment in reservation.assignments:
             if assignment.episode_ordinal != self.episode_ordinals[assignment.lane_id]:
                 raise ValueError("assignment episode ordinal changed before commit")
+        stage_by_id = {
+            stage.stage_id: index for index, stage in enumerate(self.spec.stages)
+        }
+        prepared_stage = list(self.lane_stage)
+        prepared_snapshots = list(self.lane_snapshot_id)
+        prepared_weights = list(self.lane_shaping_weight_ppm)
+        prepared_ordinals = list(self.episode_ordinals)
         for assignment in reservation.assignments:
-            stage_index = next(
-                index
-                for index, stage in enumerate(self.spec.stages)
-                if stage.stage_id == assignment.stage_id
-            )
-            self.lane_stage[assignment.lane_id] = stage_index
+            try:
+                stage_index = stage_by_id[assignment.stage_id]
+            except KeyError as exc:
+                raise ValueError("assignment names an unknown stage") from exc
+            recipe = self.spec.library[assignment.snapshot_id]
+            stage = self.spec.stages[stage_index]
+            if (
+                recipe.stage_id != stage.stage_id
+                or recipe.split != "train"
+                or recipe.environment_pool != stage.environment_pool
+            ):
+                raise ValueError("assignment snapshot disagrees with its stage")
+            prepared_stage[assignment.lane_id] = stage_index
+            prepared_snapshots[assignment.lane_id] = assignment.snapshot_id
             unlocked = self.unlock_updates[stage_index]
             stage_age = 0 if unlocked < 0 else self.completed_updates - unlocked
-            self.lane_shaping_weight_ppm[assignment.lane_id] = self.spec.stages[
-                stage_index
-            ].reward_schedule.weight_ppm(stage_age)
-            self.episode_ordinals[assignment.lane_id] += 1
+            prepared_weights[assignment.lane_id] = stage.reward_schedule.weight_ppm(
+                stage_age
+            )
+            prepared_ordinals[assignment.lane_id] += 1
+        self.lane_stage = prepared_stage
+        self.lane_snapshot_id = prepared_snapshots
+        self.lane_shaping_weight_ppm = prepared_weights
+        self.episode_ordinals = prepared_ordinals
+        self._outstanding = None
+        self._complete_activation_if_ready()
+
+    def rollback_assignments(self, reservation: AssignmentReservation) -> None:
+        """Cancel an uncommitted reservation without advancing any lane clock."""
+
+        if reservation != self._outstanding:
+            raise ValueError("stale or foreign assignment reservation")
         self._outstanding = None
 
     def action_masks(self, action_spec: ActionSpec) -> tuple[Tensor, Tensor]:
@@ -808,16 +1032,7 @@ class CurriculumCoordinator:
     def shaping_weights_ppm(self) -> Tensor:
         return torch.tensor(self.lane_shaping_weight_ppm, dtype=torch.int64)
 
-    def activate_focus_for_new_episodes(self, reset_mask: Tensor) -> None:
-        if reset_mask.shape != (self.lanes,) or reset_mask.dtype != torch.bool:
-            raise ValueError("curriculum reset mask must be boolean [B]")
-        for lane in torch.nonzero(reset_mask.cpu(), as_tuple=False).flatten().tolist():
-            self.lane_stage[lane] = self.focus
-            unlocked = self.unlock_updates[self.focus]
-            stage_age = 0 if unlocked < 0 else self.completed_updates - unlocked
-            self.lane_shaping_weight_ppm[lane] = (
-                self.current_stage.reward_schedule.weight_ppm(stage_age)
-            )
+    def _complete_activation_if_ready(self) -> None:
         if (
             self.phase == "activation"
             and self.unlock_updates[self.highest_unlocked] < 0
@@ -832,6 +1047,18 @@ class CurriculumCoordinator:
                     "activation_update": self.completed_updates,
                 },
             )
+
+    def activate_focus_for_new_episodes(self, reset_mask: Tensor) -> None:
+        if reset_mask.shape != (self.lanes,) or reset_mask.dtype != torch.bool:
+            raise ValueError("curriculum reset mask must be boolean [B]")
+        for lane in torch.nonzero(reset_mask.cpu(), as_tuple=False).flatten().tolist():
+            self.lane_stage[lane] = self.focus
+            unlocked = self.unlock_updates[self.focus]
+            stage_age = 0 if unlocked < 0 else self.completed_updates - unlocked
+            self.lane_shaping_weight_ppm[lane] = (
+                self.current_stage.reward_schedule.weight_ppm(stage_age)
+            )
+        self._complete_activation_if_ready()
 
     def advance_update(self) -> None:
         if self._pending_validation is not None:
@@ -1101,6 +1328,7 @@ class CurriculumCoordinator:
             "unlock_updates": list(self.unlock_updates),
             "promotion_streak": self.promotion_streak,
             "lane_stage": list(self.lane_stage),
+            "lane_snapshot_id": list(self.lane_snapshot_id),
             "lane_shaping_weight_ppm": list(self.lane_shaping_weight_ppm),
             "episode_ordinals": list(self.episode_ordinals),
             "submitted_reports": dict(self._submitted_reports),
@@ -1128,6 +1356,7 @@ class CurriculumCoordinator:
             "unlock_updates",
             "promotion_streak",
             "lane_stage",
+            "lane_snapshot_id",
             "lane_shaping_weight_ppm",
             "episode_ordinals",
             "submitted_reports",
@@ -1155,6 +1384,7 @@ class CurriculumCoordinator:
         streak = state["promotion_streak"]
         unlocks = state["unlock_updates"]
         lane_stage = state["lane_stage"]
+        lane_snapshots = state["lane_snapshot_id"]
         lane_weights = state["lane_shaping_weight_ppm"]
         ordinals = state["episode_ordinals"]
         reports = state["submitted_reports"]
@@ -1175,6 +1405,8 @@ class CurriculumCoordinator:
             or len(unlocks) != len(self.spec.stages)
             or not isinstance(lane_stage, list)
             or len(lane_stage) != self.lanes
+            or not isinstance(lane_snapshots, list)
+            or len(lane_snapshots) != self.lanes
             or not isinstance(lane_weights, list)
             or len(lane_weights) != self.lanes
             or not isinstance(ordinals, list)
@@ -1184,6 +1416,7 @@ class CurriculumCoordinator:
                 not isinstance(value, int) or not 0 <= value <= highest
                 for value in lane_stage
             )
+            or any(not isinstance(value, str) for value in lane_snapshots)
             or any(
                 isinstance(value, bool)
                 or not isinstance(value, int)
@@ -1208,6 +1441,29 @@ class CurriculumCoordinator:
             or evaluation_ordinal < 0
         ):
             raise ValueError("curriculum checkpoint state is malformed")
+        for lane, snapshot_id in enumerate(lane_snapshots):
+            ordinal = ordinals[lane]
+            if ordinal == 0:
+                if snapshot_id:
+                    raise ValueError(
+                        "uninitialized curriculum lane names an active snapshot"
+                    )
+                continue
+            try:
+                recipe = self.spec.library[snapshot_id]
+            except KeyError as exc:
+                raise ValueError(
+                    "curriculum checkpoint names an unknown active snapshot"
+                ) from exc
+            expected_stage = self.spec.stages[lane_stage[lane]]
+            if (
+                recipe.split != "train"
+                or recipe.stage_id != expected_stage.stage_id
+                or recipe.environment_pool != expected_stage.environment_pool
+            ):
+                raise ValueError(
+                    "active snapshot disagrees with curriculum lane assignment"
+                )
         pending = (
             None
             if pending_value is None
@@ -1257,6 +1513,7 @@ class CurriculumCoordinator:
             raise ValueError("curriculum checkpoint phase semantics are malformed")
         prepared_unlocks = list(unlocks)
         prepared_lane_stage = list(lane_stage)
+        prepared_lane_snapshots = list(lane_snapshots)
         prepared_lane_weights = list(lane_weights)
         prepared_ordinals = list(ordinals)
         prepared_reports = dict(reports)
@@ -1268,6 +1525,7 @@ class CurriculumCoordinator:
         self.unlock_updates = prepared_unlocks
         self.promotion_streak = int(streak)
         self.lane_stage = prepared_lane_stage
+        self.lane_snapshot_id = prepared_lane_snapshots
         self.lane_shaping_weight_ppm = prepared_lane_weights
         self.episode_ordinals = prepared_ordinals
         self._submitted_reports = prepared_reports
@@ -1276,3 +1534,202 @@ class CurriculumCoordinator:
         self._pending_validation = pending
         self._event_head = str(state["event_head"])
         self._outstanding = None
+
+
+class CurriculumSnapshotInitializer:
+    """Restore declared curriculum states before committing their assignments.
+
+    Initial full-vector setup commits immediately. Autoreset restores are held
+    pending until the just-finished transitions have had their rewards composed,
+    preventing the next episode's shaping coefficient from leaking backward.
+    """
+
+    version = "curriculum-snapshot-initializer-v1"
+
+    def __init__(
+        self,
+        coordinator: CurriculumCoordinator,
+        store: SnapshotBlobStore,
+        *,
+        environment_pool: str,
+        runtime_identity_sha256: str,
+    ) -> None:
+        if store.library is not coordinator.spec.library:
+            raise ValueError("snapshot store and curriculum library must be identical")
+        if not environment_pool or _SAFE_IDENTIFIER.fullmatch(environment_pool) is None:
+            raise ValueError("environment pool identity is invalid")
+        if not _is_sha256(runtime_identity_sha256):
+            raise ValueError("runtime identity must be a lowercase SHA-256")
+        stages = coordinator.spec.stages
+        if {stage.environment_pool for stage in stages} != {environment_pool}:
+            raise ValueError(
+                "one snapshot initializer requires one homogeneous environment pool"
+            )
+        recipe_ids = {
+            snapshot_id for stage in stages for snapshot_id in stage.train_snapshot_ids
+        }
+        recipes = tuple(store.library[snapshot_id] for snapshot_id in recipe_ids)
+        if any(
+            recipe.runtime_identity_sha256 != runtime_identity_sha256
+            for recipe in recipes
+        ):
+            raise ValueError("curriculum snapshot runtime identity mismatch")
+        self.coordinator = coordinator
+        self.store = store
+        self.environment_pool = environment_pool
+        self.runtime_identity_sha256 = runtime_identity_sha256
+        self.expected_config_hash = recipes[0].config_hash
+        if any(recipe.config_hash != self.expected_config_hash for recipe in recipes):
+            raise ValueError("environment pool mixes simulator config hashes")
+        self._pending: AssignmentReservation | None = None
+        self._pending_backups: tuple[bytes, ...] = ()
+
+    @property
+    def has_pending(self) -> bool:
+        return self._pending is not None
+
+    def manifest(self) -> dict[str, object]:
+        return {
+            "version": self.version,
+            "curriculum_sha256": self.coordinator.spec.sha256,
+            "store_sha256": self.store.sha256,
+            "environment_pool": self.environment_pool,
+            "runtime_identity_sha256": self.runtime_identity_sha256,
+            "expected_config_hash": self.expected_config_hash,
+        }
+
+    @property
+    def sha256(self) -> str:
+        return _canonical_sha256(self.manifest())
+
+    @staticmethod
+    def _observation_identity(observation: object) -> tuple[int, int]:
+        tick = getattr(observation, "tick", None)
+        score = getattr(observation, "score", None)
+        if any(
+            isinstance(value, bool) or not isinstance(value, Integral)
+            for value in (tick, score)
+        ):
+            raise TypeError("restored snapshot observation identity is malformed")
+        gauge_max = getattr(observation, "gauge_max", None)
+        if (
+            isinstance(gauge_max, bool)
+            or not isinstance(gauge_max, Integral)
+            or gauge_max <= 0
+            or bool(getattr(observation, "terminated", False))
+            or bool(getattr(observation, "truncated", False))
+        ):
+            raise ValueError("snapshot is not a live policy decision boundary")
+        return int(tick), int(score)
+
+    def initialize(
+        self, env: Any, lane_ids: Sequence[int], *, defer_commit: bool
+    ) -> EpisodeInitialization:
+        if not isinstance(defer_commit, bool):
+            raise TypeError("deferred commit flag must be boolean")
+        if self._pending is not None:
+            raise RuntimeError("a snapshot assignment commit is already pending")
+        reservation = self.coordinator.reserve_assignments(lane_ids)
+        lanes = tuple(assignment.lane_id for assignment in reservation.assignments)
+        recipes = tuple(
+            self.store.library[assignment.snapshot_id]
+            for assignment in reservation.assignments
+        )
+        snapshots = tuple(self.store[recipe.snapshot_id] for recipe in recipes)
+        mutated = False
+        backups: tuple[bytes, ...] = ()
+        try:
+            if any(
+                recipe.environment_pool != self.environment_pool
+                or recipe.runtime_identity_sha256 != self.runtime_identity_sha256
+                or recipe.config_hash != self.expected_config_hash
+                for recipe in recipes
+            ):
+                raise ValueError(
+                    "reserved snapshot disagrees with initializer identity"
+                )
+            config_hashes = tuple(int(value) for value in env.config_hash_many(lanes))
+            if config_hashes != (self.expected_config_hash,) * len(lanes):
+                raise ValueError("vector lanes do not match the curriculum pool")
+            backups = tuple(env.clone_state_many(lanes))
+            observations = tuple(env.restore_many(lanes, snapshots))
+            mutated = True
+            state_hashes = tuple(int(value) for value in env.state_hash_many(lanes))
+            if len(observations) != len(lanes) or len(state_hashes) != len(lanes):
+                raise ValueError("snapshot restore returned a malformed subset")
+            for recipe, observation, state_hash in zip(
+                recipes, observations, state_hashes
+            ):
+                tick, score = self._observation_identity(observation)
+                if (
+                    tick != recipe.expected_tick
+                    or score != recipe.expected_score
+                    or state_hash != recipe.expected_state_hash
+                ):
+                    raise ValueError("restored curriculum snapshot identity mismatch")
+            result = EpisodeInitialization(
+                lanes,
+                observations,
+                tuple(recipe.reset_seed for recipe in recipes),
+                tuple(recipe.snapshot_id for recipe in recipes),
+            )
+            if defer_commit:
+                self._pending = reservation
+                self._pending_backups = backups
+            else:
+                self.coordinator.commit_assignments(reservation)
+            return result
+        except BaseException:
+            rollback_error: BaseException | None = None
+            if mutated:
+                try:
+                    env.restore_many(lanes, backups)
+                except BaseException as exc:
+                    rollback_error = exc
+            try:
+                self.coordinator.rollback_assignments(reservation)
+            except BaseException as exc:
+                rollback_error = rollback_error or exc
+            if rollback_error is not None:
+                raise RuntimeError(
+                    "curriculum snapshot initialization rollback failed"
+                ) from rollback_error
+            raise
+
+    def commit_pending(self, lane_ids: Sequence[int]) -> None:
+        reservation = self._pending
+        if reservation is None:
+            if tuple(lane_ids):
+                raise RuntimeError(
+                    "completed lanes have no pending snapshot assignment"
+                )
+            return
+        lanes = tuple(assignment.lane_id for assignment in reservation.assignments)
+        if tuple(lane_ids) != lanes:
+            raise ValueError("pending snapshot lanes disagree with completed lanes")
+        self.coordinator.commit_assignments(reservation)
+        self._pending = None
+        self._pending_backups = ()
+
+    def rollback_pending(self, env: Any, lane_ids: Sequence[int]) -> None:
+        reservation = self._pending
+        if reservation is None:
+            raise RuntimeError("there is no pending snapshot assignment to roll back")
+        lanes = tuple(assignment.lane_id for assignment in reservation.assignments)
+        if tuple(lane_ids) != lanes:
+            raise ValueError("pending snapshot lanes disagree with rollback lanes")
+        try:
+            env.restore_many(lanes, self._pending_backups)
+        except BaseException as exc:
+            raise RuntimeError("deferred curriculum snapshot rollback failed") from exc
+        self.coordinator.rollback_assignments(reservation)
+        self._pending = None
+        self._pending_backups = ()
+
+    def validate_active(self, episode_labels: Sequence[str]) -> None:
+        if self._pending is not None:
+            raise RuntimeError("active snapshot validation requires a clean boundary")
+        labels = tuple(episode_labels)
+        expected = tuple(self.coordinator.lane_snapshot_id)
+        if labels != expected or any(not value for value in labels):
+            raise ValueError("adapter and curriculum active snapshots disagree")

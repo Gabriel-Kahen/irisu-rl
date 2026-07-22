@@ -27,6 +27,7 @@ from .checkpoints import (
 )
 from .curriculum import (
     CurriculumCoordinator,
+    CurriculumSnapshotInitializer,
     GateDecision,
     ValidationReport,
     ValidationRequest,
@@ -36,6 +37,7 @@ from .models import RecurrentActorCritic
 from .ppo import PPOTrainer, PPOUpdateStats, RecurrentTrainingBatch
 from .recurrent_buffer import RecurrentRolloutBuffer
 from .rewards import RewardBatch, RewardComposer
+from .r3b_tail import ScoreOnlyTailController
 from .torch_distribution import ActionTensor, TorchConditionalActionDistribution
 from .vector_adapter import MacroTransition, MacroVectorAdapter
 
@@ -93,6 +95,7 @@ class DecisionAudit:
     episode_ids: tuple[int, ...]
     seeds: tuple[int, ...]
     config_hashes: tuple[int, ...]
+    snapshot_ids: tuple[str, ...]
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -260,7 +263,7 @@ class CurriculumTaskContract:
     can be mixed.
     """
 
-    version = "curriculum-task-v1"
+    version = "curriculum-task-v2"
 
     def __init__(
         self,
@@ -268,6 +271,7 @@ class CurriculumTaskContract:
         composer: RewardComposer,
         *,
         capture_events: bool,
+        snapshot_initializer: CurriculumSnapshotInitializer | None = None,
     ) -> None:
         if not isinstance(capture_events, bool):
             raise TypeError("capture_events must be boolean")
@@ -281,6 +285,12 @@ class CurriculumTaskContract:
         self.coordinator = coordinator
         self.composer = composer
         self.capture_events = capture_events
+        if (
+            snapshot_initializer is not None
+            and snapshot_initializer.coordinator is not coordinator
+        ):
+            raise ValueError("snapshot initializer uses a different coordinator")
+        self.snapshot_initializer = snapshot_initializer
         self.environment_pool = pools.pop()
         pool_recipes = tuple(
             recipe
@@ -296,6 +306,11 @@ class CurriculumTaskContract:
             "environment_pool": self.environment_pool,
             "expected_config_hash": self.expected_config_hash,
             "capture_events": self.capture_events,
+            "snapshot_initializer_sha256": (
+                None
+                if self.snapshot_initializer is None
+                else self.snapshot_initializer.sha256
+            ),
             "reward": self.composer.manifest(),
         }
 
@@ -333,6 +348,18 @@ class CurriculumTaskContract:
             for transition in transitions
         ):
             raise ValueError("collected transition does not match its environment pool")
+        if self.snapshot_initializer is not None:
+            if not self.snapshot_initializer.has_pending and any(
+                transition.terminated or transition.truncated
+                for transition in transitions
+            ):
+                raise RuntimeError("completed curriculum episodes were not restored")
+            expected = tuple(self.coordinator.lane_snapshot_id)
+            actual = tuple(transition.episode_label for transition in transitions)
+            if actual != expected or any(not value for value in actual):
+                raise ValueError(
+                    "transition snapshot identity disagrees with curriculum"
+                )
         return self.composer.compose(
             transitions, self.coordinator.shaping_weights_ppm()
         )
@@ -344,7 +371,11 @@ class CurriculumTaskContract:
             [value.terminated or value.truncated for value in transitions],
             dtype=torch.bool,
         )
-        self.coordinator.activate_focus_for_new_episodes(done)
+        if self.snapshot_initializer is None:
+            self.coordinator.activate_focus_for_new_episodes(done)
+        else:
+            lanes = tuple(index for index, value in enumerate(done.tolist()) if value)
+            self.snapshot_initializer.commit_pending(lanes)
 
     def advance_update(self) -> None:
         self.coordinator.advance_update()
@@ -522,6 +553,11 @@ class RecurrentCollector:
         composer.validate_identity()
         if getattr(composer, "requires_events", False) and not adapter.capture_events:
             raise ValueError("event-dependent reward requires adapter event capture")
+        if isinstance(task, CurriculumTaskContract):
+            if task.snapshot_initializer is not adapter.episode_initializer:
+                raise ValueError(
+                    "curriculum task and adapter must share one snapshot initializer"
+                )
         resolved_config = config or CollectorConfig()
         if (
             composer.shaping_gamma_tick is not None
@@ -578,14 +614,12 @@ class RecurrentCollector:
         if self._initialized:
             raise RuntimeError("collector is already initialized")
         try:
-            critic_condition = self._task_critic_condition()
             observation = self.adapter.reset()
+            critic_condition = self._task_critic_condition()
             if observation.schema != self.model.schema:
                 raise ValueError("adapter observation schema does not match the model")
             recurrent_state = self.model.initial_state(self.lanes).detach()
-            reset_before = torch.ones(
-                self.lanes, dtype=torch.bool, device=self.device
-            )
+            reset_before = torch.ones(self.lanes, dtype=torch.bool, device=self.device)
         except BaseException:
             self._poisoned = True
             raise
@@ -763,9 +797,7 @@ class RecurrentCollector:
                         raw_rewards=tuple(
                             int(value) for value in rewards.raw_reward.tolist()
                         ),
-                        start_gauges=tuple(
-                            value.start_gauge for value in transitions
-                        ),
+                        start_gauges=tuple(value.start_gauge for value in transitions),
                         end_gauges=tuple(value.end_gauge for value in transitions),
                         gauge_maxes=tuple(value.gauge_max for value in transitions),
                         scaled_raw_rewards=tuple(
@@ -791,6 +823,9 @@ class RecurrentCollector:
                         seeds=tuple(value.seed for value in transitions),
                         config_hashes=tuple(
                             value.diagnostics.config_hash for value in transitions
+                        ),
+                        snapshot_ids=tuple(
+                            value.episode_label for value in transitions
                         ),
                     )
                 )
@@ -880,11 +915,7 @@ class RecurrentCollector:
                     (1, len(indices)), dtype=torch.bool, device=self.device
                 ),
                 **(
-                    {
-                        "critic_condition": critic_condition[
-                            device_indices
-                        ].unsqueeze(0)
-                    }
+                    {"critic_condition": critic_condition[device_indices].unsqueeze(0)}
                     if self.model.config.critic_condition_features
                     else {}
                 ),
@@ -1019,7 +1050,7 @@ class RecurrentCollector:
 class R3ATrainingSession:
     """One clean-boundary collect/update/checkpoint state machine."""
 
-    version = "r3a-training-session-v1"
+    version = "r3a-training-session-v2"
 
     def __init__(
         self,
@@ -1028,6 +1059,7 @@ class R3ATrainingSession:
         *,
         numpy_seed: int,
         max_consecutive_skips: int = 64,
+        tail_controller: ScoreOnlyTailController | None = None,
     ) -> None:
         if collector.model is not trainer.model:
             raise ValueError("collector and trainer must share one model instance")
@@ -1043,6 +1075,18 @@ class R3ATrainingSession:
         self.task = collector.task
         self.numpy_generator = np.random.default_rng(numpy_seed)
         self.max_consecutive_skips = int(max_consecutive_skips)
+        if tail_controller is not None:
+            if not isinstance(collector.task, CurriculumTaskContract):
+                raise TypeError("score-only tail requires a curriculum task")
+            if tail_controller.completed_updates != collector.completed_updates:
+                raise ValueError("score-only tail and collector clocks disagree")
+            required_updates = (
+                tail_controller.sweep_updates
+                + tail_controller.minimum_score_only_updates
+            )
+            if trainer.schedule.total_updates < required_updates:
+                raise ValueError("PPO budget cannot complete the score-only tail")
+        self.tail_controller = tail_controller
         self.attempted_rollouts = 0
         self.skipped_rollouts = 0
         self.consecutive_skips = 0
@@ -1074,6 +1118,16 @@ class R3ATrainingSession:
             isinstance(self.task, CurriculumTaskContract)
             and self.task.coordinator.phase == "activation"
         )
+        tail_mode = "train"
+        if self.tail_controller is not None:
+            assert isinstance(self.task, CurriculumTaskContract)
+            tail_mode = self.tail_controller.collection_mode(
+                completed_updates=self.trainer.schedule.completed_updates,
+                lane_shaping_weight_ppm=(self.task.coordinator.shaping_weights_ppm()),
+            )
+            if tail_mode == "closed":
+                raise RuntimeError("score-only tail is complete")
+        tail_draining = tail_mode == "drain"
         if self.consecutive_skips >= self.max_consecutive_skips:
             raise RuntimeError("consecutive skipped-rollout safety limit is exhausted")
         if (
@@ -1086,6 +1140,15 @@ class R3ATrainingSession:
         try:
             rollout = self.collector.collect()
             self.attempted_rollouts += 1
+            if tail_draining:
+                assert self.tail_controller is not None
+                self.tail_controller.record_drain(
+                    rollout.audit,
+                    completed_updates=self.trainer.schedule.completed_updates,
+                )
+                return self._finish_skipped_rollout(
+                    rollout, "score-only tail episode drain"
+                )
             if activating:
                 return self._finish_skipped_rollout(
                     rollout, "curriculum stage activation drain"
@@ -1097,10 +1160,20 @@ class R3ATrainingSession:
                 return self._finish_skipped_rollout(
                     rollout, "rollout contained no trainable decisions"
                 )
+            if self.tail_controller is not None:
+                self.tail_controller.validate_optimizer_update(
+                    rollout.audit,
+                    completed_updates=self.trainer.schedule.completed_updates,
+                )
             self.model.train()
             stats = self.trainer.update(rollout.batch)
             self.task.advance_update()
             self.collector.mark_update_complete()
+            if self.tail_controller is not None:
+                self.tail_controller.record_optimizer_update(
+                    rollout.audit,
+                    completed_updates=self.trainer.schedule.completed_updates,
+                )
             self.consecutive_skips = 0
             self._mark_clean_collection_boundary()
             return TrainingUpdate(rollout.audit, stats)
@@ -1128,7 +1201,10 @@ class R3ATrainingSession:
     def _identity(self, identity: Mapping[str, object]) -> dict[str, object]:
         if "r3a_payload" in identity:
             raise ValueError("checkpoint identity uses reserved r3a_payload key")
-        return {**dict(identity), "r3a_payload": self.version}
+        result = {**dict(identity), "r3a_payload": self.version}
+        if self.tail_controller is not None:
+            result["score_only_tail"] = self.tail_controller.manifest()
+        return result
 
     def _validate_update_clocks(self) -> None:
         clocks = {
@@ -1136,6 +1212,8 @@ class R3ATrainingSession:
             self.trainer.schedule.completed_updates,
             self.task.completed_updates,
         }
+        if self.tail_controller is not None:
+            clocks.add(self.tail_controller.completed_updates)
         if len(clocks) != 1:
             raise ValueError("trainer, collector, and task update clocks disagree")
         if self.attempted_rollouts != (
@@ -1231,6 +1309,11 @@ class R3ATrainingSession:
                 "attempted_rollouts": self.attempted_rollouts,
                 "skipped_rollouts": self.skipped_rollouts,
                 "consecutive_skips": self.consecutive_skips,
+                "tail": (
+                    None
+                    if self.tail_controller is None
+                    else self.tail_controller.state_dict()
+                ),
             },
             "model": copy.deepcopy(self.model.state_dict()),
             "trainer": self.trainer.state_dict(),
@@ -1279,9 +1362,18 @@ class R3ATrainingSession:
             "attempted_rollouts",
             "skipped_rollouts",
             "consecutive_skips",
+            "tail",
         }:
             raise ValueError("training-session skip state is malformed")
-        skip_values = tuple(session_state.values())
+        skip_values = tuple(
+            session_state[name]
+            for name in (
+                "max_consecutive_skips",
+                "attempted_rollouts",
+                "skipped_rollouts",
+                "consecutive_skips",
+            )
+        )
         if (
             any(
                 isinstance(value, bool) or not isinstance(value, Integral) or value < 0
@@ -1294,7 +1386,7 @@ class R3ATrainingSession:
         ):
             raise ValueError("training-session skip state is malformed")
         try:
-            self.collector.adapter.reset()
+            self.collector.adapter.reset(disposable=True)
             adapter_checkpoint = unpack_adapter_checkpoint(
                 state["adapter"],
                 blobs,
@@ -1309,6 +1401,16 @@ class R3ATrainingSession:
             self.attempted_rollouts = int(session_state["attempted_rollouts"])
             self.skipped_rollouts = int(session_state["skipped_rollouts"])
             self.consecutive_skips = int(session_state["consecutive_skips"])
+            tail_state = session_state["tail"]
+            if self.tail_controller is None:
+                if tail_state is not None:
+                    raise ValueError(
+                        "checkpoint unexpectedly contains a score-only tail"
+                    )
+            else:
+                if not isinstance(tail_state, Mapping):
+                    raise ValueError("checkpoint score-only tail state is malformed")
+                self.tail_controller.load_state_dict(tail_state)
             self._validate_update_clocks()
             self._validate_pending_policy()
             restore_rng_state(state["rng"], self.numpy_generator)

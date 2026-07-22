@@ -138,18 +138,26 @@ class MatcherShotPolicy:
 
         if pairs:
             _, _, _, first, second = min(pairs, key=lambda value: value[:3])
-            target = max((first, second), key=lambda body: (float(body["y"]), -int(body["id"])))
+            target = max(
+                (first, second), key=lambda body: (float(body["y"]), -int(body["id"]))
+            )
         elif scripted:
-            target = max(scripted, key=lambda body: (float(body["y"]), -int(body["id"])))
+            target = max(
+                scripted, key=lambda body: (float(body["y"]), -int(body["id"]))
+            )
         else:
-            target = min(pieces, key=lambda body: (abs(float(body["x"]) - 304.0), int(body["id"])))
+            target = min(
+                pieces,
+                key=lambda body: (abs(float(body["x"]) - 304.0), int(body["id"])),
+            )
 
         target_x = min(640.0, max(0.0, float(target["x"])))
         projectiles = [
             body
             for body in observation.get("bodies", ())
             if body.get("kind") == "projectile"
-            and abs(float(body["x"]) - target_x) <= max(8.0, float(target["size"]) * 0.5)
+            and abs(float(body["x"]) - target_x)
+            <= max(8.0, float(target["size"]) * 0.5)
             and float(body["y"]) >= float(target["y"])
         ]
         if projectiles:
@@ -160,6 +168,108 @@ class MatcherShotPolicy:
             if distance_up > 150.0
             else Action.weak(target_x, self.cursor_y)
         )
+
+
+class LongWaitPolicy:
+    """Deterministic no-click diagnostic baseline."""
+
+    def __init__(self, wait_ticks: int = 100) -> None:
+        if type(wait_ticks) is not int or not 1 <= wait_ticks <= 0xFFFFFFFF:
+            raise ValueError("wait_ticks must fit the action uint32")
+        self.wait_ticks = wait_ticks
+
+    def reset(self, seed: int = 0) -> None:
+        if type(seed) is not int or not 0 <= seed <= _MASK64:
+            raise ValueError("policy seed must fit in uint64")
+
+    def act(self, observation: Mapping[str, Any]) -> Action:
+        del observation
+        return Action.wait(self.wait_ticks)
+
+
+class DirectMatcherPolicy(MatcherShotPolicy):
+    """Named direct-matcher baseline used by the frozen R3b protocol."""
+
+
+class SideEjectorPolicy:
+    """Strong-shot outer pieces to encourage safe lateral ejection."""
+
+    def __init__(self, *, shot_period_ticks: int = 3, cursor_y: float = 390.0) -> None:
+        if type(shot_period_ticks) is not int or shot_period_ticks < 1:
+            raise ValueError("shot_period_ticks must be positive")
+        if not 0.0 <= cursor_y <= 480.0:
+            raise ValueError("cursor_y must be in the 640x480 client")
+        self.shot_period_ticks = shot_period_ticks
+        self.cursor_y = float(cursor_y)
+
+    def reset(self, seed: int = 0) -> None:
+        if type(seed) is not int or not 0 <= seed <= _MASK64:
+            raise ValueError("policy seed must fit in uint64")
+
+    def act(self, observation: Mapping[str, Any]) -> Action:
+        tick = int(observation.get("tick", 0))
+        until_shot = (-tick) % self.shot_period_ticks
+        if until_shot:
+            return Action.wait(until_shot)
+        pieces = [
+            body
+            for body in observation.get("bodies", ())
+            if body.get("kind") == "piece"
+            and body.get("lifecycle")
+            in ("scripted_falling", "dynamic_fresh", "dynamic_rotten")
+        ]
+        if not pieces:
+            return Action.wait(self.shot_period_ticks)
+        target = max(
+            pieces,
+            key=lambda body: (
+                abs(float(body["x"]) - 304.0),
+                float(body["y"]),
+                -int(body["id"]),
+            ),
+        )
+        return Action.strong(min(640.0, max(0.0, float(target["x"]))), self.cursor_y)
+
+
+class ImminentRotHazardPolicy:
+    """Escalate to rapid strong shots when visible gauge safety is low."""
+
+    def __init__(
+        self,
+        *,
+        gauge_threshold: float = 0.35,
+        cursor_y: float = 390.0,
+    ) -> None:
+        if not 0.0 < gauge_threshold < 1.0:
+            raise ValueError("gauge_threshold must lie in (0, 1)")
+        if not 0.0 <= cursor_y <= 480.0:
+            raise ValueError("cursor_y must be in the 640x480 client")
+        self.gauge_threshold = float(gauge_threshold)
+        self.cursor_y = float(cursor_y)
+        self._normal = MatcherShotPolicy(shot_period_ticks=4, cursor_y=cursor_y)
+
+    def reset(self, seed: int = 0) -> None:
+        self._normal.reset(seed)
+
+    def act(self, observation: Mapping[str, Any]) -> Action:
+        gauge = int(observation.get("gauge", 0))
+        gauge_max = max(1, int(observation.get("gauge_max", 1)))
+        if gauge / gauge_max >= self.gauge_threshold:
+            return self._normal.act(observation)
+        pieces = [
+            body
+            for body in observation.get("bodies", ())
+            if body.get("kind") == "piece"
+            and body.get("lifecycle")
+            in ("scripted_falling", "dynamic_fresh", "dynamic_rotten")
+        ]
+        if not pieces:
+            return Action.wait(1)
+        target = max(
+            pieces,
+            key=lambda body: (float(body["y"]), -int(body["id"])),
+        )
+        return Action.strong(min(640.0, max(0.0, float(target["x"]))), self.cursor_y)
 
 
 ScriptedPolicy = MatcherShotPolicy

@@ -89,10 +89,13 @@ entropy, and action cadence. Reject a coefficient if it improves gauge
 retention but harms final raw score, produces high seed variance, destabilizes
 the critic, or learns conservative/stalling behavior.
 
-The checked config preregisters a planned final coefficient of exactly zero and
-a planned minimum of 400 score-only fine-tuning updates. Those are experiment
-gates for the forthcoming run builder; this PR records them but does not claim
-that an empirical sweep or 400-update run has already occurred.
+The checked R3b experiment config and run builder enforce a final coefficient
+of exactly zero and at least 400 score-only optimizer updates. A transactional
+drain lets all nonzero episodes finish without advancing the optimizer clock;
+each tail update then audits every lane coefficient and the exact equality of
+optimizer reward to scaled raw score before mutation. The implementation still
+does not claim that the full empirical sweep or a 400-update run has already
+occurred.
 
 ## Game-specific magnitude
 

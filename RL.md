@@ -3101,6 +3101,13 @@ Exit gate:
   bulk optimization nor supports a transfer claim; the first gated large
   full-game run occurs only after R4 in P2.
 
+Implementation status (2026-07-22): the R3b training infrastructure now binds
+transactional snapshot starts, paired arm-independent RNG streams, an immutable
+alpha/learning-rate protocol, exact score-only tail auditing, fixed-cell raw
+score evaluation, and the required scripted baselines. The checked experiment
+is deliberately labeled `design_only_no_empirical_results`: R3 is not accepted
+until the preregistered multi-seed runs and sealed confirmation actually pass.
+
 ### R4 — Original-game harness and fidelity
 
 Deliver:

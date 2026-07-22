@@ -1,0 +1,76 @@
+version = "r3b-completion-v1"
+status = "design_only_no_empirical_results"
+
+[grid]
+alpha_weight_ppm = [0, 100000, 250000, 500000]
+learning_rates = [0.00003, 0.0001, 0.0003]
+tie_break = ["higher_median_auc", "higher_final_mean_raw_score", "lower_learning_rate"]
+
+[schedule]
+total_updates = 1000
+shaped_updates = 600
+zero_tail_updates = 400
+ticks_per_update = 32768
+checkpoint_interval_updates = 50
+alpha_lifetime = "one_complete_episode"
+tail_transition = "drain_nonzero_episodes_before_zero_tail"
+optimizer_updates_while_draining = false
+optimizer_state_reset_at_tail = false
+optimizer_schedule = "linear_decay"
+final_learning_rate_fraction = 0.1
+zero_control = "same_conditioned_architecture_composer_and_schedule"
+
+[seeds]
+calibration_learner = [1103, 1129, 1151]
+validation_learner = [2203, 2221, 2237, 2267, 2281, 2309, 2333, 2357]
+test_learner = [3301, 3313, 3331, 3343, 3361, 3373, 3391, 3407, 3433, 3457, 3469, 3491]
+
+[calibration]
+budgets_updates = [100, 300]
+elimination_metric = "paired_tick_aligned_raw_score_auc"
+
+[validation]
+updates = 1000
+episodes_per_policy = 512
+selection_data = "fresh_unsealed_validation"
+
+[test]
+updates = 1000
+episodes_per_policy = 512
+sealed_until_one_candidate_is_selected = true
+reuse_after_rejection = false
+
+[statistics]
+auc = "trapezoid_on_exact_simulated_tick_grid_normalized_by_horizon"
+bootstrap_unit = "paired_learner_seed"
+bootstrap_samples = 4096
+bootstrap_seed = 2026072203
+confidence_level = 0.95
+relative_score_denominator_floor = 1.0
+
+[gates]
+minimum_relative_auc_gain = 0.05
+minimum_final_mean_retention = 0.95
+minimum_p10_retention = 0.90
+minimum_p10_absolute_delta_when_control_near_zero = 0.0
+minimum_trivial_baseline_margin = 0.0
+
+[baselines]
+required = [
+  "no_action_long_wait",
+  "seeded_legal_random",
+  "matcher_shot_policy",
+  "scripted_direct_matcher",
+  "scripted_side_ejector",
+  "scripted_imminent_rot_hazard",
+]
+optional = ["one_step_greedy"]
+minimum_episodes_per_policy = 512
+
+[failures]
+retain_every_arm_record = true
+missing_arm = "reject_phase"
+missing_seed = "reject_arm"
+pre_start_failure = "record_and_rank_ineligible"
+post_start_failure = "record_and_rank_ineligible"
+test_failure = "reject_candidate_without_testing_runner_up"

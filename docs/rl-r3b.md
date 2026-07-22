@@ -1,0 +1,210 @@
+# R3b completion: reproducible curriculum training and bounded evaluation
+
+R3b turns the R3a collector into a runnable, auditable experiment. It does not
+claim a successful training result, transfer to the original game, or readiness
+for bulk compute. The checked protocol is intentionally marked
+`design_only_no_empirical_results` until real artifacts satisfy every gate.
+
+## Scope and trust boundary
+
+R3b trains a privileged simulator policy. Its actor input is `teacher-v1`, so a
+model produced here is always `deployable=false`. Backend score, gauge, native
+snapshots, state hashes, and curriculum identities are training/evaluation
+signals only. R4 must still build the causal screen tracker, calibrate input and
+latency, and show that the deployment observation/action path matches the
+contract. R5 must train or distill the causal/noisy actor.
+
+The purpose of R3b is narrower: demonstrate that the learning system can use
+the curriculum correctly, choose reward and optimizer settings without
+cherry-picking, end with the real score objective, and beat strong scripted
+simulator baselines under a bounded preregistered test.
+
+## Transactional snapshot starts
+
+Each `SnapshotRecipe` binds:
+
+- train/validation/test split and scenario family;
+- environment pool and exact mechanics/config hashes;
+- reset seed and legal serialized semantic-action trace;
+- action schema, generator, and runtime identities;
+- expected tick, score, native state hash, and snapshot blob hash.
+
+Snapshot bytes are a cache, not provenance. `replay_snapshot_recipe` rebuilds a
+cache entry from its seed and legal macro trace and rejects terminal boundaries
+or any identity mismatch. `SnapshotBlobStore` owns and eagerly verifies exactly
+one blob for every recipe; incomplete, extra, corrupt, symlinked, or non-owned
+payloads fail closed.
+
+Assignments use a domain-separated counter keyed by assignment manifest,
+learner seed, lane, and lane-local episode ordinal. Reward schedules are
+deliberately excluded from that manifest, so alpha and learning-rate arms see
+identical starts. No mutable shared RNG makes assignments depend on lane
+completion order.
+
+Initialization is a two-phase transaction:
+
+1. reserve assignments without changing curriculum clocks;
+2. clone only the affected vector lanes;
+3. restore the selected snapshots concurrently;
+4. verify pool/config, tick, score, state hash, liveness, gauge, and encoding;
+5. expose the new observations while retaining lane backups;
+6. compose the terminal transition with the old episode label and alpha;
+7. commit the new assignments only after reward processing succeeds.
+
+Any failure restores the affected lanes and cancels the reservation. Failure to
+roll back poisons the vector so collection cannot continue from ambiguous
+state. Initial reset uses the same deferred commit: an encoder failure cannot
+consume the first assignment. Checkpoints bind active snapshot labels and the
+initializer manifest before native state mutation.
+
+The vector remains homogeneous by mechanics/config identity. Snapshot subsets
+can differ within that pool; mixing pools requires separate vectors.
+
+## Reward and optimizer protocol
+
+The permanent objective is held-out raw score. Candidate shaping coefficients
+are `0`, `0.1`, `0.25`, and `0.5`, represented as integer parts per million.
+The learning-rate candidates are `3e-5`, `1e-4`, and `3e-4`. Every arm uses the
+same conditioned-critic architecture, reward composer, curriculum assignment
+stream, model initialization, schedule shape, and tick budget. Only alpha and
+the declared initial learning rate may differ.
+
+The conditioned critic receives alpha; the actor and recurrent state do not.
+Alpha is frozen for a complete episode. For shaped candidates it remains fixed
+through update 599, changes to zero for newly initialized episodes at update
+600, and never becomes nonzero again. The score-only control uses the same code
+and architecture with alpha zero from update zero.
+
+At the tail boundary, existing shaped episodes are drained without PPO updates
+or optimizer-clock advancement. Once every lane is on a zero-alpha episode,
+exactly 400 optimizer updates remain. Before each one, the tail controller
+requires:
+
+- every recorded coefficient is exactly integer zero;
+- optimizer reward equals scaled raw score exactly on every row;
+- decision/transition counts and audit widths agree;
+- all reward values are finite;
+- optimizer and tail clocks are contiguous.
+
+The controller is checkpointable and hash-chained. Resume cannot skip the
+drain, reset its count, or turn a shaped collection into tail evidence. The PPO
+optimizer state is retained across the boundary; resetting it would confound
+the comparison.
+
+R3b advances the adapter checkpoint to v3 and the training-session payload to
+v2 because active snapshot labels and tail state are required identities. Older
+R3a checkpoints intentionally fail version validation rather than being loaded
+without evidence those fields never carried.
+
+## Reproducible trial construction
+
+`R3BRunBuilder` constructs a complete session from a frozen experiment plan,
+one-stage curriculum, verified snapshot store, exact runtime identity, model
+factory, vector factory, and collector/PPO configurations. It rejects adaptive
+promotion in the paired hyperparameter sweep because promotion would make arms
+see different training distributions.
+
+For each learner seed, `TrialSeedPlan` derives independent SHA-256 streams for:
+
+- model initialization;
+- policy sampling;
+- PPO minibatch ordering;
+- curriculum assignments;
+- session NumPy state;
+- evaluation.
+
+The derivation is arm-independent. Selection rejects results when paired arms
+disagree on initial model, assignment, or seed-plan identities. A trial
+manifest additionally binds the plan, curriculum, snapshot store, runtime,
+reward, collector, PPO, lane count, and pre-transfer status. Checkpoint callers
+must include this manifest identity in their runtime identity map.
+
+## Frozen selection design
+
+The canonical plan is
+`configs/rl/experiments/r3b-completion-v1.toml`. Unknown keys or changes to its
+grid, schedules, seed counts, tail length, baselines, statistics, or failure
+rules are rejected.
+
+Calibration runs all 12 alpha/LR arms on three paired learner seeds at bounded
+100- and 300-update rungs. It selects one learning rate per alpha by median
+tick-aligned raw-score AUC, then final raw score, then the lower learning rate.
+Every arm retains a record; missing arms reject the phase and failures remain
+explicit but ineligible.
+
+Fresh validation uses eight disjoint learner seeds and full 1,000-update runs.
+It compares the four calibrated alpha arms and may nominate at most one shaped
+candidate. Nomination requires at least 5% mean raw-score AUC gain over the
+score-only control and at least 95% final-mean retention. Validation selects;
+it does not confirm.
+
+The test set stays sealed until that single candidate is fixed. Test uses 12
+new paired learner seeds, 512 fixed evaluation episodes per policy, and a
+one-sided paired bootstrap with the learner seed as the resampling unit. A
+candidate passes only if all lower confidence bounds satisfy:
+
+- raw-score AUC gain greater than 5%;
+- final mean raw-score retention at least 95%;
+- p10 raw-score retention at least 90%, or nonnegative absolute change when
+  the control p10 is near zero;
+- final raw score strictly above the strongest trivial/scripted baseline;
+- all engineering and baseline audits pass.
+
+A failed sealed test rejects the candidate. The runner-up is not tried on the
+same test set, and the test set cannot be reused after rejection.
+
+## Evaluation and baselines
+
+Evaluation cells are fixed by suite identity, split snapshot ID, repetition,
+policy seed, runtime identity, assignment identity, and decision/tick bounds.
+Raw score is always `final_score - initial_score`, and accumulated environment
+reward must equal that delta. Gauge, invalid actions, terminal status, and
+elapsed ticks are diagnostics, never selection rewards.
+
+The deployment-style recurrent evaluator uses deterministic semantic argmax,
+masked wait choices, coordinate means, recurrent state, and a zero critic-only
+alpha condition. Scripted policies are converted through the same semantic
+press/release macros. Required baselines are:
+
+- no-action long wait;
+- seeded legal random;
+- existing matcher-shot heuristic;
+- direct matcher;
+- side ejector;
+- imminent-rot hazard policy.
+
+All required baselines need at least 512 fixed episodes, zero invalid actions,
+deterministic replay, exact raw-score accounting, and portable/exact parity.
+`one_step_greedy` is optional and cannot substitute for a missing required
+baseline.
+
+## Failure and evidence policy
+
+The experiment fails closed. A missing arm rejects its phase. A missing learner
+seed rejects that arm. Pre-start and post-start failures remain retained and
+rank-ineligible. Nonfinite metrics, interpolated learning curves, identity
+mismatches, incomplete baselines, malformed tail audits, or checkpoint drift
+cannot be ignored.
+
+No result is an R3b acceptance result until the complete calibration,
+validation, sealed test, exact-resume, snapshot replay, raw-score, and baseline
+artifacts exist and the canonical confirmation function returns `accepted`.
+Unit and integration tests establish implementation behavior only; they are not
+empirical learning evidence.
+
+## Running and next gate
+
+The checked plan can be loaded with:
+
+```python
+from irisu_rl.r3b_experiments import load_plan
+
+plan = load_plan("configs/rl/experiments/r3b-completion-v1.toml")
+```
+
+The next operational work is to generate the versioned full-game snapshot
+library, run the bounded calibration and validation jobs, inspect retained
+failure/diagnostic artifacts, freeze one candidate, and only then unlock the
+sealed test. In parallel, R4 must complete the real-game causal observation and
+input calibration path. A successful R3b simulator result does not remove that
+transfer gate.

@@ -95,12 +95,12 @@ learner seed, lane, and lane-local episode ordinal. Reservations are
 transactional, so failed initialization does not consume an assignment. Lane
 completion order and batching do not share a mutable RNG stream.
 
-The current adapter does **not** consume those recipe reservations. Its
-homogeneous task contract changes only action masks and episode-frozen reward
-weights after ordinary seeded autoresets. Consequently, snapshot IDs,
-lane-episode ordinals, and `prior_stage_mix_ppm` are library/coordinator
-contracts awaiting the transactional initializer; they are not claimed as
-executed curriculum evidence in R3a.
+R3a originally stopped at recipe reservations. R3b now supplies the production
+initializer: it restores verified snapshot bytes into exactly the completed
+lane subset and commits the corresponding assignment only after restore,
+identity checks, observation encoding, gauge validation, and reward processing
+all succeed. This is an R3b extension, not retroactive evidence for historical
+R3a runs.
 
 Promotion requires declared validation counts and consecutive passes. Every
 unlocked prior stage is checked against its regression floor. Failure enters
@@ -156,17 +156,12 @@ collected directly outside its collect/update transaction.
 
 ## Deliberate topology constraint
 
-`PaddedVectorEnv` is constructed with one immutable mechanics configuration and
-the current `MacroVectorAdapter` autoresets completed lanes by seed. R3a does
-not claim that it can inject arbitrary snapshot/config starts into individual
-lanes. `CurriculumTaskContract` therefore rejects stages spanning multiple
-`environment_pool` values.
-
-The next snapshot-initializer change must add transactional subset restore and
-make recipe assignment part of adapter autoreset bookkeeping. Until that gate
-lands, use one homogeneous collector pool per mechanics/config hash. This keeps
-the implemented training path honest and prevents a curriculum manifest from
-claiming starts that the simulator did not actually execute.
+`PaddedVectorEnv` is constructed with one immutable mechanics configuration.
+R3b can inject arbitrary verified snapshots into lane subsets, but one vector
+still cannot mix mechanics/configuration identities. The snapshot initializer
+therefore requires one homogeneous `environment_pool` and config hash. A run
+that needs multiple pools must use separate vectors and an explicit sampler;
+silently mixing them remains forbidden.
 
 ## Configuration and acceptance
 
