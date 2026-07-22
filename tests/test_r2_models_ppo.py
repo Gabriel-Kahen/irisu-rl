@@ -158,6 +158,7 @@ class PPOTrainerTests(unittest.TestCase):
             valid.clone(),
             torch.ones((time, lanes, 3), dtype=torch.bool),
             torch.ones((time, lanes, 100), dtype=torch.bool),
+            torch.zeros((time, lanes, 0), dtype=torch.float32),
         )
         return model, batch
 

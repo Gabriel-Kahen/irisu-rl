@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from numbers import Integral
 from typing import Any, Callable, Protocol, Sequence
 
 import numpy as np
@@ -46,7 +47,7 @@ class OwnedDiagnostics:
     events: tuple[OwnedEvent, ...]
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, kw_only=True)
 class MacroTransition:
     lane_id: int
     episode_id: int
@@ -55,6 +56,9 @@ class MacroTransition:
     action: SemanticAction
     primitive_trace: tuple[str, ...]
     raw_reward: int
+    start_gauge: int
+    end_gauge: int
+    gauge_max: int
     elapsed_ticks: int
     start_tick: int
     end_tick: int
@@ -118,6 +122,8 @@ class MacroVectorAdapter:
         self._schema: TensorSchema | None = None
         self._raw_ticks = [0] * self.num_envs
         self._raw_scores = [0] * self.num_envs
+        self._raw_gauges = [0] * self.num_envs
+        self._raw_gauge_maxes = [0] * self.num_envs
         self._seeds = [0] * self.num_envs
         self._episode_ids = [0] * self.num_envs
         self._mutation_generation = 0
@@ -211,6 +217,17 @@ class MacroVectorAdapter:
             "vector coordinator is poisoned after a possibly partial backend operation"
         ) from exc
 
+    @staticmethod
+    def _gauge_fields(observation: object) -> tuple[int, int]:
+        gauge = getattr(observation, "gauge", None)
+        gauge_max = getattr(observation, "gauge_max", None)
+        if any(
+            isinstance(value, bool) or not isinstance(value, Integral)
+            for value in (gauge, gauge_max)
+        ):
+            raise TypeError("backend gauge fields must be canonical integers")
+        return int(gauge), int(gauge_max)
+
     def reset(self) -> EncodedBatch:
         if self._poisoned:
             raise RuntimeError("poisoned adapter must be recreated")
@@ -226,14 +243,23 @@ class MacroVectorAdapter:
                 for info, seed in zip(infos, reservation.seeds)
             ):
                 raise RuntimeError("backend reset did not honor explicit seeds")
+            raw_ticks = [int(getattr(value, "tick", 0)) for value in observations]
+            raw_scores = [int(getattr(value, "score", 0)) for value in observations]
+            gauge_fields = [self._gauge_fields(value) for value in observations]
+            raw_gauges = [value[0] for value in gauge_fields]
+            raw_gauge_maxes = [value[1] for value in gauge_fields]
+            if any(value <= 0 for value in raw_gauge_maxes):
+                raise RuntimeError("backend reset returned a nonpositive gauge maximum")
         except BaseException as exc:
             self._fail_closed(exc)
         self.seed_allocator.commit(reservation)
         if self._schema is None:
             self._schema = encoded.schema
         self._current = encoded
-        self._raw_ticks = [int(getattr(value, "tick", 0)) for value in observations]
-        self._raw_scores = [int(getattr(value, "score", 0)) for value in observations]
+        self._raw_ticks = raw_ticks
+        self._raw_scores = raw_scores
+        self._raw_gauges = raw_gauges
+        self._raw_gauge_maxes = raw_gauge_maxes
         self._seeds = list(reservation.seeds)
         self._episode_ids = [0] * self.num_envs
         self._initialized = True
@@ -335,6 +361,13 @@ class MacroVectorAdapter:
             restored_scores = tuple(
                 int(getattr(value, "score", 0)) for value in observations
             )
+            restored_gauge_fields = tuple(
+                self._gauge_fields(value) for value in observations
+            )
+            restored_gauges = tuple(value[0] for value in restored_gauge_fields)
+            restored_gauge_maxes = tuple(
+                value[1] for value in restored_gauge_fields
+            )
             if restored_ticks != checkpoint.raw_ticks:
                 raise ValueError(
                     "restored raw ticks do not match checkpoint bookkeeping"
@@ -343,6 +376,8 @@ class MacroVectorAdapter:
                 raise ValueError(
                     "restored raw scores do not match checkpoint bookkeeping"
                 )
+            if any(value <= 0 for value in restored_gauge_maxes):
+                raise ValueError("restored gauge maximum must be positive")
             encoded = self._encode(
                 observations, lane_ids=range(self.num_envs), phase="restore"
             )
@@ -369,6 +404,8 @@ class MacroVectorAdapter:
         self._current = encoded
         self._raw_ticks = list(checkpoint.raw_ticks)
         self._raw_scores = list(checkpoint.raw_scores)
+        self._raw_gauges = list(restored_gauges)
+        self._raw_gauge_maxes = list(restored_gauge_maxes)
         self._seeds = list(checkpoint.seeds)
         self._episode_ids = list(checkpoint.episode_ids)
         self._initialized = True
@@ -389,6 +426,8 @@ class MacroVectorAdapter:
         )
         start_ticks = tuple(self._raw_ticks)
         start_scores = tuple(self._raw_scores)
+        start_gauges = tuple(self._raw_gauges)
+        start_gauge_maxes = tuple(self._raw_gauge_maxes)
         primitive_actions = [self.action_spec.press(action) for action in validated]
         try:
             observations, rewards, terminated, truncated, infos = self.env.step(
@@ -501,8 +540,14 @@ class MacroVectorAdapter:
                 "validated semantic action produced a native invalid action"
             )
 
-        end_ticks = [int(getattr(value, "tick", 0)) for value in final_raw]
-        end_scores = [int(getattr(value, "score", 0)) for value in final_raw]
+        try:
+            end_ticks = [int(getattr(value, "tick", 0)) for value in final_raw]
+            end_scores = [int(getattr(value, "score", 0)) for value in final_raw]
+            end_gauge_fields = [self._gauge_fields(value) for value in final_raw]
+            end_gauges = [value[0] for value in end_gauge_fields]
+            end_gauge_maxes = [value[1] for value in end_gauge_fields]
+        except BaseException as exc:
+            self._fail_closed(exc)
         elapsed = [end - start for start, end in zip(start_ticks, end_ticks)]
         if any(value <= 0 for value in elapsed):
             self._poisoned = True
@@ -515,6 +560,12 @@ class MacroVectorAdapter:
         ):
             self._poisoned = True
             raise RuntimeError("macro reward does not equal raw score delta")
+        if any(value <= 0 for value in end_gauge_maxes) or any(
+            start != end
+            for start, end in zip(start_gauge_maxes, end_gauge_maxes)
+        ):
+            self._poisoned = True
+            raise RuntimeError("gauge maximum changed within an episode")
 
         done_lanes = [
             index
@@ -525,6 +576,8 @@ class MacroVectorAdapter:
         new_seed_by_lane: dict[int, int] = {}
         reset_tick_by_lane: dict[int, int] = {}
         reset_score_by_lane: dict[int, int] = {}
+        reset_gauge_by_lane: dict[int, int] = {}
+        reset_gauge_max_by_lane: dict[int, int] = {}
         if done_lanes:
             reservation = self.seed_allocator.reserve(len(done_lanes))
             try:
@@ -535,18 +588,27 @@ class MacroVectorAdapter:
                 reset_encoded = self._encode(
                     reset_observations, lane_ids=done_lanes, phase="reset"
                 )
+                for offset, lane in enumerate(done_lanes):
+                    reset_encoded_by_lane[lane] = reset_encoded.row(offset)
+                    new_seed_by_lane[lane] = reservation.seeds[offset]
+                    reset_tick_by_lane[lane] = int(
+                        getattr(reset_observations[offset], "tick", 0)
+                    )
+                    reset_score_by_lane[lane] = int(
+                        getattr(reset_observations[offset], "score", 0)
+                    )
+                    reset_gauge, reset_gauge_max = self._gauge_fields(
+                        reset_observations[offset]
+                    )
+                    reset_gauge_by_lane[lane] = reset_gauge
+                    reset_gauge_max_by_lane[lane] = reset_gauge_max
+                    if reset_gauge_max_by_lane[lane] <= 0:
+                        raise RuntimeError(
+                            "backend reset returned a nonpositive gauge maximum"
+                        )
             except BaseException as exc:
                 self._fail_closed(exc)
             self.seed_allocator.commit(reservation)
-            for offset, lane in enumerate(done_lanes):
-                reset_encoded_by_lane[lane] = reset_encoded.row(offset)
-                new_seed_by_lane[lane] = reservation.seeds[offset]
-                reset_tick_by_lane[lane] = int(
-                    getattr(reset_observations[offset], "tick", 0)
-                )
-                reset_score_by_lane[lane] = int(
-                    getattr(reset_observations[offset], "score", 0)
-                )
 
         try:
             transitions: list[MacroTransition] = []
@@ -568,6 +630,9 @@ class MacroVectorAdapter:
                         action=action,
                         primitive_trace=tuple(traces[lane]),
                         raw_reward=total_rewards[lane],
+                        start_gauge=start_gauges[lane],
+                        end_gauge=end_gauges[lane],
+                        gauge_max=start_gauge_maxes[lane],
                         elapsed_ticks=elapsed[lane],
                         start_tick=start_ticks[lane],
                         end_tick=end_ticks[lane],
@@ -607,9 +672,13 @@ class MacroVectorAdapter:
                     self._episode_ids[lane] += 1
                     self._raw_ticks[lane] = reset_tick_by_lane[lane]
                     self._raw_scores[lane] = reset_score_by_lane[lane]
+                    self._raw_gauges[lane] = reset_gauge_by_lane[lane]
+                    self._raw_gauge_maxes[lane] = reset_gauge_max_by_lane[lane]
                 else:
                     self._raw_ticks[lane] = end_ticks[lane]
                     self._raw_scores[lane] = end_scores[lane]
+                    self._raw_gauges[lane] = end_gauges[lane]
+                    self._raw_gauge_maxes[lane] = end_gauge_maxes[lane]
         except BaseException as exc:
             self._fail_closed(exc)
         self._mutation_generation += 1

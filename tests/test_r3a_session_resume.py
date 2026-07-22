@@ -29,7 +29,12 @@ from irisu_rl.curriculum import (
 from irisu_rl.encoding import TeacherStateEncoder
 from irisu_rl.models import RecurrentActorCritic, RecurrentModelConfig
 from irisu_rl.ppo import PPOConfig, PPOTrainer
-from irisu_rl.rewards import RewardComposer, RewardKnot, RewardSchedule
+from irisu_rl.rewards import (
+    LinearGaugePotential,
+    RewardComposer,
+    RewardKnot,
+    RewardSchedule,
+)
 from irisu_rl.schema import TEACHER_V1
 from irisu_rl.vector_adapter import MacroVectorAdapter
 
@@ -40,7 +45,7 @@ EXACT = ROOT / "build-physics-integration-exact-multiworld-2" / "irisu-exact-wor
 
 
 def build_session(
-    *, exact: bool, construction_seed: int
+    *, exact: bool, construction_seed: int, shaping_weight_ppm: int = 0
 ) -> tuple[R3ATrainingSession, PaddedVectorEnv]:
     torch.manual_seed(construction_seed)
     vector = PaddedVectorEnv(
@@ -52,7 +57,14 @@ def build_session(
     )
     model = RecurrentActorCritic(
         TEACHER_V1,
-        config=RecurrentModelConfig(8, 8, 12, 12, 1),
+        config=RecurrentModelConfig(
+            8,
+            8,
+            12,
+            12,
+            1,
+            critic_condition_features=1 if shaping_weight_ppm else 0,
+        ),
     )
     adapter = MacroVectorAdapter(vector, encoder=TeacherStateEncoder())
     action_spec = ActionSpec()
@@ -99,14 +111,24 @@ def build_session(
                 1,
                 1,
                 100,
-                RewardSchedule("score-only-v1", (RewardKnot(0, 0),)),
+                RewardSchedule(
+                    "gauge-fixed-v1" if shaping_weight_ppm else "score-only-v1",
+                    (RewardKnot(0, shaping_weight_ppm),),
+                ),
             ),
         ),
         0xEAA1,
     )
     coordinator = CurriculumCoordinator(curriculum, 2, learner_seed=83)
     task = CurriculumTaskContract(
-        coordinator, RewardComposer(reward_scale=100.0), capture_events=False
+        coordinator,
+        RewardComposer(
+            reward_scale=100.0,
+            shaping_spec=(
+                LinearGaugePotential() if shaping_weight_ppm else None
+            ),
+        ),
+        capture_events=False,
     )
     collector = RecurrentCollector(
         model,
@@ -133,14 +155,17 @@ def build_session(
 class R3ASessionResumeMixin:
     exact = False
 
-    def assert_resume(self) -> None:
+    def assert_resume(self, *, shaping_weight_ppm: int = 0) -> None:
         identity = {
             "test": "r3a-full-resume",
             "backend": "exact" if self.exact else "portable",
+            "shaping_weight_ppm": shaping_weight_ppm,
         }
         with tempfile.TemporaryDirectory() as directory:
             source, source_vector = build_session(
-                exact=self.exact, construction_seed=101
+                exact=self.exact,
+                construction_seed=101,
+                shaping_weight_ppm=shaping_weight_ppm,
             )
             try:
                 source.initialize()
@@ -158,13 +183,22 @@ class R3ASessionResumeMixin:
                 source_vector.close()
 
             restored, restored_vector = build_session(
-                exact=self.exact, construction_seed=999
+                exact=self.exact,
+                construction_seed=999,
+                shaping_weight_ppm=shaping_weight_ppm,
             )
             try:
                 restored.restore(directory, identity=identity)
                 actual = restored.run_update()
                 actual_hashes = restored_vector.state_hash()
                 self.assertEqual(actual.collection, expected.collection)
+                if shaping_weight_ppm:
+                    self.assertTrue(
+                        any(
+                            any(value != 0 for value in row.shaping_rewards)
+                            for row in actual.collection.decisions
+                        )
+                    )
                 self.assertEqual(actual.optimizer, expected.optimizer)
                 self.assertEqual(actual_hashes, expected_hashes)
                 self.assertEqual(
@@ -286,6 +320,9 @@ class R3APortableSessionResumeTests(R3ASessionResumeMixin, unittest.TestCase):
     def test_next_rollout_gae_and_update_are_exact_after_resume(self) -> None:
         self.assert_resume()
 
+    def test_nonzero_gauge_shaping_is_exact_after_resume(self) -> None:
+        self.assert_resume(shaping_weight_ppm=250_000)
+
     def test_validation_is_bound_to_loaded_model(self) -> None:
         self.assert_validation_binds_loaded_model()
 
@@ -299,6 +336,9 @@ class R3AExactSessionResumeTests(R3ASessionResumeMixin, unittest.TestCase):
 
     def test_next_rollout_gae_and_update_are_exact_after_resume(self) -> None:
         self.assert_resume()
+
+    def test_nonzero_gauge_shaping_is_exact_after_resume(self) -> None:
+        self.assert_resume(shaping_weight_ppm=250_000)
 
     def test_validation_is_bound_to_loaded_model(self) -> None:
         self.assert_validation_binds_loaded_model()

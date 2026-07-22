@@ -16,6 +16,7 @@ import torch
 
 from .models import RecurrentActorCritic
 from .ppo import PPOConfig
+from .rewards import RewardComposer
 
 
 def _is_sha256(value: object) -> bool:
@@ -95,6 +96,7 @@ def runtime_manifest(
     code_revision: str,
     observation_provenance: str,
     simulator: SimulatorIdentity,
+    reward_composer: RewardComposer | None = None,
     extra: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
     """Build the immutable identity embedded in every checkpoint and report."""
@@ -148,11 +150,29 @@ def runtime_manifest(
         "deployable": False,
         "transfer_gate": "R4 tracker/input calibration pending",
     }
+    if reward_composer is not None:
+        if not isinstance(reward_composer, RewardComposer):
+            raise TypeError("reward_composer must be a RewardComposer")
+        reward_composer.validate_identity()
+        if reward_composer.reward_scale != float(reward_scale):
+            raise ValueError("runtime and composer reward scales disagree")
+        if (
+            reward_composer.shaping_gamma_tick is not None
+            and reward_composer.shaping_gamma_tick != gamma_tick
+        ):
+            raise ValueError("runtime and shaping gamma_tick disagree")
+        if (
+            reward_composer.critic_condition_features
+            != model.config.critic_condition_features
+        ):
+            raise ValueError("runtime reward and model critic conditions disagree")
+        manifest["reward"]["composer"] = reward_composer.manifest()
     if extra:
         overlap = set(manifest) & set(extra)
         if overlap:
             raise ValueError(
-                f"extra manifest fields collide with canonical fields: {sorted(overlap)}"
+                "extra manifest fields collide with canonical fields: "
+                f"{sorted(overlap)}"
             )
         manifest.update(extra)
     manifest["manifest_sha256"] = canonical_sha256(manifest)

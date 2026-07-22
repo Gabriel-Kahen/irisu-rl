@@ -74,10 +74,13 @@ class CollectorConfig:
         return asdict(self)
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, kw_only=True)
 class DecisionAudit:
     actions: tuple[SemanticAction, ...]
     raw_rewards: tuple[int, ...]
+    start_gauges: tuple[int, ...]
+    end_gauges: tuple[int, ...]
+    gauge_maxes: tuple[int, ...]
     scaled_raw_rewards: tuple[float, ...]
     shaping_rewards: tuple[float, ...]
     shaping_weight_ppm: tuple[int, ...]
@@ -92,7 +95,7 @@ class DecisionAudit:
     config_hashes: tuple[int, ...]
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, kw_only=True)
 class CollectionAudit:
     decision_rows: int
     transitions: int
@@ -101,6 +104,8 @@ class CollectionAudit:
     tick_target_overshoot: int
     raw_reward: int
     optimizer_reward: float
+    reward_sha256: str
+    shaping_id: str
     completed_episodes: int
     invalid_actions: int
     decisions: tuple[DecisionAudit, ...]
@@ -158,6 +163,8 @@ class TaskContract(Protocol):
 
     def action_masks(self, action_spec: ActionSpec) -> tuple[Tensor, Tensor]: ...
 
+    def critic_condition(self) -> Tensor: ...
+
     def rewards(self, transitions: Sequence[MacroTransition]) -> RewardBatch: ...
 
     def after_transitions(self, transitions: Sequence[MacroTransition]) -> None: ...
@@ -201,6 +208,9 @@ class ScoreTaskContract:
             torch.ones((self.lanes, 3), dtype=torch.bool),
             torch.ones((self.lanes, len(action_spec.wait_choices)), dtype=torch.bool),
         )
+
+    def critic_condition(self) -> Tensor:
+        return torch.zeros((self.lanes, 0), dtype=torch.float32)
 
     def rewards(self, transitions: Sequence[MacroTransition]) -> RewardBatch:
         return self.composer.compose(
@@ -303,6 +313,19 @@ class CurriculumTaskContract:
 
     def action_masks(self, action_spec: ActionSpec) -> tuple[Tensor, Tensor]:
         return self.coordinator.action_masks(action_spec)
+
+    def critic_condition(self) -> Tensor:
+        width = self.composer.critic_condition_features
+        if width == 0:
+            return torch.zeros((self.coordinator.lanes, 0), dtype=torch.float32)
+        if width != 1:
+            raise ValueError("unsupported reward critic-condition width")
+        return (
+            self.coordinator.shaping_weights_ppm()
+            .to(torch.float32)
+            .div(1_000_000)
+            .unsqueeze(-1)
+        )
 
     def rewards(self, transitions: Sequence[MacroTransition]) -> RewardBatch:
         if any(
@@ -468,6 +491,7 @@ def _batch_to_device(
         batch.train_mask.to(device),
         batch.kind_mask.to(device),
         batch.wait_mask.to(device),
+        batch.critic_condition.to(device),
     )
 
 
@@ -493,12 +517,25 @@ class RecurrentCollector:
                 "task event-capture declaration disagrees with the actual adapter"
             )
         composer = getattr(task, "composer", None)
+        if not isinstance(composer, RewardComposer):
+            raise TypeError("task must expose a RewardComposer")
+        composer.validate_identity()
         if getattr(composer, "requires_events", False) and not adapter.capture_events:
             raise ValueError("event-dependent reward requires adapter event capture")
+        resolved_config = config or CollectorConfig()
+        if (
+            composer.shaping_gamma_tick is not None
+            and composer.shaping_gamma_tick != resolved_config.gamma_tick
+        ):
+            raise ValueError("reward and collector gamma_tick disagree")
+        condition_width = getattr(composer, "critic_condition_features", 0)
+        if condition_width != model.config.critic_condition_features:
+            raise ValueError("reward and model critic-condition width disagree")
         self.model = model
         self.adapter = adapter
         self.task = task
-        self.config = config or CollectorConfig()
+        self._composer = composer
+        self.config = resolved_config
         self.lanes = adapter.num_envs
         parameter = next(model.parameters())
         self.device = parameter.device
@@ -508,6 +545,7 @@ class RecurrentCollector:
         self._collecting = False
         self._recurrent_state: Tensor | None = None
         self._reset_before: Tensor | None = None
+        self._critic_condition: Tensor | None = None
         self.completed_updates = 0
         self.decision_rows = 0
         self.simulated_ticks = 0
@@ -520,22 +558,40 @@ class RecurrentCollector:
     def initialized(self) -> bool:
         return self._initialized
 
+    def _task_critic_condition(self) -> Tensor:
+        condition = self.task.critic_condition()
+        expected = (self.lanes, self.model.config.critic_condition_features)
+        if (
+            not isinstance(condition, Tensor)
+            or condition.shape != expected
+            or condition.dtype != torch.float32
+            or condition.device.type != "cpu"
+            or condition.requires_grad
+            or not torch.isfinite(condition).all()
+        ):
+            raise ValueError("task critic condition is malformed")
+        return condition
+
     def initialize(self) -> EncodedBatch:
         if self._poisoned:
             raise RuntimeError("poisoned collector must be recreated")
         if self._initialized:
             raise RuntimeError("collector is already initialized")
         try:
+            critic_condition = self._task_critic_condition()
             observation = self.adapter.reset()
             if observation.schema != self.model.schema:
                 raise ValueError("adapter observation schema does not match the model")
+            recurrent_state = self.model.initial_state(self.lanes).detach()
+            reset_before = torch.ones(
+                self.lanes, dtype=torch.bool, device=self.device
+            )
         except BaseException:
             self._poisoned = True
             raise
-        self._recurrent_state = self.model.initial_state(self.lanes).detach()
-        self._reset_before = torch.ones(
-            self.lanes, dtype=torch.bool, device=self.device
-        )
+        self._recurrent_state = recurrent_state
+        self._reset_before = reset_before
+        self._critic_condition = critic_condition.detach().clone()
         self._initialized = True
         return observation
 
@@ -558,6 +614,7 @@ class RecurrentCollector:
         prior_mode = self.model.training
         self.model.eval()
         observation = self.adapter.current_observation
+        composer = self._composer
         buffer = RecurrentRolloutBuffer(
             self.config.max_decisions,
             self.lanes,
@@ -565,6 +622,7 @@ class RecurrentCollector:
             incoming,
             action_spec=self.model.action_spec,
             reward_scale=1.0,
+            critic_condition_features=self.model.config.critic_condition_features,
         )
         bootstrap_rows: list[Tensor] = []
         pending_live_bootstrap: Tensor | None = None
@@ -575,17 +633,29 @@ class RecurrentCollector:
         completed_episodes = 0
         try:
             for _ in range(self.config.max_decisions):
+                composer.validate_identity()
                 kind_mask, wait_mask = self.task.action_masks(self.model.action_spec)
+                critic_condition = self._task_critic_condition()
                 expected_wait = (self.lanes, len(self.model.action_spec.wait_choices))
                 if kind_mask.shape != (self.lanes, 3) or kind_mask.dtype != torch.bool:
                     raise ValueError("task kind mask must be boolean [B, 3]")
                 if wait_mask.shape != expected_wait or wait_mask.dtype != torch.bool:
                     raise ValueError("task wait mask does not match the action schema")
+                if self._critic_condition is not None:
+                    continuing = ~reset_before.detach().cpu()
+                    if torch.any(continuing) and not torch.equal(
+                        critic_condition[continuing],
+                        self._critic_condition[continuing],
+                    ):
+                        raise ValueError(
+                            "critic condition changed inside a continuing episode"
+                        )
                 global_features, body_features, body_mask = _encoded_torch(
                     observation, self.device
                 )
                 device_kind = kind_mask.to(self.device).unsqueeze(0)
                 device_wait = wait_mask.to(self.device).unsqueeze(0)
+                device_condition = critic_condition.to(self.device).unsqueeze(0)
                 with torch.no_grad():
                     output = self.model(
                         global_features,
@@ -593,6 +663,11 @@ class RecurrentCollector:
                         body_mask,
                         incoming,
                         reset_before=reset_before.unsqueeze(0),
+                        **(
+                            {"critic_condition": device_condition}
+                            if self.model.config.critic_condition_features
+                            else {}
+                        ),
                     )
                     distribution = TorchConditionalActionDistribution(
                         output.kind_logits,
@@ -626,6 +701,16 @@ class RecurrentCollector:
                 transitions = self.adapter.step(semantic)
                 rewards = self.task.rewards(transitions)
                 rewards.validate(self.lanes, reward_scale=self._reward_scale())
+                if self.model.config.critic_condition_features:
+                    expected_condition = (
+                        rewards.shaping_weight_ppm.to(torch.float32)
+                        .div(1_000_000)
+                        .unsqueeze(-1)
+                    )
+                    if not torch.equal(critic_condition, expected_condition):
+                        raise ValueError(
+                            "critic condition disagrees with composed reward weight"
+                        )
 
                 bootstrap_values = torch.zeros(self.lanes, dtype=torch.float32)
                 bootstrap_mask_values = torch.tensor(
@@ -640,6 +725,7 @@ class RecurrentCollector:
                     retained_final,
                     output.recurrent_state,
                     bootstrap_values,
+                    device_condition[0],
                 )
                 buffer.append(
                     observation,
@@ -651,6 +737,7 @@ class RecurrentCollector:
                         components.wait[0].detach(),
                         components.coordinates[0].detach(),
                     ),
+                    critic_condition=device_condition[0].detach(),
                     reset_before=reset_before.detach(),
                     optimizer_reward=rewards.optimizer_reward,
                     kind_mask=kind_mask,
@@ -663,6 +750,7 @@ class RecurrentCollector:
                     device=self.device,
                 )
                 self.task.after_transitions(transitions)
+                self._critic_condition = critic_condition.detach().cpu().clone()
                 elapsed = tuple(value.elapsed_ticks for value in transitions)
                 row_ticks = sum(elapsed)
                 collected_ticks += row_ticks
@@ -671,28 +759,39 @@ class RecurrentCollector:
                 completed_episodes += int(done.sum())
                 audits.append(
                     DecisionAudit(
-                        semantic,
-                        tuple(int(value) for value in rewards.raw_reward.tolist()),
-                        tuple(
+                        actions=semantic,
+                        raw_rewards=tuple(
+                            int(value) for value in rewards.raw_reward.tolist()
+                        ),
+                        start_gauges=tuple(
+                            value.start_gauge for value in transitions
+                        ),
+                        end_gauges=tuple(value.end_gauge for value in transitions),
+                        gauge_maxes=tuple(value.gauge_max for value in transitions),
+                        scaled_raw_rewards=tuple(
                             float(value) for value in rewards.scaled_raw_reward.tolist()
                         ),
-                        tuple(
+                        shaping_rewards=tuple(
                             float(value) for value in rewards.shaping_reward.tolist()
                         ),
-                        tuple(
+                        shaping_weight_ppm=tuple(
                             int(value) for value in rewards.shaping_weight_ppm.tolist()
                         ),
-                        tuple(
+                        optimizer_rewards=tuple(
                             float(value) for value in rewards.optimizer_reward.tolist()
                         ),
-                        elapsed,
-                        tuple(value.terminated for value in transitions),
-                        tuple(value.truncated for value in transitions),
-                        tuple(value.bootstrap_mask for value in transitions),
-                        tuple(value.trace_mask for value in transitions),
-                        tuple(value.episode_id for value in transitions),
-                        tuple(value.seed for value in transitions),
-                        tuple(value.diagnostics.config_hash for value in transitions),
+                        elapsed_ticks=elapsed,
+                        terminated=tuple(value.terminated for value in transitions),
+                        truncated=tuple(value.truncated for value in transitions),
+                        bootstrap_mask=tuple(
+                            value.bootstrap_mask for value in transitions
+                        ),
+                        trace_mask=tuple(value.trace_mask for value in transitions),
+                        episode_ids=tuple(value.episode_id for value in transitions),
+                        seeds=tuple(value.seed for value in transitions),
+                        config_hashes=tuple(
+                            value.diagnostics.config_hash for value in transitions
+                        ),
                     )
                 )
                 incoming = output.recurrent_state.detach()
@@ -708,6 +807,7 @@ class RecurrentCollector:
                         trace_mask_values,
                         output.recurrent_state,
                         bootstrap_values,
+                        device_condition[0],
                     )
                 else:
                     pending_live_bootstrap = trace_mask_values.to(self.device)
@@ -729,16 +829,18 @@ class RecurrentCollector:
             target = self.config.target_simulated_ticks
             overshoot = 0 if target is None else max(0, collected_ticks - target)
             audit = CollectionAudit(
-                buffer.size,
-                buffer.size * self.lanes,
-                collected_ticks,
-                target,
-                overshoot,
-                raw_total,
-                optimizer_total,
-                completed_episodes,
-                0,
-                tuple(audits),
+                decision_rows=buffer.size,
+                transitions=buffer.size * self.lanes,
+                simulated_ticks=collected_ticks,
+                tick_target=target,
+                tick_target_overshoot=overshoot,
+                raw_reward=raw_total,
+                optimizer_reward=optimizer_total,
+                reward_sha256=getattr(composer, "sha256", ""),
+                shaping_id=getattr(composer, "shaping_id", "none"),
+                completed_episodes=completed_episodes,
+                invalid_actions=0,
+                decisions=tuple(audits),
             )
             return CollectedRollout(batch, audit)
         except BaseException:
@@ -754,6 +856,7 @@ class RecurrentCollector:
         mask: Tensor,
         recurrent_state: Tensor,
         destination: Tensor,
+        critic_condition: Tensor,
     ) -> None:
         """Shadow-evaluate only values unavailable from the next policy pass."""
 
@@ -776,17 +879,22 @@ class RecurrentCollector:
                 reset_before=torch.zeros(
                     (1, len(indices)), dtype=torch.bool, device=self.device
                 ),
+                **(
+                    {
+                        "critic_condition": critic_condition[
+                            device_indices
+                        ].unsqueeze(0)
+                    }
+                    if self.model.config.critic_condition_features
+                    else {}
+                ),
             )
         destination[torch.tensor(indices, dtype=torch.long)] = (
             output.values[0].detach().cpu()
         )
 
     def _reward_scale(self) -> float:
-        composer = getattr(self.task, "composer", None)
-        scale = getattr(composer, "reward_scale", None)
-        if not isinstance(scale, float):
-            raise TypeError("task must expose a RewardComposer with a reward scale")
-        return scale
+        return self._composer.reward_scale
 
     def mark_update_complete(self) -> None:
         self._require_ready()
@@ -794,7 +902,8 @@ class RecurrentCollector:
 
     def state_dict(self) -> dict[str, object]:
         incoming, reset_before = self._require_ready()
-        return {
+        self._composer.validate_identity()
+        state: dict[str, object] = {
             "version": self.version,
             "config": self.config.manifest(),
             "model_manifest": self.model.manifest(),
@@ -806,6 +915,19 @@ class RecurrentCollector:
             "simulated_ticks": self.simulated_ticks,
             "sampler": self.sampler.state_dict(),
         }
+        if self.model.config.critic_condition_features:
+            if self._critic_condition is None:
+                raise RuntimeError("conditioned collector has no critic condition")
+            task_condition = self._task_critic_condition()
+            continuing = ~reset_before.detach().cpu()
+            if torch.any(continuing) and not torch.equal(
+                self._critic_condition[continuing], task_condition[continuing]
+            ):
+                raise ValueError(
+                    "collector critic condition disagrees with continuing task state"
+                )
+            state["critic_condition"] = self._critic_condition.clone()
+        return state
 
     def load_state_dict(self, state: Mapping[str, object]) -> None:
         if self._collecting or self._poisoned:
@@ -822,6 +944,8 @@ class RecurrentCollector:
             "simulated_ticks",
             "sampler",
         }
+        if self.model.config.critic_condition_features:
+            expected.add("critic_condition")
         if set(state) != expected or state["version"] != self.version:
             raise ValueError("collector checkpoint identity mismatch")
         if (
@@ -832,6 +956,7 @@ class RecurrentCollector:
             raise ValueError("collector checkpoint configuration mismatch")
         recurrent = state["recurrent_state"]
         reset = state["reset_before"]
+        condition = state.get("critic_condition")
         expected_state = self.model.initial_state(self.lanes).shape
         if (
             not isinstance(recurrent, Tensor)
@@ -845,6 +970,25 @@ class RecurrentCollector:
             or reset.device.type != "cpu"
         ):
             raise ValueError("collector recurrent/reset state is malformed")
+        condition_width = self.model.config.critic_condition_features
+        if condition_width:
+            if (
+                not isinstance(condition, Tensor)
+                or condition.shape != (self.lanes, condition_width)
+                or condition.dtype != torch.float32
+                or condition.device.type != "cpu"
+                or condition.requires_grad
+                or not torch.isfinite(condition).all()
+            ):
+                raise ValueError("collector critic condition is malformed")
+            task_condition = self._task_critic_condition()
+            continuing = ~reset
+            if torch.any(continuing) and not torch.equal(
+                condition[continuing], task_condition[continuing]
+            ):
+                raise ValueError(
+                    "collector critic condition disagrees with continuing task state"
+                )
         counters = (
             state["completed_updates"],
             state["decision_rows"],
@@ -861,6 +1005,11 @@ class RecurrentCollector:
         self.sampler.load_state_dict(sampler_state)
         self._recurrent_state = recurrent.to(self.device).detach().clone()
         self._reset_before = reset.to(self.device).detach().clone()
+        self._critic_condition = (
+            condition.detach().cpu().clone()
+            if isinstance(condition, Tensor)
+            else torch.zeros((self.lanes, 0), dtype=torch.float32)
+        )
         self.completed_updates = int(counters[0])
         self.decision_rows = int(counters[1])
         self.simulated_ticks = int(counters[2])
