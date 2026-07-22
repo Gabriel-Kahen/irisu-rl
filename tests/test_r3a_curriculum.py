@@ -24,6 +24,7 @@ from irisu_rl.rewards import RewardKnot, RewardSchedule
 def recipe(stage: str, split: str, family: str, suffix: str) -> SnapshotRecipe:
     action = ActionSpec()
     payload = b"snapshot-" + suffix.encode()
+    identity = sum(suffix.encode())
     return SnapshotRecipe(
         f"{stage}-{split}-{suffix}",
         stage,
@@ -32,12 +33,12 @@ def recipe(stage: str, split: str, family: str, suffix: str) -> SnapshotRecipe:
         "pool-a",
         "1" * 64,
         9,
-        7,
+        7 + identity,
         action.sha256,
         (action.serialize(SemanticAction.wait(1)).hex(),),
         1,
         0,
-        11,
+        11 + identity,
         hashlib.sha256(payload).hexdigest(),
         "2" * 64,
         "fixture-v1",
@@ -89,7 +90,7 @@ def curriculum() -> CurriculumSpec:
             schedule1,
         ),
     )
-    return CurriculumSpec("fixture-v1", SnapshotLibrary(recipes), stages)
+    return CurriculumSpec("fixture-v1", SnapshotLibrary(recipes), stages, 0xC011EC7)
 
 
 def validation_report(
@@ -137,6 +138,8 @@ class R3ACurriculumTests(unittest.TestCase):
     def test_assignment_sampling_is_transactional_and_resume_exact(self) -> None:
         spec = curriculum()
         first = CurriculumCoordinator(spec, 4, learner_seed=19)
+        with self.assertRaises(TypeError):
+            first.reserve_assignments((True,))
         reservation = first.reserve_assignments((3, 1))
         with self.assertRaisesRegex(RuntimeError, "outstanding"):
             first.reserve_assignments((0,))
@@ -212,6 +215,17 @@ class R3ACurriculumTests(unittest.TestCase):
                 )
             )
 
+    def test_one_policy_identity_cannot_be_reused_for_another_gate(self) -> None:
+        coordinator = CurriculumCoordinator(curriculum(), 1, learner_seed=14)
+        policy = "a" * 64
+        coordinator.record_validation(
+            validation_report(coordinator, policy, (ValidationResult("wait", 8, 10),))
+        )
+        with self.assertRaisesRegex(ValueError, "cannot satisfy multiple"):
+            coordinator.request_validation(
+                policy_sha256=policy, evaluator_identity_sha256="e" * 64
+            )
+
     def test_action_masks_and_episode_stable_stage_assignment(self) -> None:
         coordinator = CurriculumCoordinator(curriculum(), 2, learner_seed=5)
         initial_weights = coordinator.shaping_weights_ppm()
@@ -251,6 +265,46 @@ class R3ACurriculumTests(unittest.TestCase):
         library = SnapshotLibrary((train, recipe("wait", "validation", "other", "c")))
         with self.assertRaisesRegex(ValueError, "blob hash"):
             library.verify_snapshot_blob(train.snapshot_id, b"tampered")
+
+    def test_library_rejects_split_leakage_despite_distinct_labels(self) -> None:
+        train = recipe("wait", "train", "train-family", "a")
+        same_construction = replace(
+            train,
+            snapshot_id="wait-validation-construction",
+            split="validation",
+            scenario_family="validation-family",
+            snapshot_sha256="f" * 64,
+        )
+        with self.assertRaisesRegex(ValueError, "construction provenance"):
+            SnapshotLibrary((train, same_construction))
+        calibration_copy = replace(
+            train,
+            snapshot_id="wait-calibration-construction",
+            split="calibration",
+            scenario_family="calibration-family",
+            snapshot_sha256="e" * 64,
+        )
+        with self.assertRaisesRegex(ValueError, "construction provenance"):
+            SnapshotLibrary((train, calibration_copy))
+
+        different_construction = replace(
+            recipe("wait", "validation", "validation-family", "b"),
+            expected_tick=train.expected_tick,
+            expected_score=train.expected_score,
+            expected_state_hash=train.expected_state_hash,
+        )
+        with self.assertRaisesRegex(ValueError, "state identities"):
+            SnapshotLibrary((train, different_construction))
+        validation = recipe("wait", "validation", "validation-family", "c")
+        test_copy = replace(
+            validation,
+            snapshot_id="wait-test-construction",
+            split="test",
+            scenario_family="test-family",
+            snapshot_sha256="d" * 64,
+        )
+        with self.assertRaisesRegex(ValueError, "construction provenance"):
+            SnapshotLibrary((validation, test_copy))
 
     def test_tampered_checkpoint_hash_is_rejected(self) -> None:
         coordinator = CurriculumCoordinator(curriculum(), 2, learner_seed=6)
@@ -400,6 +454,47 @@ class R3ACurriculumTests(unittest.TestCase):
                 )
             )
 
+    def test_validation_episode_seeds_are_fixed_across_policies_and_gates(self) -> None:
+        coordinator = CurriculumCoordinator(curriculum(), 1, learner_seed=11)
+        first = coordinator.request_validation(
+            policy_sha256="a" * 64, evaluator_identity_sha256="e" * 64
+        )
+        second = replace(
+            first,
+            gate_ordinal=first.gate_ordinal + 1,
+            completed_update=first.completed_update + 5,
+            policy_sha256="b" * 64,
+            evaluator_identity_sha256="f" * 64,
+        )
+        coordinates = ("wait", first.stages[0].snapshot_ids[0], 3)
+        self.assertEqual(
+            first.episode_seed(*coordinates), second.episode_seed(*coordinates)
+        )
+
+    def test_promoted_stage_clock_waits_for_every_lane_to_activate(self) -> None:
+        spec = curriculum()
+        coordinator = CurriculumCoordinator(spec, 2, learner_seed=12)
+        for policy in ("a" * 64, "b" * 64):
+            coordinator.record_validation(
+                validation_report(
+                    coordinator, policy, (ValidationResult("wait", 8, 10),)
+                )
+            )
+        self.assertEqual(coordinator.phase, "activation")
+        for _ in range(spec.stages[1].max_updates + 2):
+            coordinator.advance_update()
+        self.assertEqual(coordinator.phase, "activation")
+        self.assertEqual(coordinator.unlock_updates[1], -1)
+        coordinator.activate_focus_for_new_episodes(torch.tensor([True, False]))
+        coordinator.advance_update()
+        self.assertEqual(coordinator.phase, "activation")
+        coordinator.activate_focus_for_new_episodes(torch.tensor([False, True]))
+        self.assertEqual(coordinator.phase, "normal")
+        activation_update = coordinator.unlock_updates[1]
+        coordinator.advance_update()
+        self.assertEqual(coordinator.phase, "normal")
+        self.assertEqual(coordinator.completed_updates, activation_update + 1)
+
     def test_stage_and_mix_fields_reject_noncanonical_numeric_types(self) -> None:
         base = curriculum()
         with self.assertRaises(TypeError):
@@ -408,6 +503,8 @@ class R3ACurriculumTests(unittest.TestCase):
             replace(base.stages[0], enabled_wait_ticks=(1.0,))
         with self.assertRaises(TypeError):
             replace(base, prior_stage_mix_ppm=True)
+        with self.assertRaises(ValueError):
+            replace(base, evaluation_seed=True)
         with self.assertRaisesRegex(ValueError, "cover every"):
             replace(
                 base.stages[0],
@@ -418,7 +515,11 @@ class R3ACurriculumTests(unittest.TestCase):
         base = curriculum()
         shaped_final = replace(base.stages[0], required_consecutive_passes=1)
         spec = CurriculumSpec(
-            "shaped-final-v1", base.library, (shaped_final,), prior_stage_mix_ppm=0
+            "shaped-final-v1",
+            base.library,
+            (shaped_final,),
+            base.evaluation_seed,
+            prior_stage_mix_ppm=0,
         )
         coordinator = CurriculumCoordinator(spec, 1, learner_seed=9)
         decision = coordinator.record_validation(

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import copy
+import hashlib
+import json
 import math
 import threading
 from dataclasses import asdict, dataclass
@@ -23,7 +25,12 @@ from .checkpoints import (
     save_checkpoint,
     unpack_adapter_checkpoint,
 )
-from .curriculum import CurriculumCoordinator
+from .curriculum import (
+    CurriculumCoordinator,
+    GateDecision,
+    ValidationReport,
+    ValidationRequest,
+)
 from .encoding import EncodedBatch
 from .models import RecurrentActorCritic
 from .ppo import PPOTrainer, PPOUpdateStats, RecurrentTrainingBatch
@@ -108,7 +115,34 @@ class CollectedRollout:
 @dataclass(frozen=True, slots=True)
 class TrainingUpdate:
     collection: CollectionAudit
-    optimizer: PPOUpdateStats
+    optimizer: PPOUpdateStats | None
+    skipped_reason: str | None = None
+
+
+def model_state_sha256(model: RecurrentActorCritic) -> str:
+    """Hash one exact model state without pickle/container nondeterminism."""
+
+    digest = hashlib.sha256(b"irisu-model-state-v1\0")
+    manifest = json.dumps(
+        model.manifest(), sort_keys=True, separators=(",", ":"), allow_nan=False
+    ).encode()
+    digest.update(len(manifest).to_bytes(8, "big"))
+    digest.update(manifest)
+    for name, value in sorted(model.state_dict().items()):
+        if not isinstance(value, Tensor) or value.layout != torch.strided:
+            raise TypeError("model state must contain dense tensors")
+        tensor = value.detach().cpu().contiguous()
+        metadata = json.dumps(
+            {"name": name, "dtype": str(tensor.dtype), "shape": list(tensor.shape)},
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+        payload = tensor.view(torch.uint8).reshape(-1).numpy().tobytes()
+        digest.update(len(metadata).to_bytes(8, "big"))
+        digest.update(metadata)
+        digest.update(len(payload).to_bytes(8, "big"))
+        digest.update(payload)
+    return digest.hexdigest()
 
 
 class TaskContract(Protocol):
@@ -572,6 +606,9 @@ class RecurrentCollector:
                     tensor_actions = self.sampler.sample(distribution)
                     components = distribution.log_prob_components(tensor_actions)
                     log_prob = components.total
+                sampled_kind = tensor_actions.kind[0].detach().cpu()
+                sampled_wait = tensor_actions.wait_index[0].detach().cpu()
+                sampled_xy = tensor_actions.xy[0].detach().cpu()
                 if pending_live_bootstrap is not None:
                     bootstrap_rows[-1][pending_live_bootstrap.cpu()] = (
                         output.values[0, pending_live_bootstrap].detach().cpu()
@@ -579,10 +616,10 @@ class RecurrentCollector:
                     pending_live_bootstrap = None
                 semantic = tuple(
                     self.model.action_spec.decode(
-                        int(tensor_actions.kind[0, lane]),
-                        int(tensor_actions.wait_index[0, lane]),
-                        float(tensor_actions.xy[0, lane, 0]),
-                        float(tensor_actions.xy[0, lane, 1]),
+                        int(sampled_kind[lane]),
+                        int(sampled_wait[lane]),
+                        float(sampled_xy[lane, 0]),
+                        float(sampled_xy[lane, 1]),
                     )
                     for lane in range(self.lanes)
                 )
@@ -799,11 +836,13 @@ class RecurrentCollector:
         if (
             not isinstance(recurrent, Tensor)
             or recurrent.shape != expected_state
-            or not recurrent.is_floating_point()
+            or recurrent.dtype != next(self.model.parameters()).dtype
+            or recurrent.device.type != "cpu"
             or not torch.isfinite(recurrent).all()
             or not isinstance(reset, Tensor)
             or reset.shape != (self.lanes,)
             or reset.dtype != torch.bool
+            or reset.device.type != "cpu"
         ):
             raise ValueError("collector recurrent/reset state is malformed")
         counters = (
@@ -839,14 +878,25 @@ class R3ATrainingSession:
         trainer: PPOTrainer,
         *,
         numpy_seed: int,
+        max_consecutive_skips: int = 64,
     ) -> None:
         if collector.model is not trainer.model:
             raise ValueError("collector and trainer must share one model instance")
+        if (
+            isinstance(max_consecutive_skips, bool)
+            or not isinstance(max_consecutive_skips, Integral)
+            or max_consecutive_skips <= 0
+        ):
+            raise ValueError("maximum consecutive skips must be a positive integer")
         self.collector = collector
         self.trainer = trainer
         self.model = trainer.model
         self.task = collector.task
         self.numpy_generator = np.random.default_rng(numpy_seed)
+        self.max_consecutive_skips = int(max_consecutive_skips)
+        self.attempted_rollouts = 0
+        self.skipped_rollouts = 0
+        self.consecutive_skips = 0
         self._busy = False
         self._poisoned = False
         self._clean_collection_counters: tuple[int, int, int] | None = None
@@ -871,18 +921,38 @@ class R3ATrainingSession:
             raise RuntimeError("training is currently closed by the task")
         self._validate_clean_collection_boundary()
         self._validate_update_clocks()
+        activating = (
+            isinstance(self.task, CurriculumTaskContract)
+            and self.task.coordinator.phase == "activation"
+        )
+        if self.consecutive_skips >= self.max_consecutive_skips:
+            raise RuntimeError("consecutive skipped-rollout safety limit is exhausted")
         if (
-            self.trainer.schedule.completed_updates
+            not activating
+            and self.trainer.schedule.completed_updates
             >= self.trainer.schedule.total_updates
         ):
             raise RuntimeError("PPO update budget is exhausted")
         self._busy = True
         try:
             rollout = self.collector.collect()
+            self.attempted_rollouts += 1
+            if activating:
+                return self._finish_skipped_rollout(
+                    rollout, "curriculum stage activation drain"
+                )
+            if not torch.any(rollout.batch.train_mask):
+                # A fully censored held-shot truncation is a valid environment
+                # outcome. Preserve the advanced rollout state but do not
+                # fabricate an optimizer/update-clock step.
+                return self._finish_skipped_rollout(
+                    rollout, "rollout contained no trainable decisions"
+                )
             self.model.train()
             stats = self.trainer.update(rollout.batch)
             self.task.advance_update()
             self.collector.mark_update_complete()
+            self.consecutive_skips = 0
             self._mark_clean_collection_boundary()
             return TrainingUpdate(rollout.audit, stats)
         except BaseException:
@@ -890,6 +960,21 @@ class R3ATrainingSession:
             raise
         finally:
             self._busy = False
+
+    def _finish_skipped_rollout(
+        self, rollout: CollectedRollout, reason: str
+    ) -> TrainingUpdate:
+        self.skipped_rollouts += 1
+        activation_completed = (
+            reason == "curriculum stage activation drain"
+            and isinstance(self.task, CurriculumTaskContract)
+            and self.task.coordinator.phase != "activation"
+        )
+        self.consecutive_skips = (
+            0 if activation_completed else self.consecutive_skips + 1
+        )
+        self._mark_clean_collection_boundary()
+        return TrainingUpdate(rollout.audit, None, reason)
 
     def _identity(self, identity: Mapping[str, object]) -> dict[str, object]:
         if "r3a_payload" in identity:
@@ -904,6 +989,55 @@ class R3ATrainingSession:
         }
         if len(clocks) != 1:
             raise ValueError("trainer, collector, and task update clocks disagree")
+        if self.attempted_rollouts != (
+            self.skipped_rollouts + self.collector.completed_updates
+        ):
+            raise ValueError("session rollout and update counters disagree")
+
+    def _validate_pending_policy(self) -> None:
+        if isinstance(self.task, CurriculumTaskContract):
+            request = self.task.coordinator.pending_validation_request
+            if request is not None and request.policy_sha256 != model_state_sha256(
+                self.model
+            ):
+                raise ValueError(
+                    "pending validation request does not match the loaded model state"
+                )
+
+    @property
+    def policy_sha256(self) -> str:
+        if self._busy or self.poisoned:
+            raise RuntimeError("policy identity requires a clean, healthy session")
+        return model_state_sha256(self.model)
+
+    def request_validation(
+        self, *, evaluator_identity_sha256: str
+    ) -> ValidationRequest:
+        """Atomically bind validation to the current frozen model state."""
+
+        if not isinstance(self.task, CurriculumTaskContract):
+            raise TypeError("validation requests require a curriculum task")
+        if self._busy or self.poisoned:
+            raise RuntimeError("validation requires a clean, healthy session")
+        self._validate_clean_collection_boundary()
+        self._validate_update_clocks()
+        return self.task.coordinator.request_validation(
+            policy_sha256=model_state_sha256(self.model),
+            evaluator_identity_sha256=evaluator_identity_sha256,
+        )
+
+    def record_validation(self, report: ValidationReport) -> GateDecision:
+        """Accept evidence only while the requested model remains loaded."""
+
+        if not isinstance(self.task, CurriculumTaskContract):
+            raise TypeError("validation reports require a curriculum task")
+        if self._busy or self.poisoned:
+            raise RuntimeError("validation requires a clean, healthy session")
+        self._validate_clean_collection_boundary()
+        self._validate_update_clocks()
+        if report.policy_sha256 != model_state_sha256(self.model):
+            raise ValueError("validation report does not match the loaded model state")
+        return self.task.coordinator.record_validation(report)
 
     def _mark_clean_collection_boundary(self) -> None:
         self._clean_collection_counters = (
@@ -937,11 +1071,18 @@ class R3ATrainingSession:
             raise RuntimeError("checkpoint requires a clean, healthy update boundary")
         self._validate_clean_collection_boundary()
         self._validate_update_clocks()
+        self._validate_pending_policy()
         adapter_state, blobs = pack_adapter_checkpoint(
             self.collector.adapter.checkpoint()
         )
         state = {
             "version": self.version,
+            "session": {
+                "max_consecutive_skips": self.max_consecutive_skips,
+                "attempted_rollouts": self.attempted_rollouts,
+                "skipped_rollouts": self.skipped_rollouts,
+                "consecutive_skips": self.consecutive_skips,
+            },
             "model": copy.deepcopy(self.model.state_dict()),
             "trainer": self.trainer.state_dict(),
             "collector": self.collector.state_dict(),
@@ -973,6 +1114,7 @@ class R3ATrainingSession:
         )
         expected = {
             "version",
+            "session",
             "model",
             "trainer",
             "collector",
@@ -982,6 +1124,26 @@ class R3ATrainingSession:
         }
         if set(state) != expected or state["version"] != self.version:
             raise ValueError("training-session checkpoint identity mismatch")
+        session_state = state["session"]
+        if not isinstance(session_state, Mapping) or set(session_state) != {
+            "max_consecutive_skips",
+            "attempted_rollouts",
+            "skipped_rollouts",
+            "consecutive_skips",
+        }:
+            raise ValueError("training-session skip state is malformed")
+        skip_values = tuple(session_state.values())
+        if (
+            any(
+                isinstance(value, bool) or not isinstance(value, Integral) or value < 0
+                for value in skip_values
+            )
+            or session_state["max_consecutive_skips"] != self.max_consecutive_skips
+            or session_state["attempted_rollouts"] < session_state["skipped_rollouts"]
+            or session_state["consecutive_skips"] > session_state["skipped_rollouts"]
+            or session_state["consecutive_skips"] > self.max_consecutive_skips
+        ):
+            raise ValueError("training-session skip state is malformed")
         try:
             self.collector.adapter.reset()
             adapter_checkpoint = unpack_adapter_checkpoint(
@@ -995,7 +1157,11 @@ class R3ATrainingSession:
             self.task.load_state_dict(state["task"])
             self.collector.adapter.restore_checkpoint(adapter_checkpoint)
             self.collector.load_state_dict(state["collector"])
+            self.attempted_rollouts = int(session_state["attempted_rollouts"])
+            self.skipped_rollouts = int(session_state["skipped_rollouts"])
+            self.consecutive_skips = int(session_state["consecutive_skips"])
             self._validate_update_clocks()
+            self._validate_pending_policy()
             restore_rng_state(state["rng"], self.numpy_generator)
             self._mark_clean_collection_boundary()
         except BaseException:

@@ -25,6 +25,16 @@ macro, records the old likelihood components, and appends to
 target or decision ceiling. It never drops part of a synchronous row: reported
 tick overshoot is therefore bounded by the final row.
 
+If a legitimate rollout is entirely censored (for example, every lane is
+truncated during a held shot), the session records a clean skipped update. It
+advances environment/recurrent state but does not fabricate PPO statistics or
+advance optimizer/curriculum clocks. Every activation-phase rollout is likewise
+drain-only, so mixed old/new-stage data never reaches PPO. Consecutive skips are
+bounded, counted, and checkpointed; benchmark update targets count completed
+optimizer updates rather than collection attempts. CUDA actions cross to CPU
+in one batched copy per action tensor before semantic decoding, avoiding
+per-lane device synchronization.
+
 Rollout boundaries do not clear recurrent state. Episode boundaries clear it
 exactly when the next reset observation is consumed through `reset_before`.
 
@@ -77,7 +87,8 @@ A snapshot recipe binds its split, scenario family, fixed environment pool,
 mechanics hash, reset seed, deployment action schema, serialized legal action
 trace, expected tick/score/state hash, snapshot blob hash, and runtime identity.
 The recipe is authoritative; snapshot bytes are a verified cache. The library
-rejects train/validation scenario-family overlap.
+rejects train/validation overlap in scenario-family labels, legal construction
+provenance, and reachable state identity.
 
 Episode assignments use a SHA-256 counter keyed by curriculum identity,
 learner seed, lane, and lane-local episode ordinal. Reservations are
@@ -94,22 +105,30 @@ executed curriculum evidence in R3a.
 Promotion requires declared validation counts and consecutive passes. Every
 unlocked prior stage is checked against its regression floor. Failure enters
 remediation without reducing the highest unlocked stage or rewinding shaping.
+After promotion, an activation barrier lets every lane finish its current
+episode before the new stage budget and shaping clock begin; this preserves
+episode-stable objectives without spending the new stage budget on old-stage
+data.
 Validation can be recorded only against a content-derived pending request that
 binds the policy checkpoint, completed update, evaluator/runtime identity,
 exact validation recipe IDs, trial counts, and every recipe/repetition outcome;
-each outcome carries the policy RNG seed derived from the request identity and
-episode coordinates. One policy checkpoint cannot satisfy multiple gates. A
-pending request freezes training. Reaching an update budget first enters a
-training-closed validation phase so the policy from the last permitted update
-receives exactly one gate; a failed final-budget gate becomes terminal budget
-exhaustion.
+each outcome carries a policy RNG seed derived only from the immutable
+curriculum evaluation seed and recipe coordinates. This keeps trials paired
+across policies and prevents policy/evaluator identity from grinding favorable
+randomness. The production session hashes the exact loaded model tensors when
+issuing a request, freezes training, and rechecks that hash before accepting a
+report. One model state cannot satisfy multiple gates under different labels.
+Reaching an update budget first enters a training-closed validation phase so
+the policy from the last permitted update receives exactly one gate; a failed
+final-budget gate becomes terminal budget exhaustion.
 All coordinator checkpoints carry a canonical state hash and a hash-chain head
 for promotion, remediation, completion, and budget events.
 
 ### Exact training-session resume
 
-`R3ATrainingSession` permits durable checkpoints only at a healthy boundary
-after a complete optimizer update. The immutable checkpoint contains:
+`R3ATrainingSession` permits durable checkpoints only at a healthy completed
+session-transaction boundary, after either an optimizer update or an explicitly
+audited skipped rollout. The immutable checkpoint contains:
 
 - model parameters;
 - optimizer, learning-rate schedule, and PPO minibatch RNG;
@@ -121,6 +140,10 @@ after a complete optimizer update. The immutable checkpoint contains:
 - Python, NumPy, Torch CPU, and available CUDA RNG streams;
 - counters and all runtime/configuration identities supplied by the run
   manifest.
+
+Pending validation is checked against the exact model tensor hash both before
+save and immediately after restore. Skip attempt/consecutive counters are also
+restored, so restarting cannot reset the bounded-skip safety gate.
 
 Restore is fail closed. Files and identities are checked before mutation. A
 fresh backend is disposable-reset, native states are restored and verified,

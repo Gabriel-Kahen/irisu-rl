@@ -14,6 +14,7 @@ from irisu_rl.collector import (
     R3ATrainingSession,
     RecurrentCollector,
 )
+from irisu_rl.checkpoints import load_checkpoint, save_checkpoint
 from irisu_rl.actions import ActionSpec, SemanticAction
 from irisu_rl.curriculum import (
     CurriculumCoordinator,
@@ -21,6 +22,9 @@ from irisu_rl.curriculum import (
     SnapshotLibrary,
     SnapshotRecipe,
     StageSpec,
+    ValidationEpisodeOutcome,
+    ValidationReport,
+    ValidationResult,
 )
 from irisu_rl.encoding import TeacherStateEncoder
 from irisu_rl.models import RecurrentActorCritic, RecurrentModelConfig
@@ -55,6 +59,7 @@ def build_session(
     config_hash = int(vector.envs[0].config_hash())
 
     def recipe(split: str, suffix: str) -> SnapshotRecipe:
+        identity = int.from_bytes(hashlib.sha256(suffix.encode()).digest()[:4], "big")
         return SnapshotRecipe(
             f"nominal-{split}-{suffix}",
             "nominal",
@@ -63,12 +68,12 @@ def build_session(
             "nominal-pool",
             "1" * 64,
             config_hash,
-            7,
+            identity,
             action_spec.sha256,
             (action_spec.serialize(SemanticAction.wait(1)).hex(),),
             1,
             0,
-            11,
+            identity,
             hashlib.sha256(suffix.encode()).hexdigest(),
             "2" * 64,
             "resume-fixture-v1",
@@ -97,6 +102,7 @@ def build_session(
                 RewardSchedule("score-only-v1", (RewardKnot(0, 0),)),
             ),
         ),
+        0xEAA1,
     )
     coordinator = CurriculumCoordinator(curriculum, 2, learner_seed=83)
     task = CurriculumTaskContract(
@@ -186,11 +192,105 @@ class R3ASessionResumeMixin:
             finally:
                 restored_vector.close()
 
+    def assert_validation_binds_loaded_model(self) -> None:
+        session, vector = build_session(exact=self.exact, construction_seed=202)
+        try:
+            session.initialize()
+            request = session.request_validation(evaluator_identity_sha256="e" * 64)
+            self.assertEqual(request.policy_sha256, session.policy_sha256)
+            stage = request.stages[0]
+            seed = request.episode_seed(stage.stage_id, stage.snapshot_ids[0], 0)
+            report = ValidationReport(
+                request.request_id,
+                request.policy_sha256,
+                request.evaluator_identity_sha256,
+                (
+                    ValidationResult(
+                        stage.stage_id,
+                        1,
+                        1,
+                        stage.snapshot_ids,
+                        (
+                            ValidationEpisodeOutcome(
+                                stage.snapshot_ids[0], 0, seed, True
+                            ),
+                        ),
+                    ),
+                ),
+            )
+            parameter = next(session.model.parameters())
+            original = parameter.detach().clone()
+            with torch.no_grad():
+                parameter.add_(1.0)
+            with tempfile.TemporaryDirectory() as directory:
+                with self.assertRaisesRegex(ValueError, "pending validation"):
+                    session.save(
+                        directory, "mutated", identity={"test": "pending-policy"}
+                    )
+            with self.assertRaisesRegex(ValueError, "loaded model state"):
+                session.record_validation(report)
+            with torch.no_grad():
+                parameter.copy_(original)
+            self.assertEqual(session.record_validation(report).phase, "complete")
+        finally:
+            vector.close()
+
+    def assert_restore_rejects_pending_policy_mismatch(self) -> None:
+        identity = {"test": "pending-policy-restore"}
+        with tempfile.TemporaryDirectory() as directory:
+            source, source_vector = build_session(
+                exact=self.exact, construction_seed=303
+            )
+            try:
+                source.initialize()
+                source.request_validation(evaluator_identity_sha256="e" * 64)
+                source.save(directory, "valid", identity=identity)
+                checkpoint_identity = {
+                    **identity,
+                    "r3a_payload": source.version,
+                }
+                state, blobs, _ = load_checkpoint(
+                    directory,
+                    generation="valid",
+                    expected_identity=checkpoint_identity,
+                )
+                parameter_name = next(iter(state["model"]))
+                state["model"][parameter_name] = (
+                    state["model"][parameter_name].clone() + 1.0
+                )
+                save_checkpoint(
+                    directory,
+                    "mismatch",
+                    identity=checkpoint_identity,
+                    state=state,
+                    blobs=blobs,
+                )
+            finally:
+                source_vector.close()
+
+            restored, restored_vector = build_session(
+                exact=self.exact, construction_seed=404
+            )
+            try:
+                with self.assertRaisesRegex(ValueError, "pending validation"):
+                    restored.restore(
+                        directory, generation="mismatch", identity=identity
+                    )
+                self.assertTrue(restored.poisoned)
+            finally:
+                restored_vector.close()
+
 
 @unittest.skipUnless(PORTABLE.exists(), "portable integration library not built")
 class R3APortableSessionResumeTests(R3ASessionResumeMixin, unittest.TestCase):
     def test_next_rollout_gae_and_update_are_exact_after_resume(self) -> None:
         self.assert_resume()
+
+    def test_validation_is_bound_to_loaded_model(self) -> None:
+        self.assert_validation_binds_loaded_model()
+
+    def test_restore_rejects_pending_policy_mismatch(self) -> None:
+        self.assert_restore_rejects_pending_policy_mismatch()
 
 
 @unittest.skipUnless(EXACT.exists(), "exact integration worker not built")
@@ -199,6 +299,9 @@ class R3AExactSessionResumeTests(R3ASessionResumeMixin, unittest.TestCase):
 
     def test_next_rollout_gae_and_update_are_exact_after_resume(self) -> None:
         self.assert_resume()
+
+    def test_validation_is_bound_to_loaded_model(self) -> None:
+        self.assert_validation_binds_loaded_model()
 
 
 if __name__ == "__main__":

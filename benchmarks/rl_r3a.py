@@ -119,26 +119,39 @@ def main() -> int:
             total_updates=ppo_config["total_updates"],
             sampler_seed=seed ^ 0x5A5A,
         )
-        session = R3ATrainingSession(collector, trainer, numpy_seed=seed ^ 17)
+        session = R3ATrainingSession(
+            collector,
+            trainer,
+            numpy_seed=seed ^ 17,
+            max_consecutive_skips=smoke["max_consecutive_skips"],
+        )
         session.initialize()
-        for update in range(updates):
+        target_completed_updates = trainer.schedule.completed_updates + updates
+        max_attempts = updates * (session.max_consecutive_skips + 1)
+        while trainer.schedule.completed_updates < target_completed_updates:
+            if len(reports) >= max_attempts:
+                raise RuntimeError("smoke exceeded its bounded rollout-attempt budget")
             before = time.perf_counter()
             result = session.run_update()
-            reports.append(
-                {
-                    "update": update + 1,
-                    "seconds": time.perf_counter() - before,
-                    "decision_rows": result.collection.decision_rows,
-                    "transitions": result.collection.transitions,
-                    "simulated_ticks": result.collection.simulated_ticks,
-                    "tick_target_overshoot": result.collection.tick_target_overshoot,
-                    "raw_reward": result.collection.raw_reward,
-                    "invalid_actions": result.collection.invalid_actions,
-                    "approximate_kl": result.optimizer.approximate_kl,
-                    "gradient_norm": result.optimizer.gradient_norm,
-                    "learning_rate": result.optimizer.learning_rate,
-                }
-            )
+            report = {
+                "attempt": len(reports) + 1,
+                "completed_update": trainer.schedule.completed_updates,
+                "seconds": time.perf_counter() - before,
+                "decision_rows": result.collection.decision_rows,
+                "transitions": result.collection.transitions,
+                "simulated_ticks": result.collection.simulated_ticks,
+                "tick_target_overshoot": result.collection.tick_target_overshoot,
+                "raw_reward": result.collection.raw_reward,
+                "invalid_actions": result.collection.invalid_actions,
+                "skipped_reason": result.skipped_reason,
+            }
+            if result.optimizer is not None:
+                report.update(
+                    approximate_kl=result.optimizer.approximate_kl,
+                    gradient_norm=result.optimizer.gradient_norm,
+                    learning_rate=result.optimizer.learning_rate,
+                )
+            reports.append(report)
     elapsed = time.perf_counter() - started
     transitions = sum(report["transitions"] for report in reports)
     ticks = sum(report["simulated_ticks"] for report in reports)
@@ -152,7 +165,10 @@ def main() -> int:
         "config": str(config_path),
         "config_sha256": hashlib.sha256(config_bytes).hexdigest(),
         "lanes": lanes,
-        "updates": updates,
+        "requested_optimizer_updates": updates,
+        "completed_optimizer_updates": trainer.schedule.completed_updates,
+        "attempted_rollouts": len(reports),
+        "skipped_rollouts": session.skipped_rollouts,
         "max_decisions": decisions,
         "target_simulated_ticks": target_ticks,
         "torch_threads": torch_threads,
@@ -163,8 +179,12 @@ def main() -> int:
         "zero_invalid_actions": all(
             report["invalid_actions"] == 0 for report in reports
         ),
+        "zero_skipped_updates": all(
+            report["skipped_reason"] is None for report in reports
+        ),
         "finite_optimizer_metrics": all(
-            all(
+            report["skipped_reason"] is None
+            and all(
                 torch.isfinite(torch.tensor(report[name]))
                 for name in ("approximate_kl", "gradient_norm", "learning_rate")
             )

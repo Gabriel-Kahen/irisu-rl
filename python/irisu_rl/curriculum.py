@@ -20,6 +20,7 @@ _SPLITS = {"train", "validation", "calibration", "test"}
 _PHASES = {
     "normal",
     "remediation",
+    "activation",
     "budget_validation",
     "complete",
     "budget_exhausted",
@@ -150,14 +151,50 @@ class SnapshotLibrary:
                 raise ValueError(
                     "one environment pool cannot mix mechanics or runtime identities"
                 )
-        train_families = {
-            recipe.scenario_family for recipe in ordered if recipe.split == "train"
+
+        def construction_identity(recipe: SnapshotRecipe) -> tuple[object, ...]:
+            return (
+                recipe.config_sha256,
+                int(recipe.config_hash),
+                recipe.reset_seed,
+                recipe.action_spec_sha256,
+                recipe.semantic_actions_hex,
+            )
+
+        def state_identity(recipe: SnapshotRecipe) -> tuple[object, ...]:
+            return (
+                recipe.config_sha256,
+                int(recipe.config_hash),
+                recipe.expected_tick,
+                recipe.expected_score,
+                recipe.expected_state_hash,
+            )
+
+        split_recipes = {
+            split: tuple(recipe for recipe in ordered if recipe.split == split)
+            for split in sorted(_SPLITS)
         }
-        validation_families = {
-            recipe.scenario_family for recipe in ordered if recipe.split == "validation"
-        }
-        if train_families & validation_families:
-            raise ValueError("training and validation scenario families overlap")
+        populated = tuple(split for split, values in split_recipes.items() if values)
+        for left_index, left in enumerate(populated):
+            for right in populated[left_index + 1 :]:
+                left_values = split_recipes[left]
+                right_values = split_recipes[right]
+                if {recipe.scenario_family for recipe in left_values} & {
+                    recipe.scenario_family for recipe in right_values
+                }:
+                    raise ValueError(f"{left} and {right} scenario families overlap")
+                if {construction_identity(recipe) for recipe in left_values} & {
+                    construction_identity(recipe) for recipe in right_values
+                }:
+                    raise ValueError(
+                        f"{left} and {right} construction provenance overlaps"
+                    )
+                if {state_identity(recipe) for recipe in left_values} & {
+                    state_identity(recipe) for recipe in right_values
+                }:
+                    raise ValueError(
+                        f"{left} and {right} reachable state identities overlap"
+                    )
         self.recipes = ordered
         self._by_id = {recipe.snapshot_id: recipe for recipe in ordered}
 
@@ -295,6 +332,7 @@ class CurriculumSpec:
     curriculum_id: str
     library: SnapshotLibrary
     stages: tuple[StageSpec, ...]
+    evaluation_seed: int
     prior_stage_mix_ppm: int = 200_000
     version: str = "curriculum-v1"
 
@@ -310,6 +348,12 @@ class CurriculumSpec:
             raise ValueError("curriculum stage ranks must be contiguous and ordered")
         if len({stage.stage_id for stage in self.stages}) != len(self.stages):
             raise ValueError("curriculum stage ids must be unique")
+        if (
+            isinstance(self.evaluation_seed, bool)
+            or not isinstance(self.evaluation_seed, Integral)
+            or not 0 <= self.evaluation_seed < 2**64
+        ):
+            raise ValueError("curriculum evaluation seed must fit uint64")
         if isinstance(self.prior_stage_mix_ppm, bool) or not isinstance(
             self.prior_stage_mix_ppm, Integral
         ):
@@ -339,6 +383,7 @@ class CurriculumSpec:
             "version": self.version,
             "curriculum_id": self.curriculum_id,
             "library_sha256": self.library.sha256,
+            "evaluation_seed": int(self.evaluation_seed),
             "prior_stage_mix_ppm": self.prior_stage_mix_ppm,
             "stages": [stage.manifest() for stage in self.stages],
         }
@@ -459,6 +504,7 @@ class ValidationRequest:
     curriculum_sha256: str
     gate_ordinal: int
     completed_update: int
+    evaluation_seed: int
     policy_sha256: str
     evaluator_identity_sha256: str
     stages: tuple[ValidationStageRequest, ...]
@@ -475,6 +521,9 @@ class ValidationRequest:
             or isinstance(self.completed_update, bool)
             or not isinstance(self.completed_update, Integral)
             or self.completed_update < 0
+            or isinstance(self.evaluation_seed, bool)
+            or not isinstance(self.evaluation_seed, Integral)
+            or not 0 <= self.evaluation_seed < 2**64
             or not self.stages
             or len({stage.stage_id for stage in self.stages}) != len(self.stages)
         ):
@@ -486,6 +535,7 @@ class ValidationRequest:
             "curriculum_sha256": self.curriculum_sha256,
             "gate_ordinal": int(self.gate_ordinal),
             "completed_update": int(self.completed_update),
+            "evaluation_seed": int(self.evaluation_seed),
             "policy_sha256": self.policy_sha256,
             "evaluator_identity_sha256": self.evaluator_identity_sha256,
             "stages": [stage.manifest() for stage in self.stages],
@@ -509,10 +559,8 @@ class ValidationRequest:
         ):
             raise ValueError("validation episode seed coordinates are malformed")
         payload = (
-            f"{self.curriculum_sha256}:{self.gate_ordinal}:"
-            f"{self.completed_update}:{self.policy_sha256}:"
-            f"{self.evaluator_identity_sha256}:{stage_id}:{snapshot_id}:"
-            f"{repetition}"
+            f"{self.curriculum_sha256}:{self.evaluation_seed}:"
+            f"{stage_id}:{snapshot_id}:{repetition}"
         ).encode()
         return int.from_bytes(hashlib.sha256(payload).digest()[:8], "big")
 
@@ -523,6 +571,7 @@ class ValidationRequest:
             "curriculum_sha256",
             "gate_ordinal",
             "completed_update",
+            "evaluation_seed",
             "policy_sha256",
             "evaluator_identity_sha256",
             "stages",
@@ -557,6 +606,7 @@ class ValidationRequest:
             value["curriculum_sha256"],  # type: ignore[arg-type]
             value["gate_ordinal"],  # type: ignore[arg-type]
             value["completed_update"],  # type: ignore[arg-type]
+            value["evaluation_seed"],  # type: ignore[arg-type]
             value["policy_sha256"],  # type: ignore[arg-type]
             value["evaluator_identity_sha256"],  # type: ignore[arg-type]
             tuple(parsed),
@@ -653,6 +703,10 @@ class CurriculumCoordinator:
     def validation_pending(self) -> bool:
         return self._pending_validation is not None
 
+    @property
+    def pending_validation_request(self) -> ValidationRequest | None:
+        return self._pending_validation
+
     def _sample_index(self, lane: int, ordinal: int, size: int) -> int:
         counter = 0
         limit = (1 << 256) - ((1 << 256) % size)
@@ -668,6 +722,11 @@ class CurriculumCoordinator:
     def reserve_assignments(self, lane_ids: Sequence[int]) -> AssignmentReservation:
         if self._outstanding is not None:
             raise RuntimeError("an assignment reservation is already outstanding")
+        if any(
+            isinstance(lane, bool) or not isinstance(lane, Integral)
+            for lane in lane_ids
+        ):
+            raise TypeError("assignment lanes must be canonical integers")
         lanes = tuple(int(lane) for lane in lane_ids)
         if len(set(lanes)) != len(lanes) or any(
             not 0 <= lane < self.lanes for lane in lanes
@@ -722,9 +781,10 @@ class CurriculumCoordinator:
             )
             self.lane_stage[assignment.lane_id] = stage_index
             unlocked = self.unlock_updates[stage_index]
+            stage_age = 0 if unlocked < 0 else self.completed_updates - unlocked
             self.lane_shaping_weight_ppm[assignment.lane_id] = self.spec.stages[
                 stage_index
-            ].reward_schedule.weight_ppm(self.completed_updates - unlocked)
+            ].reward_schedule.weight_ppm(stage_age)
             self.episode_ordinals[assignment.lane_id] += 1
         self._outstanding = None
 
@@ -754,12 +814,23 @@ class CurriculumCoordinator:
         for lane in torch.nonzero(reset_mask.cpu(), as_tuple=False).flatten().tolist():
             self.lane_stage[lane] = self.focus
             unlocked = self.unlock_updates[self.focus]
-            if unlocked < 0:
-                raise RuntimeError("cannot assign a locked curriculum stage")
+            stage_age = 0 if unlocked < 0 else self.completed_updates - unlocked
             self.lane_shaping_weight_ppm[lane] = (
-                self.current_stage.reward_schedule.weight_ppm(
-                    self.completed_updates - unlocked
-                )
+                self.current_stage.reward_schedule.weight_ppm(stage_age)
+            )
+        if (
+            self.phase == "activation"
+            and self.unlock_updates[self.highest_unlocked] < 0
+            and all(stage == self.highest_unlocked for stage in self.lane_stage)
+        ):
+            self.unlock_updates[self.highest_unlocked] = self.completed_updates
+            self.phase = "normal"
+            self._append_event(
+                "activated",
+                {
+                    "stage": self.spec.stages[self.highest_unlocked].stage_id,
+                    "activation_update": self.completed_updates,
+                },
             )
 
     def advance_update(self) -> None:
@@ -770,6 +841,8 @@ class CurriculumCoordinator:
         self.completed_updates += 1
         stage = self.spec.stages[self.highest_unlocked]
         unlock = self.unlock_updates[self.highest_unlocked]
+        if unlock < 0:
+            return
         if self.completed_updates - unlock >= stage.max_updates:
             # Training is closed, but the policy produced by the final allowed
             # update still receives exactly one bound gate evaluation.
@@ -788,7 +861,9 @@ class CurriculumCoordinator:
     def request_validation(
         self, *, policy_sha256: str, evaluator_identity_sha256: str
     ) -> ValidationRequest:
-        if self.phase in {"complete", "budget_exhausted"}:
+        if self.phase in {"activation", "complete", "budget_exhausted"}:
+            if self.phase == "activation":
+                raise RuntimeError("curriculum stage must activate before validation")
             raise RuntimeError("terminal curriculum cannot request validation")
         if self._pending_validation is not None:
             raise RuntimeError("a validation request is already pending")
@@ -801,6 +876,7 @@ class CurriculumCoordinator:
             self.spec.sha256,
             self._evaluation_ordinal,
             self.completed_updates,
+            self.spec.evaluation_seed,
             policy_sha256,
             evaluator_identity_sha256,
             stages,
@@ -986,8 +1062,8 @@ class CurriculumCoordinator:
             return self._decision(False, None, "final stage passed")
         self.highest_unlocked += 1
         self.focus = self.highest_unlocked
-        self.phase = "normal"
-        self.unlock_updates[self.highest_unlocked] = self.completed_updates
+        self.phase = "activation"
+        self.unlock_updates[self.highest_unlocked] = -1
         promoted = self.spec.stages[self.highest_unlocked]
         self._append_event(
             "promote", {"stage": promoted.stage_id, "report": report.sha256}
@@ -1009,6 +1085,10 @@ class CurriculumCoordinator:
     def state_dict(self) -> dict[str, object]:
         if self._outstanding is not None:
             raise RuntimeError("checkpoint cannot capture an uncommitted assignment")
+        if self.unlock_updates[self.highest_unlocked] > self.completed_updates:
+            raise RuntimeError(
+                "checkpoint cannot capture a pending activation boundary"
+            )
         core = {
             "version": self.version,
             "spec_sha256": self.spec.sha256,
@@ -1139,6 +1219,7 @@ class CurriculumCoordinator:
             raise ValueError("pending validation request is malformed")
         if pending is not None and (
             pending.curriculum_sha256 != self.spec.sha256
+            or pending.evaluation_seed != self.spec.evaluation_seed
             or pending.gate_ordinal + 1 != evaluation_ordinal
             or pending.completed_update != completed
             or pending.policy_sha256 in evaluated_policies
@@ -1147,15 +1228,18 @@ class CurriculumCoordinator:
             raise ValueError(
                 "pending validation request disagrees with coordinator state"
             )
+        phase = state["phase"]
+        current_unlock = unlocks[highest]
         if (
             unlocks[0] != 0
-            or any(not 0 <= value <= completed for value in unlocks[: highest + 1])
+            or any(not 0 <= value <= completed for value in unlocks[:highest])
+            or (phase == "activation" and current_unlock != -1)
+            or (phase != "activation" and not 0 <= current_unlock <= completed)
             or any(value != -1 for value in unlocks[highest + 1 :])
         ):
             raise ValueError("curriculum unlock schedule is malformed")
-        stage_elapsed = completed - unlocks[highest]
+        stage_elapsed = 0 if current_unlock < 0 else completed - current_unlock
         stage_budget = self.spec.stages[highest].max_updates
-        phase = state["phase"]
         if (
             stage_elapsed < 0
             or (phase in {"normal", "remediation"} and stage_elapsed >= stage_budget)
@@ -1167,6 +1251,8 @@ class CurriculumCoordinator:
             or (phase == "complete" and highest + 1 != len(self.spec.stages))
             or (phase == "complete" and focus != highest)
             or (phase == "normal" and focus != highest)
+            or (phase == "activation" and focus != highest)
+            or (phase == "activation" and pending is not None)
         ):
             raise ValueError("curriculum checkpoint phase semantics are malformed")
         prepared_unlocks = list(unlocks)

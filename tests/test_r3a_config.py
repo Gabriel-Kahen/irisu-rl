@@ -34,7 +34,9 @@ class R3AConfigTests(unittest.TestCase):
             config["curriculum"]["environment_topology"],
             "one_fixed_config_hash_per_collector_pool",
         )
+        self.assertIsInstance(config["curriculum"]["evaluation_seed"], int)
         self.assertEqual(config["ppo"]["learning_rate"], 1e-4)
+        self.assertGreater(config["smoke_run"]["max_consecutive_skips"], 0)
 
 
 if __name__ == "__main__":

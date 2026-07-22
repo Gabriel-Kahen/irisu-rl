@@ -318,8 +318,9 @@ def save_checkpoint(
 ) -> Path:
     """Publish one immutable generation and atomically move ``latest.json``.
 
-    Callers may checkpoint only at a complete semantic decision boundary and
-    after a complete optimizer update. Existing generations are never replaced.
+    Callers may checkpoint only at a complete semantic decision/session
+    transaction boundary; this may follow an optimizer update or an explicitly
+    audited skipped rollout. Existing generations are never replaced.
     """
 
     generation = _validate_generation(generation)

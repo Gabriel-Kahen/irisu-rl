@@ -11,6 +11,7 @@ lanes = 16
 updates = 4
 torch_threads = 4
 seed = 20260722
+max_consecutive_skips = 8
 
 [collector]
 version = "recurrent-collector-config-v1"
@@ -34,6 +35,7 @@ clip = false
 [curriculum]
 version = "curriculum-v1"
 coordinator_version = "curriculum-coordinator-v1"
+evaluation_seed = 2026072201
 assignment_sampler = "sha256_counter_per_lane_episode_library_contract"
 assignment_to_adapter_status = "pending_transactional_snapshot_initializer"
 prior_stage_mix_ppm = 200000
