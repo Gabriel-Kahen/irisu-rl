@@ -95,6 +95,7 @@ class RecurrentRolloutBuffer:
         old_values: Tensor,
         *,
         reset_before: Tensor,
+        optimizer_reward: Tensor | None = None,
         kind_mask: Tensor | None = None,
         wait_mask: Tensor | None = None,
     ) -> None:
@@ -125,6 +126,18 @@ class RecurrentRolloutBuffer:
             or not torch.isfinite(old_values).all()
         ):
             raise ValueError("old policy outputs must be finite")
+        if optimizer_reward is not None and (
+            optimizer_reward.shape != (self.lanes,)
+            or optimizer_reward.dtype != torch.float32
+            or optimizer_reward.requires_grad
+            or not torch.isfinite(optimizer_reward).all()
+        ):
+            raise ValueError("optimizer reward must be detached finite float32 [B]")
+        prepared_optimizer_reward = (
+            optimizer_reward.detach().cpu().clone()
+            if optimizer_reward is not None
+            else None
+        )
         if any(
             transition.lane_id != lane for lane, transition in enumerate(transitions)
         ):
@@ -240,7 +253,11 @@ class RecurrentRolloutBuffer:
             self.action_wait_index[index, lane] = wait_index
             self.action_xy[index, lane] = torch.tensor((x, y))
             self.raw_reward[index, lane] = raw_reward
-            self.optimizer_reward[index, lane] = raw_reward / self.reward_scale
+            self.optimizer_reward[index, lane] = (
+                prepared_optimizer_reward[lane]
+                if prepared_optimizer_reward is not None
+                else raw_reward / self.reward_scale
+            )
             self.elapsed_ticks[index, lane] = transition.elapsed_ticks
             self.terminated[index, lane] = transition.terminated
             self.truncated[index, lane] = transition.truncated
@@ -254,7 +271,9 @@ class RecurrentRolloutBuffer:
             )
             self.episode_id[index, lane] = episode_id
             self.seed[index, lane] = seed
-            self.config_hash[index, lane] = config_hash
+            self.config_hash[index, lane].copy_(
+                torch.tensor(config_hash, dtype=torch.uint64)
+            )
         self.size += 1
 
     def finalize(

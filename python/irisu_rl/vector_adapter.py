@@ -27,10 +27,26 @@ class ObservationInput:
 
 
 @dataclass(frozen=True, slots=True)
+class OwnedEvent:
+    tick: int
+    sequence: int
+    kind: int
+    a: int
+    b: int
+    value: int
+    detail: str
+    primitive_phase: str
+
+
+@dataclass(frozen=True, slots=True)
 class OwnedDiagnostics:
     config_hash: int
     invalid_action: bool
-    event_count: int
+    events: tuple[OwnedEvent, ...]
+
+    @property
+    def event_count(self) -> int:
+        return len(self.events)
 
 
 @dataclass(frozen=True, slots=True)
@@ -153,6 +169,34 @@ class MacroVectorAdapter:
     def _require_lengths(expected: int, *values: Sequence[object]) -> None:
         if any(len(value) != expected for value in values):
             raise ValueError("backend returned a malformed lane batch")
+
+    @staticmethod
+    def _own_events(info: object, primitive_phase: str) -> tuple[OwnedEvent, ...]:
+        if not isinstance(info, dict):
+            raise TypeError("backend info must be a dictionary")
+        owned: list[OwnedEvent] = []
+        for raw in info.get("events", ()):
+            getter = (
+                raw.get
+                if isinstance(raw, dict)
+                else lambda key, default=0: getattr(raw, key, default)
+            )
+            detail = getter("detail", "")
+            if not detail:
+                detail = getattr(raw, "detail_text", "")
+            owned.append(
+                OwnedEvent(
+                    int(getter("tick", 0)),
+                    int(getter("sequence", 0)),
+                    int(getter("kind", -1)),
+                    int(getter("a", 0)),
+                    int(getter("b", 0)),
+                    int(getter("value", 0)),
+                    str(detail),
+                    primitive_phase,
+                )
+            )
+        return tuple(owned)
 
     def _fail_closed(self, exc: BaseException) -> None:
         self._poisoned = True
@@ -354,7 +398,14 @@ class MacroVectorAdapter:
             final_raw = list(observations)
             final_encoded = [first_encoded.row(index) for index in range(self.num_envs)]
             total_rewards = [int(value) for value in rewards]
-            total_events = [len(info.get("events", ())) for info in infos]
+            # Exact/portable event views expire on the next lane step. Copy the
+            # complete press payload before any release can invalidate it.
+            total_events = [
+                self._own_events(
+                    info, "wait" if action.kind is SemanticActionKind.WAIT else "press"
+                )
+                for info, action in zip(infos, validated)
+            ]
             invalid = [bool(info.get("invalid_action", False)) for info in infos]
             config_hashes = [int(info.get("config_hash", 0)) for info in infos]
             final_terminated = [bool(value) for value in terminated]
@@ -400,8 +451,8 @@ class MacroVectorAdapter:
                     phase="release",
                     actions=[validated[lane] for lane in release_lanes],
                 )
-                release_event_counts = [
-                    len(info.get("events", ())) for info in release_infos
+                release_events = [
+                    self._own_events(info, "release") for info in release_infos
                 ]
                 release_invalid = [
                     bool(info.get("invalid_action", False)) for info in release_infos
@@ -415,7 +466,7 @@ class MacroVectorAdapter:
                 final_raw[lane] = release_observations[offset]
                 final_encoded[lane] = release_encoded.row(offset)
                 total_rewards[lane] += int(release_rewards[offset])
-                total_events[lane] += release_event_counts[offset]
+                total_events[lane] += release_events[offset]
                 invalid[lane] |= release_invalid[offset]
                 config_hashes[lane] = release_hashes[offset]
                 final_terminated[lane] = bool(release_terminated[offset])
