@@ -1,0 +1,73 @@
+{
+  "host": {
+    "affinity": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15
+    ],
+    "cpu_model": "AMD Ryzen 7 3700X 8-Core Processor",
+    "deterministic_algorithms": true,
+    "interop_threads": 1,
+    "platform": "Linux-7.1.2-3-cachyos-x86_64-with-glibc2.43",
+    "python": "3.14.6",
+    "threads": 8,
+    "torch": "2.13.0+cpu"
+  },
+  "identity": {
+    "action_schema": "deployment-v1",
+    "action_schema_sha256": "8a56771aaa174d0eca7e0ebab21f3148417aa6f40e693e50524cdc17a5a5437d",
+    "actor_input_is_deployment_compatible": false,
+    "actor_schema": "teacher-v1",
+    "actor_schema_sha256": "7cba243c6517a195347ea5bb5c999cdd7eef165e8a91a32e1a2200630c5dc8fa",
+    "architecture": "recurrent-actor-critic-v1",
+    "config": {
+      "body_hidden": 96,
+      "fused_hidden": 192,
+      "global_hidden": 96,
+      "minimum_concentration": 1.001,
+      "recurrent_hidden": 192,
+      "recurrent_layers": 1
+    },
+    "critic_schema": "teacher-v1",
+    "critic_schema_sha256": "7cba243c6517a195347ea5bb5c999cdd7eef165e8a91a32e1a2200630c5dc8fa",
+    "deployable": false,
+    "transfer_gate": "R4 tracker/input calibration pending"
+  },
+  "interpretation": "CPU model engineering throughput only; excludes environment collection and is not learning or transfer evidence",
+  "parameters": {
+    "active_bodies": 64,
+    "sequence_batch": 8,
+    "sequence_iterations": 50,
+    "sequence_length": 32,
+    "step_batch": 16,
+    "step_iterations": 500,
+    "threads": 8
+  },
+  "recorded_at": "2026-07-22",
+  "results": {
+    "model_parameters": 324784,
+    "sequence_decisions_per_second": 10524.393226900527,
+    "sequence_elapsed_seconds": 1.2162221349999527,
+    "step_decisions_per_second": 8918.826982989536,
+    "step_elapsed_seconds": 0.8969789429997945
+  },
+  "schema": "rl-r2a-cpu-inference-v1",
+  "source": {
+    "commit": "e4fa9dcbbfd2658b2ae6e8abadfccc6e8e09b51d",
+    "dirty": false,
+    "uv_lock_sha256": "7ce69dab92473b73969a9eea706cbb95beccd40bf7a74c543518b3a883d8936d"
+  }
+}

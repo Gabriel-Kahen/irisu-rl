@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Callable, Protocol, Sequence
 
+import numpy as np
+
 from .actions import ActionSpec, SemanticAction, SemanticActionKind
 from .encoding import EncodedBatch
 from .schema import TensorSchema
@@ -52,6 +54,22 @@ class MacroTransition:
     bootstrap_mask: bool
     trace_mask: bool
     diagnostics: OwnedDiagnostics
+
+
+@dataclass(frozen=True, slots=True)
+class AdapterCheckpoint:
+    version: str
+    schema_sha256: str
+    action_sha256: str
+    num_envs: int
+    current: EncodedBatch
+    raw_ticks: tuple[int, ...]
+    raw_scores: tuple[int, ...]
+    seeds: tuple[int, ...]
+    episode_ids: tuple[int, ...]
+    seed_allocator: dict[str, int | str]
+    snapshots: tuple[bytes, ...]
+    state_hashes: tuple[int, ...]
 
 
 class MacroVectorAdapter:
@@ -167,6 +185,137 @@ class MacroVectorAdapter:
         self._raw_scores = [int(getattr(value, "score", 0)) for value in observations]
         self._seeds = list(reservation.seeds)
         self._episode_ids = [0] * self.num_envs
+        self._initialized = True
+        return encoded.copy()
+
+    def checkpoint(self) -> AdapterCheckpoint:
+        """Capture a complete clean-boundary coordinator/environment state."""
+
+        if self._poisoned:
+            raise RuntimeError("cannot checkpoint a poisoned adapter")
+        if not self._initialized or self._current is None or self._schema is None:
+            raise RuntimeError("adapter must be reset before checkpointing")
+        if self.observation_transform is not None:
+            raise RuntimeError(
+                "stateful observation transforms need an explicit checkpoint contract"
+            )
+        snapshots = tuple(self.env.clone_state())
+        state_hashes = tuple(int(value) for value in self.env.state_hash())
+        self._require_lengths(self.num_envs, snapshots, state_hashes)
+        return AdapterCheckpoint(
+            "macro-vector-adapter-checkpoint-v1",
+            self._schema.sha256,
+            self.action_spec.sha256,
+            self.num_envs,
+            self._current.copy(),
+            tuple(self._raw_ticks),
+            tuple(self._raw_scores),
+            tuple(self._seeds),
+            tuple(self._episode_ids),
+            self.seed_allocator.state_dict(),
+            snapshots,
+            state_hashes,
+        )
+
+    def restore_checkpoint(self, checkpoint: AdapterCheckpoint) -> EncodedBatch:
+        """Restore after a disposable reset and verify observations/state hashes."""
+
+        if self._poisoned:
+            raise RuntimeError("cannot restore a poisoned adapter")
+        if not self._initialized:
+            raise RuntimeError("reset the fresh backend once before checkpoint restore")
+        if checkpoint.version != "macro-vector-adapter-checkpoint-v1":
+            raise ValueError("adapter checkpoint version mismatch")
+        if checkpoint.num_envs != self.num_envs:
+            raise ValueError("adapter checkpoint lane count mismatch")
+        if checkpoint.action_sha256 != self.action_spec.sha256:
+            raise ValueError("adapter checkpoint action identity mismatch")
+        checkpoint.current.validate()
+        if checkpoint.current.schema.sha256 != checkpoint.schema_sha256:
+            raise ValueError("adapter checkpoint schema identity mismatch")
+        if self._schema is None or checkpoint.schema_sha256 != self._schema.sha256:
+            raise ValueError(
+                "adapter checkpoint does not match the fresh encoder schema"
+            )
+        expected_lengths = (
+            checkpoint.raw_ticks,
+            checkpoint.raw_scores,
+            checkpoint.seeds,
+            checkpoint.episode_ids,
+            checkpoint.snapshots,
+            checkpoint.state_hashes,
+        )
+        self._require_lengths(self.num_envs, *expected_lengths)
+        if any(
+            isinstance(value, bool) or not isinstance(value, int)
+            for values in (
+                checkpoint.raw_ticks,
+                checkpoint.raw_scores,
+                checkpoint.seeds,
+                checkpoint.episode_ids,
+                checkpoint.state_hashes,
+            )
+            for value in values
+        ):
+            raise TypeError(
+                "adapter checkpoint metadata must contain canonical integers"
+            )
+        if any(not isinstance(value, bytes) for value in checkpoint.snapshots):
+            raise TypeError("adapter checkpoint snapshots must be owned bytes")
+        if not np.array_equal(
+            checkpoint.current.source_tick,
+            np.asarray(checkpoint.raw_ticks, dtype=np.int64),
+        ):
+            raise ValueError("checkpoint raw ticks disagree with encoded observations")
+        allocator = SeedAllocator(
+            self.seed_allocator.split.name, key=self.seed_allocator.key
+        )
+        allocator.load_state_dict(checkpoint.seed_allocator)
+        try:
+            observations = self.env.restore_state(checkpoint.snapshots)
+            self._require_lengths(self.num_envs, observations)
+            restored_ticks = tuple(
+                int(getattr(value, "tick", 0)) for value in observations
+            )
+            restored_scores = tuple(
+                int(getattr(value, "score", 0)) for value in observations
+            )
+            if restored_ticks != checkpoint.raw_ticks:
+                raise ValueError(
+                    "restored raw ticks do not match checkpoint bookkeeping"
+                )
+            if restored_scores != checkpoint.raw_scores:
+                raise ValueError(
+                    "restored raw scores do not match checkpoint bookkeeping"
+                )
+            encoded = self._encode(
+                observations, lane_ids=range(self.num_envs), phase="restore"
+            )
+            fields = (
+                "global_features",
+                "body_features",
+                "body_mask",
+                "source_tick",
+                "health_flags",
+            )
+            if any(
+                not np.array_equal(
+                    getattr(encoded, field), getattr(checkpoint.current, field)
+                )
+                for field in fields
+            ):
+                raise ValueError("restored observation does not match checkpoint")
+            state_hashes = tuple(int(value) for value in self.env.state_hash())
+            if state_hashes != checkpoint.state_hashes:
+                raise ValueError("restored environment state hash mismatch")
+        except BaseException as exc:
+            self._fail_closed(exc)
+        self.seed_allocator.load_state_dict(checkpoint.seed_allocator)
+        self._current = encoded
+        self._raw_ticks = list(checkpoint.raw_ticks)
+        self._raw_scores = list(checkpoint.raw_scores)
+        self._seeds = list(checkpoint.seeds)
+        self._episode_ids = list(checkpoint.episode_ids)
         self._initialized = True
         return encoded.copy()
 

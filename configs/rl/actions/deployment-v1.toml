@@ -1,4 +1,5 @@
 version = "deployment-v1"
+sha256 = "8a56771aaa174d0eca7e0ebab21f3148417aa6f40e693e50524cdc17a5a5437d"
 semantic_kinds = ["WAIT", "FIRE_WEAK", "FIRE_STRONG"]
 wait_min_ticks = 1
 wait_max_ticks = 100
@@ -6,6 +7,7 @@ wait_support = "every integer in the inclusive range"
 conditional_distribution = "kind categorical; wait categorical; per-shot independent x/y Beta"
 deterministic_evaluation = "masked kind argmax; masked wait argmax; coordinate Beta mean"
 serialization = "little-endian <BIdd after canonical validation"
+coordinate_log_prob_epsilon = 0.000001
 client_width = 640.0
 client_height = 480.0
 allow_both = false

@@ -12,7 +12,11 @@ dependencies = []
 
 [project.optional-dependencies]
 gymnasium = ["gymnasium>=1.0"]
-training = ["numpy>=2.0"]
+training = [
+    "numpy>=2.0",
+    "tensorboard==2.20.0",
+    "torch==2.13.0",
+]
 
 [tool.setuptools]
 package-dir = {"" = "python"}
@@ -23,3 +27,11 @@ where = ["python"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.uv.sources]
+torch = { index = "pytorch-cpu" }
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true

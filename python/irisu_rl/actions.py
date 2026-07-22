@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import math
+import hashlib
+import json
 import struct
 from dataclasses import dataclass
 from enum import IntEnum
@@ -12,6 +14,8 @@ from typing import Any
 import numpy as np
 
 from irisu_env import Action
+
+ACTION_COORDINATE_EPSILON = 1e-6
 
 
 class SemanticActionKind(IntEnum):
@@ -50,6 +54,7 @@ class ActionSpec:
     release_ticks: int = 1
     timing_status: str = "provisional"
     allow_both: bool = False
+    coordinate_log_prob_epsilon: float = ACTION_COORDINATE_EPSILON
 
     def __post_init__(self) -> None:
         if (
@@ -74,6 +79,31 @@ class ActionSpec:
             raise ValueError("invalid timing status")
         if self.allow_both:
             raise ValueError("simultaneous shots are outside deployment-v1")
+        if (
+            not math.isfinite(self.coordinate_log_prob_epsilon)
+            or not 0 < self.coordinate_log_prob_epsilon < 0.5
+        ):
+            raise ValueError("coordinate likelihood epsilon must be in (0, 0.5)")
+
+    def manifest(self) -> dict[str, object]:
+        return {
+            "version": self.version,
+            "wait_choices": list(self.wait_choices),
+            "client_width": self.client_width,
+            "client_height": self.client_height,
+            "press_ticks": self.press_ticks,
+            "release_ticks": self.release_ticks,
+            "timing_status": self.timing_status,
+            "allow_both": self.allow_both,
+            "coordinate_log_prob_epsilon": self.coordinate_log_prob_epsilon,
+        }
+
+    @property
+    def sha256(self) -> str:
+        payload = json.dumps(
+            self.manifest(), sort_keys=True, separators=(",", ":")
+        ).encode()
+        return hashlib.sha256(payload).hexdigest()
 
     def validate(self, action: SemanticAction) -> SemanticAction:
         try:
@@ -177,9 +207,8 @@ def _digamma(value: np.ndarray) -> np.ndarray:
 
 
 def _beta_log_prob(
-    value: np.ndarray, alpha: np.ndarray, beta: np.ndarray
+    value: np.ndarray, alpha: np.ndarray, beta: np.ndarray, epsilon: float
 ) -> np.ndarray:
-    epsilon = np.finfo(np.float64).eps
     x = np.clip(value, epsilon, 1.0 - epsilon)
     log_norm = np.vectorize(math.lgamma)(alpha) + np.vectorize(math.lgamma)(beta)
     log_norm -= np.vectorize(math.lgamma)(alpha + beta)
@@ -275,7 +304,10 @@ class ConditionalActionDistribution:
                 branch = kind - 1
                 xy = np.asarray((action.x_norm, action.y_norm), dtype=np.float64)
                 value += _beta_log_prob(
-                    xy, self.alpha[lane, branch], self.beta[lane, branch]
+                    xy,
+                    self.alpha[lane, branch],
+                    self.beta[lane, branch],
+                    self.spec.coordinate_log_prob_epsilon,
                 ).sum()
             result[lane] = value
         return result
