@@ -590,7 +590,7 @@ def main() -> None:
             spec=spec,
         )
         stack.callback(test.close)
-        result["exact_runtime_build_info"] = test.tasks[0].env.envs[0].build_info
+        result["exact_runtime_build_info"] = test.tasks[0].env.envs[0].build_info()
         result["task"]["mechanics_config_hashes"]["test"] = test.config_hashes()
         test_runs = []
         for model_seed, state in zip(MODEL_SEEDS, states[selected]):
