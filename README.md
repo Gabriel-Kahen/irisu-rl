@@ -18,8 +18,9 @@ original game.
 - [`configs`](configs): measured mechanics configurations
 - [`tools`](tools): capture, validation, and exact-physics tooling
 - [`docs`](docs) and [`reference`](reference/README.md): design and clean-room research records
-- [`RL.md`](RL.md) and [`docs/rl-r0-r1.md`](docs/rl-r0-r1.md): transfer roadmap
-  and the implemented R0/R1 contract
+- [`RL.md`](RL.md), [`docs/rl-r0-r1.md`](docs/rl-r0-r1.md), and
+  [`docs/rl-r3a.md`](docs/rl-r3a.md): transfer roadmap and implemented RL
+  contracts through the multi-step collector/curriculum foundation
 
 ## Simulator details
 

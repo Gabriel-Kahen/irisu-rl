@@ -120,10 +120,17 @@ class MacroVectorAdapter:
         self._raw_scores = [0] * self.num_envs
         self._seeds = [0] * self.num_envs
         self._episode_ids = [0] * self.num_envs
+        self._mutation_generation = 0
 
     @property
     def poisoned(self) -> bool:
         return self._poisoned
+
+    @property
+    def mutation_generation(self) -> int:
+        """Monotone successful reset/restore/step generation for ownership checks."""
+
+        return self._mutation_generation
 
     @property
     def current_observation(self) -> EncodedBatch:
@@ -230,6 +237,7 @@ class MacroVectorAdapter:
         self._seeds = list(reservation.seeds)
         self._episode_ids = [0] * self.num_envs
         self._initialized = True
+        self._mutation_generation += 1
         return encoded.copy()
 
     def checkpoint(self) -> AdapterCheckpoint:
@@ -364,6 +372,7 @@ class MacroVectorAdapter:
         self._seeds = list(checkpoint.seeds)
         self._episode_ids = list(checkpoint.episode_ids)
         self._initialized = True
+        self._mutation_generation += 1
         return encoded.copy()
 
     def step(self, actions: Sequence[SemanticAction]) -> tuple[MacroTransition, ...]:
@@ -603,4 +612,5 @@ class MacroVectorAdapter:
                     self._raw_scores[lane] = end_scores[lane]
         except BaseException as exc:
             self._fail_closed(exc)
+        self._mutation_generation += 1
         return tuple(transitions)
