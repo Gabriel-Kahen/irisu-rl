@@ -423,3 +423,21 @@ with IrisuEnv() as env:
 Neither baseline receives RNG state, future spawns, or hidden schedules. Their
 purpose is determinism, integration testing, qualitative transfer probes, and a
 floor for later learned policies—not a superhuman-performance claim.
+
+## R3a recurrent collector smoke
+
+`rl_r3a.py` runs bounded collect/update cycles through the production semantic
+macro adapter, recurrent buffer, SMDP GAE, and PPO trainer. It reports complete
+transition and simulated-tick throughput separately from optimizer health. An
+absolute runtime path is mandatory; exact and portable backends are never
+selected by workspace fallback.
+
+```bash
+uv run --extra training python benchmarks/rl_r3a.py \
+  --backend exact \
+  --runtime /absolute/path/to/irisu-exact-worker \
+  --lanes 16 --updates 4 --decisions 32
+```
+
+This is a systems smoke, not a learning or transfer benchmark. Its output is
+always labeled privileged, non-deployable, and pre-readiness.
