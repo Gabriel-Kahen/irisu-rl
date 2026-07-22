@@ -179,9 +179,7 @@ class RecurrentBufferTests(unittest.TestCase):
         buffer = RecurrentRolloutBuffer(1, 4, current.schema, torch.zeros((1, 4, 3)))
         kind_mask = torch.zeros((4, 3), dtype=torch.bool)
         kind_mask[:, 1] = True
-        wait_mask = torch.zeros(
-            (4, len(ActionSpec().wait_choices)), dtype=torch.bool
-        )
+        wait_mask = torch.zeros((4, len(ActionSpec().wait_choices)), dtype=torch.bool)
         buffer.append(
             current,
             transitions,

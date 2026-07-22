@@ -41,9 +41,7 @@ class SimulatorIdentity:
     def __post_init__(self) -> None:
         if self.backend not in {"portable", "exact"}:
             raise ValueError("simulator backend must be portable or exact")
-        if self.backend == "exact" and not _is_sha256(
-            self.worker_executable_sha256
-        ):
+        if self.backend == "exact" and not _is_sha256(self.worker_executable_sha256):
             raise ValueError("exact simulator identity requires a worker hash")
         if self.backend == "portable" and self.worker_executable_sha256 is not None:
             raise ValueError("portable simulator identity cannot name an exact worker")
@@ -53,14 +51,11 @@ class SimulatorIdentity:
             raise ValueError("simulator library and mechanics hashes must be SHA-256")
         if not _is_sha256(self.seed_manifest_sha256):
             raise ValueError("seed manifest hash must be SHA-256")
-        if (
-            not self.config_hashes
-            or any(
-                isinstance(value, bool)
-                or not isinstance(value, int)
-                or not 0 <= value < 2**64
-                for value in self.config_hashes
-            )
+        if not self.config_hashes or any(
+            isinstance(value, bool)
+            or not isinstance(value, int)
+            or not 0 <= value < 2**64
+            for value in self.config_hashes
         ):
             raise ValueError("simulator config hashes must be nonempty uint64 values")
         if (

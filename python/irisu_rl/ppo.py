@@ -497,9 +497,7 @@ class PPOTrainer:
                     kind_kl = torch.exp(kind_log_ratio) - 1.0 - kind_log_ratio
                     wait_kl = torch.exp(wait_log_ratio) - 1.0 - wait_log_ratio
                     coordinate_kl = (
-                        torch.exp(coordinate_log_ratio)
-                        - 1.0
-                        - coordinate_log_ratio
+                        torch.exp(coordinate_log_ratio) - 1.0 - coordinate_log_ratio
                     )
                     clip_fraction = (
                         (torch.abs(ratio - 1.0) > self.config.clip_ratio)[train_mask]
@@ -517,9 +515,7 @@ class PPOTrainer:
                             train_count,
                         ),
                         "kind_approximate_kl": _masked_metric(kind_kl, train_mask),
-                        "wait_approximate_kl": _masked_metric(
-                            wait_kl, wait_train_mask
-                        ),
+                        "wait_approximate_kl": _masked_metric(wait_kl, wait_train_mask),
                         "coordinate_approximate_kl": _masked_metric(
                             coordinate_kl, coordinate_train_mask
                         ),
@@ -547,6 +543,7 @@ class PPOTrainer:
         if not records:
             raise RuntimeError("PPO update produced no optimizer steps")
         self.schedule.step()
+
         def weighted_mean(name: str) -> float:
             total_weight = sum(record[name][1] for record in records)
             return (
@@ -563,9 +560,7 @@ class PPOTrainer:
             approximate_kl=weighted_mean("approximate_kl"),
             kind_approximate_kl=weighted_mean("kind_approximate_kl"),
             wait_approximate_kl=weighted_mean("wait_approximate_kl"),
-            coordinate_approximate_kl=weighted_mean(
-                "coordinate_approximate_kl"
-            ),
+            coordinate_approximate_kl=weighted_mean("coordinate_approximate_kl"),
             clip_fraction=weighted_mean("clip_fraction"),
             gradient_norm=weighted_mean("gradient_norm"),
             kind_entropy=weighted_mean("kind_entropy"),

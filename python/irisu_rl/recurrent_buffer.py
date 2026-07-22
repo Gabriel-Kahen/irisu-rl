@@ -253,12 +253,8 @@ class RecurrentRolloutBuffer:
         self.body_mask[index].copy_(torch.from_numpy(observations.body_mask))
         self.reset_before[index].copy_(reset_before.detach().cpu())
         self.old_log_prob[index].copy_(old_log_prob.detach().cpu())
-        self.old_kind_log_prob[index].copy_(
-            old_log_prob_components.kind.detach().cpu()
-        )
-        self.old_wait_log_prob[index].copy_(
-            old_log_prob_components.wait.detach().cpu()
-        )
+        self.old_kind_log_prob[index].copy_(old_log_prob_components.kind.detach().cpu())
+        self.old_wait_log_prob[index].copy_(old_log_prob_components.wait.detach().cpu())
         self.old_coordinate_log_prob[index].copy_(
             old_log_prob_components.coordinates.detach().cpu()
         )

@@ -66,7 +66,9 @@ class R2ManifestTests(unittest.TestCase):
         self.assertRegex(manifest["uv_lock_sha256"], r"^[0-9a-f]{64}$")
         self.assertEqual(manifest["simulator"]["config_hashes"], [3, 4])
 
-    def test_simulator_identity_requires_exact_runtime_and_mechanics_hashes(self) -> None:
+    def test_simulator_identity_requires_exact_runtime_and_mechanics_hashes(
+        self,
+    ) -> None:
         with self.assertRaisesRegex(ValueError, "worker hash"):
             SimulatorIdentity(
                 backend="exact",

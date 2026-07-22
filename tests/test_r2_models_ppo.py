@@ -102,9 +102,7 @@ class PPOTrainerTests(unittest.TestCase):
         elif isinstance(left, (list, tuple)):
             self.assertEqual(len(left), len(right), path)
             for index, (left_item, right_item) in enumerate(zip(left, right)):
-                self.assert_nested_equal(
-                    left_item, right_item, f"{path}[{index}]"
-                )
+                self.assert_nested_equal(left_item, right_item, f"{path}[{index}]")
         else:
             self.assertEqual(left, right, path)
 
