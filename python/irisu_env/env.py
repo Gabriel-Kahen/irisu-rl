@@ -171,6 +171,17 @@ def _events(raw: object) -> list[dict[str, Any]]:
     return result
 
 
+class _GymBodySequence(tuple):
+    """Gym Sequence tuple with canonical list-compatible equality."""
+
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, (list, tuple)):
+            return tuple.__eq__(self, tuple(other))
+        return False
+
+    __hash__ = None
+
+
 def _gym_observation(value: dict[str, Any]) -> dict[str, Any]:
     if _gym is None:
         return value
@@ -181,34 +192,32 @@ def _gym_observation(value: dict[str, Any]) -> dict[str, Any]:
         "tick",
         "qualifying_clear_count",
     ):
-        result[key] = np.asarray(result[key], dtype=np.uint64)
+        result[key] = np.uint64(result[key])
     for key in (
         "score",
         "gauge",
         "gauge_max",
     ):
-        result[key] = np.asarray(result[key], dtype=np.int64)
+        result[key] = np.int64(result[key])
     for key in (
         "level",
         "highest_chain",
     ):
-        result[key] = np.asarray(result[key], dtype=np.uint32)
+        result[key] = np.uint32(result[key])
     for key in ("terminated", "truncated", "left_held", "right_held"):
         result[key] = int(bool(result[key]))
-    result["bodies"] = tuple(
+    result["bodies"] = _GymBodySequence(
         {
             **body,
-            "id": np.asarray(body["id"], dtype=np.uint32),
-            "color": np.asarray(body["color"], dtype=np.int32),
-            "chain_id": np.asarray(body["chain_id"], dtype=np.uint32),
-            "projectile_hits": np.asarray(body["projectile_hits"], dtype=np.uint32),
-            "age_ticks": np.asarray(body["age_ticks"], dtype=np.uint64),
-            "remaining_lifetime": np.asarray(
-                body["remaining_lifetime"], dtype=np.int64
-            ),
-            "rot_timer": np.asarray(body["rot_timer"], dtype=np.uint64),
+            "id": np.uint32(body["id"]),
+            "color": np.int32(body["color"]),
+            "chain_id": np.uint32(body["chain_id"]),
+            "projectile_hits": np.uint32(body["projectile_hits"]),
+            "age_ticks": np.uint64(body["age_ticks"]),
+            "remaining_lifetime": np.int64(body["remaining_lifetime"]),
+            "rot_timer": np.uint64(body["rot_timer"]),
             **{
-                key: np.asarray(body[key], dtype=np.float64)
+                key: np.float64(body[key])
                 for key in (
                     "x", "y", "vx", "vy", "angle", "angular_velocity", "size"
                 )
@@ -217,11 +226,11 @@ def _gym_observation(value: dict[str, Any]) -> dict[str, Any]:
         for body in result["bodies"]
     )
     result["field"] = {
-        key: np.asarray(number, dtype=np.float64)
+        key: np.float64(number)
         for key, number in result["field"].items()
     }
     result["difficulty"] = {
-        key: np.asarray(number, dtype=np.uint32)
+        key: np.uint32(number)
         for key, number in result["difficulty"].items()
     }
     return result

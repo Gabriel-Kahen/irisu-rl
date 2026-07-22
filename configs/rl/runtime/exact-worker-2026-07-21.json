@@ -1,0 +1,11 @@
+{
+  "version": "exact-runtime-identity-v1",
+  "worker_path_policy": "absolute-path-required-at-runtime",
+  "worker_sha256": "4faa4508a89df3e1e62b80e2871b6a35b5913f220d53fe5de43408ad6512c261",
+  "exact_library_sha256": "ce14d1cab9ce4331bf494fe92bf657029487aec9f7435e7479b3c7cb579fafb5",
+  "protocol_version": 1,
+  "body_capacity": 196,
+  "pointer_bits": 32,
+  "backend": "exact-msvc9-r58-multiworld-forward",
+  "evidence": "benchmarks/results/exact-pipeline-ready-drain-wide-2026-07-21.json"
+}

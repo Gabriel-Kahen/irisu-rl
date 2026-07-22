@@ -1,0 +1,45 @@
+{
+  "version": "actor-vision-v1",
+  "source": "actor_tracks",
+  "capacity": 196,
+  "global_features": [
+    "gauge_fraction", "gauge_confidence", "level_log1p", "level_confidence",
+    "elapsed_seconds_scaled", "timing_confidence", "commanded_left", "commanded_right",
+    "cursor_x_norm", "cursor_y_norm", "cursor_age_seconds_scaled", "transform_confidence",
+    "previous_kind_wait", "previous_kind_weak", "previous_kind_strong",
+    "previous_x_norm", "previous_y_norm", "previous_duration_seconds_scaled",
+    "previous_acknowledged", "pending_kind_wait", "pending_kind_weak",
+    "pending_kind_strong", "pending_age_seconds_scaled", "pending_acknowledged",
+    "frame_age_seconds_scaled", "effect_horizon_seconds_scaled", "effect_horizon_uncertainty_scaled",
+    "recent_births_scaled", "recent_deaths_scaled", "recent_merges_scaled", "recent_clears_scaled",
+    "detection_count_fraction", "mean_detection_confidence", "detection_overflow"
+  ],
+  "body_features": [
+    "kind_piece", "kind_projectile", "kind_bonus", "kind_unknown",
+    "shape_circle", "shape_box", "shape_triangle", "shape_unknown",
+    "color_0", "color_1", "color_2", "color_3", "color_4", "color_5",
+    "color_bonus", "color_unknown", "lifecycle_falling", "lifecycle_fresh",
+    "lifecycle_confirmed", "lifecycle_rotten", "lifecycle_ambiguous",
+    "lifecycle_unknown", "effect_x_norm", "effect_y_norm",
+    "velocity_x_display_per_second_scaled", "velocity_y_display_per_second_scaled",
+    "orientation_sin", "orientation_cos", "orientation_valid",
+    "angular_velocity_scaled", "width_norm", "height_norm", "detection_confidence",
+    "track_age_seconds_scaled", "missing_age_seconds_scaled", "occluded_probability",
+    "merged_probability", "position_uncertainty_x_norm", "position_uncertainty_y_norm"
+  ],
+  "preprocessing": [
+    "coordinates: effect-time pixels divided by 640x480",
+    "velocity: explicit display pixels/second divided by 1000",
+    "angular_velocity: radians/second divided by 10",
+    "elapsed_seconds: log1p(value)/8",
+    "age/duration seconds: log1p(value)/4",
+    "frame/effect seconds: value/0.1",
+    "recent event counts: log1p(value)/4",
+    "level: log1p(value)/8",
+    "categories: normalized probabilities with explicit unknown bucket",
+    "orientation: circle/unknown invalid; box sin(4a),cos(4a); triangle sin(a),cos(a)",
+    "fully offscreen, fully occluded, and missing-age>1s tracks excluded",
+    "health flag bit 1: any normalized feature magnitude exceeds 32"
+  ],
+  "sha256": "6efa38fe06920afbcd6ab99b53e40811a782e59dbe45fc2c8fbe320b8c87afe6"
+}

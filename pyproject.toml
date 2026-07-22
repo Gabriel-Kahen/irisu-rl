@@ -12,6 +12,7 @@ dependencies = []
 
 [project.optional-dependencies]
 gymnasium = ["gymnasium>=1.0"]
+training = ["numpy>=2.0"]
 
 [tool.setuptools]
 package-dir = {"" = "python"}

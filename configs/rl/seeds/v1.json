@@ -1,0 +1,11 @@
+{
+  "version": "seed-splits-v1",
+  "allocator": "odd-affine-permutation-v1",
+  "splits": {
+    "train": {"start": 0, "size": 1073741824},
+    "validation": {"start": 1073741824, "size": 268435456},
+    "calibration": {"start": 1342177280, "size": 268435456},
+    "test": {"start": 1610612736, "size": 536870912}
+  },
+  "rule": "Splits are immutable and disjoint; allocator key and cursor are checkpoint state."
+}

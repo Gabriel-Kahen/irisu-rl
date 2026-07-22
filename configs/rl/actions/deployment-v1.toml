@@ -1,0 +1,48 @@
+version = "deployment-v1"
+semantic_kinds = ["WAIT", "FIRE_WEAK", "FIRE_STRONG"]
+wait_min_ticks = 1
+wait_max_ticks = 100
+wait_support = "every integer in the inclusive range"
+conditional_distribution = "kind categorical; wait categorical; per-shot independent x/y Beta"
+deterministic_evaluation = "masked kind argmax; masked wait argmax; coordinate Beta mean"
+serialization = "little-endian <BIdd after canonical validation"
+client_width = 640.0
+client_height = 480.0
+allow_both = false
+
+[click_macro]
+press_ticks = 1
+release_ticks = 1
+status = "provisional"
+owner = "R4 original-game input calibration"
+evidence = "none; smoke-only simulator default"
+decision_deadline = "before bulk transfer-oriented training"
+
+[cursor]
+travel_model = "teleport"
+quantization = "none"
+status = "provisional"
+owner = "R4 coordinate/input bridge calibration"
+evidence = "none; smoke-only simulator default"
+decision_deadline = "before scripted-policy transfer gate"
+
+[capture]
+frame_rate = 0.0
+latency_seconds = 0.0
+status = "provisional placeholder; zero is not a measured training value"
+owner = "R4 capture/perception calibration"
+evidence = "none"
+decision_deadline = "before actor-vision sim oracle training"
+
+[effect_timing]
+game_poll_latency_seconds = 0.0
+uncertainty_seconds = 0.0
+status = "provisional placeholder; zero is not a measured training value"
+owner = "R4 input bridge calibration"
+evidence = "none"
+decision_deadline = "before scripted-policy transfer gate"
+
+[fairness]
+fast_forward = false
+simultaneous_buttons = false
+status = "fixed for smoke; must match locked human protocol"

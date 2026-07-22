@@ -1,0 +1,34 @@
+version = "r0-r1-v1"
+actor_schema = "actor-vision-v1"
+teacher_schema = "teacher-v1"
+action_schema = "deployment-v1"
+seed_manifest = "seed-splits-v1"
+exact_runtime = "exact-runtime-identity-v1"
+
+[reward]
+raw = "score_after - score_before"
+raw_dtype = "int64"
+reward_scale = 1.0
+reward_scale_status = "provisional; select from frozen R2 exploratory data"
+clip = false
+full_game_shaping_weight = 0.0
+
+[smdp]
+gamma_tick = 1.0
+discounted_internal_events = false
+elapsed_ticks_source = "raw_native_end_tick - raw_native_start_tick"
+truncation_bootstrap = "retained final observation at a neutral decision boundary"
+neutral_wait_truncation_bootstrap = true
+held_press_truncation_bootstrap = false
+
+[throughput]
+collection_path = "padded batch first primitive + concurrent active-lane releases"
+borrowed_views = "encode/copy before next lane operation"
+
+[r2_learning_rate_handoff]
+status = "not selected until recurrent PPO smoke"
+default_initial = 0.0003
+candidate_initial = [0.0001, 0.0003, 0.0006]
+schedule = "linear decay to 0.1 * initial over each fixed-budget smoke"
+selection = "held-out raw score, value explained variance, KL, clip fraction, and gradient norms"
+rule = "same seed budget per candidate; never tune on final test split"

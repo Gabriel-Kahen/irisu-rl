@@ -4,6 +4,11 @@ These tools exercise the **current provisional `v2.03-normal` profile**. They
 measure engineering behavior only; they do not certify original-game fidelity
 or policy quality.
 
+`rl_r1.py` measures the complete neural-ready collection path: padded vector
+execution, validated semantic click macros, active-lane releases, numeric
+encoding, autoreset seed ownership, and preallocated rollout writes. Run with
+`uv run --extra training python benchmarks/rl_r1.py`.
+
 Build and run the default benchmark from the repository root:
 
 ```bash
