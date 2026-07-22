@@ -34,6 +34,7 @@ from irisu_rl.ppo import PPOConfig, PPOTrainer
 from irisu_rl.recurrent_buffer import RecurrentRolloutBuffer
 from irisu_rl.schema import TEACHER_V1
 from irisu_rl.seeds import SeedAllocator
+from irisu_rl.torch_distribution import LogProbabilityComponents
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -194,6 +195,9 @@ class OneBodyContractTests(unittest.TestCase):
             transitions,
             torch.zeros(2),
             torch.zeros(2),
+            old_log_prob_components=LogProbabilityComponents(
+                torch.zeros(2), torch.zeros(2), torch.zeros(2)
+            ),
             reset_before=torch.zeros(2, dtype=torch.bool),
             optimizer_reward=torch.ones(2),
         )
@@ -210,7 +214,8 @@ class IntegratedResumeTests(unittest.TestCase):
         with torch.no_grad():
             distribution, values = policy_distribution(model, observations)
             actions = distribution.sample()
-            log_prob = distribution.log_prob(actions)
+            log_prob_components = distribution.log_prob_components(actions)
+            log_prob = log_prob_components.total
         semantic = tuple(
             model.action_spec.decode(1, 0, float(x), float(y)) for x, y in actions.xy[0]
         )
@@ -235,7 +240,13 @@ class IntegratedResumeTests(unittest.TestCase):
         )
         reward = 0.75 * hit.float() + 0.25 * aim
         batch = one_body_training_batch(
-            model, observations, actions, log_prob, values, reward
+            model,
+            observations,
+            actions,
+            log_prob,
+            log_prob_components,
+            values,
+            reward,
         )
         stats = trainer.update(batch)
         return (

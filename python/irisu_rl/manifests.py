@@ -7,6 +7,7 @@ import json
 import math
 import platform
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping
 
@@ -15,6 +16,65 @@ import torch
 
 from .models import RecurrentActorCritic
 from .ppo import PPOConfig
+
+
+def _is_sha256(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class SimulatorIdentity:
+    """Runtime/mechanics identity required by every resumable training run."""
+
+    backend: str
+    worker_executable_sha256: str | None
+    physics_library_sha256: str
+    mechanics_config_sha256: str
+    config_hashes: tuple[int, ...]
+    protocol_version: int
+    seed_manifest_sha256: str
+
+    def __post_init__(self) -> None:
+        if self.backend not in {"portable", "exact"}:
+            raise ValueError("simulator backend must be portable or exact")
+        if self.backend == "exact" and not _is_sha256(self.worker_executable_sha256):
+            raise ValueError("exact simulator identity requires a worker hash")
+        if self.backend == "portable" and self.worker_executable_sha256 is not None:
+            raise ValueError("portable simulator identity cannot name an exact worker")
+        if not _is_sha256(self.physics_library_sha256) or not _is_sha256(
+            self.mechanics_config_sha256
+        ):
+            raise ValueError("simulator library and mechanics hashes must be SHA-256")
+        if not _is_sha256(self.seed_manifest_sha256):
+            raise ValueError("seed manifest hash must be SHA-256")
+        if not self.config_hashes or any(
+            isinstance(value, bool)
+            or not isinstance(value, int)
+            or not 0 <= value < 2**64
+            for value in self.config_hashes
+        ):
+            raise ValueError("simulator config hashes must be nonempty uint64 values")
+        if (
+            isinstance(self.protocol_version, bool)
+            or not isinstance(self.protocol_version, int)
+            or self.protocol_version <= 0
+        ):
+            raise ValueError("simulator protocol version must be a positive integer")
+
+    def manifest(self) -> dict[str, object]:
+        return {
+            "backend": self.backend,
+            "worker_executable_sha256": self.worker_executable_sha256,
+            "physics_library_sha256": self.physics_library_sha256,
+            "mechanics_config_sha256": self.mechanics_config_sha256,
+            "config_hashes": list(self.config_hashes),
+            "protocol_version": self.protocol_version,
+            "seed_manifest_sha256": self.seed_manifest_sha256,
+        }
 
 
 def canonical_sha256(value: object) -> str:
@@ -34,6 +94,7 @@ def runtime_manifest(
     lambda_tick: float,
     code_revision: str,
     observation_provenance: str,
+    simulator: SimulatorIdentity,
     extra: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
     """Build the immutable identity embedded in every checkpoint and report."""
@@ -75,6 +136,7 @@ def runtime_manifest(
         "torch_num_interop_threads": torch.get_num_interop_threads(),
         "deterministic_algorithms": torch.are_deterministic_algorithms_enabled(),
         "model": model.manifest(),
+        "simulator": simulator.manifest(),
         "ppo": ppo.manifest(),
         "reward": {
             "raw": "score_after - score_before",

@@ -14,7 +14,7 @@ from .encoding import EncodedBatch
 from .ppo import RecurrentTrainingBatch
 from .returns import AdvantageResult, smdp_gae
 from .schema import TensorSchema
-from .torch_distribution import ActionTensor
+from .torch_distribution import ActionTensor, LogProbabilityComponents
 from .vector_adapter import MacroTransition
 
 
@@ -70,6 +70,9 @@ class RecurrentRolloutBuffer:
             (*shape, len(self.action_spec.wait_choices)), dtype=torch.bool
         )
         self.old_log_prob = torch.zeros(shape, dtype=torch.float32)
+        self.old_kind_log_prob = torch.zeros(shape, dtype=torch.float32)
+        self.old_wait_log_prob = torch.zeros(shape, dtype=torch.float32)
+        self.old_coordinate_log_prob = torch.zeros(shape, dtype=torch.float32)
         self.old_values = torch.zeros(shape, dtype=torch.float32)
         self.raw_reward = torch.zeros(shape, dtype=torch.int64)
         self.optimizer_reward = torch.zeros(shape, dtype=torch.float32)
@@ -94,6 +97,7 @@ class RecurrentRolloutBuffer:
         old_log_prob: Tensor,
         old_values: Tensor,
         *,
+        old_log_prob_components: LogProbabilityComponents,
         reset_before: Tensor,
         optimizer_reward: Tensor | None = None,
         kind_mask: Tensor | None = None,
@@ -119,11 +123,26 @@ class RecurrentRolloutBuffer:
         ):
             if value.shape != (self.lanes,) or value.dtype != dtype:
                 raise ValueError(f"{name} must have the canonical lane shape and dtype")
+        component_values = (
+            old_log_prob_components.kind,
+            old_log_prob_components.wait,
+            old_log_prob_components.coordinates,
+        )
+        if any(
+            value.shape != (self.lanes,) or value.dtype != torch.float32
+            for value in component_values
+        ):
+            raise ValueError("old log-probability components must be float32 [B]")
+        if any(value.device != old_log_prob.device for value in component_values):
+            raise ValueError("old likelihood components and total must share a device")
         if old_log_prob.requires_grad or old_values.requires_grad:
             raise ValueError("old policy outputs must be detached")
+        if any(value.requires_grad for value in component_values):
+            raise ValueError("old likelihood components must be detached")
         if (
             not torch.isfinite(old_log_prob).all()
             or not torch.isfinite(old_values).all()
+            or not all(torch.isfinite(value).all() for value in component_values)
         ):
             raise ValueError("old policy outputs must be finite")
         if optimizer_reward is not None and (
@@ -138,6 +157,10 @@ class RecurrentRolloutBuffer:
             if optimizer_reward is not None
             else None
         )
+        if not torch.allclose(
+            old_log_prob_components.total, old_log_prob, rtol=0, atol=1e-6
+        ):
+            raise ValueError("old likelihood components do not sum to total")
         if any(
             transition.lane_id != lane for lane, transition in enumerate(transitions)
         ):
@@ -157,8 +180,9 @@ class RecurrentRolloutBuffer:
             prepared_wait_mask.copy_(wait_mask.detach().cpu())
         if not torch.all(prepared_kind_mask.any(dim=-1)):
             raise ValueError("every lane must allow at least one action kind")
-        if not torch.all(prepared_wait_mask.any(dim=-1)):
-            raise ValueError("every lane must allow at least one wait duration")
+        missing_wait = ~prepared_wait_mask.any(dim=-1)
+        if torch.any(missing_wait & prepared_kind_mask[:, 0]):
+            raise ValueError("every WAIT-enabled lane needs an allowed duration")
 
         index = self.size
         prepared: list[tuple[int, int, float, float, int, int, int, int]] = []
@@ -242,6 +266,11 @@ class RecurrentRolloutBuffer:
         self.body_mask[index].copy_(torch.from_numpy(observations.body_mask))
         self.reset_before[index].copy_(reset_before.detach().cpu())
         self.old_log_prob[index].copy_(old_log_prob.detach().cpu())
+        self.old_kind_log_prob[index].copy_(old_log_prob_components.kind.detach().cpu())
+        self.old_wait_log_prob[index].copy_(old_log_prob_components.wait.detach().cpu())
+        self.old_coordinate_log_prob[index].copy_(
+            old_log_prob_components.coordinates.detach().cpu()
+        )
         self.old_values[index].copy_(old_values.detach().cpu())
         self.kind_mask[index].copy_(prepared_kind_mask)
         self.wait_mask[index].copy_(prepared_wait_mask)
@@ -318,6 +347,9 @@ class RecurrentRolloutBuffer:
                 self.action_xy[: self.size],
             ),
             self.old_log_prob[: self.size],
+            self.old_kind_log_prob[: self.size],
+            self.old_wait_log_prob[: self.size],
+            self.old_coordinate_log_prob[: self.size],
             self.old_values[: self.size],
             self.advantage_result.advantages,
             self.advantage_result.returns,

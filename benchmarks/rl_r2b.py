@@ -371,14 +371,21 @@ def train_ppo(
         with torch.no_grad():
             distribution, values = policy_distribution(model, observations)
             actions = distribution.sample()
-            old_log_prob = distribution.log_prob(actions)
+            old_log_prob_components = distribution.log_prob_components(actions)
+            old_log_prob = old_log_prob_components.total
         outcomes = family.step(actions)
         rewards = torch.cat([value.optimizer_reward for value in outcomes])
         hit_history.append(
             float(torch.cat([value.hit for value in outcomes]).float().mean())
         )
         batch = one_body_training_batch(
-            model, observations, actions, old_log_prob, values, rewards
+            model,
+            observations,
+            actions,
+            old_log_prob,
+            old_log_prob_components,
+            values,
+            rewards,
         )
         stats_history.append(trainer.update(batch))
     return (

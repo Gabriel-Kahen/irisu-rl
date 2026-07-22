@@ -19,7 +19,11 @@ from .actions import ActionSpec, SemanticAction, SemanticActionKind
 from .encoding import EncodedBatch, TeacherStateEncoder
 from .models import RecurrentActorCritic
 from .ppo import RecurrentTrainingBatch
-from .torch_distribution import ActionTensor, TorchConditionalActionDistribution
+from .torch_distribution import (
+    ActionTensor,
+    LogProbabilityComponents,
+    TorchConditionalActionDistribution,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -164,6 +168,7 @@ def one_body_training_batch(
     observations: EncodedBatch,
     actions: ActionTensor,
     old_log_prob: Tensor,
+    old_log_prob_components: LogProbabilityComponents,
     old_values: Tensor,
     rewards: Tensor,
 ) -> RecurrentTrainingBatch:
@@ -184,6 +189,9 @@ def one_body_training_batch(
             actions.kind.detach(), actions.wait_index.detach(), actions.xy.detach()
         ),
         old_log_prob.detach(),
+        old_log_prob_components.kind.detach(),
+        old_log_prob_components.wait.detach(),
+        old_log_prob_components.coordinates.detach(),
         old_values.detach(),
         rewards.unsqueeze(0) - old_values.detach(),
         rewards.unsqueeze(0),

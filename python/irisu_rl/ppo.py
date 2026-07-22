@@ -70,6 +70,9 @@ class RecurrentTrainingBatch:
     initial_state: Tensor
     actions: ActionTensor
     old_log_prob: Tensor
+    old_kind_log_prob: Tensor
+    old_wait_log_prob: Tensor
+    old_coordinate_log_prob: Tensor
     old_values: Tensor
     advantages: Tensor
     returns: Tensor
@@ -81,10 +84,35 @@ class RecurrentTrainingBatch:
     def validate(self, model: RecurrentActorCritic) -> tuple[int, int]:
         if self.global_features.ndim != 3:
             raise ValueError("training observations must be time-major [T, B, ...]")
-        time, batch, _ = self.global_features.shape
+        time, batch, global_count = self.global_features.shape
+        if time <= 0 or batch <= 0:
+            raise ValueError("training sequence dimensions must be nonzero")
+        expected_body = (
+            time,
+            batch,
+            model.schema.capacity,
+            len(model.schema.body_features),
+        )
+        expected_state = (
+            model.config.recurrent_layers,
+            batch,
+            model.config.recurrent_hidden,
+        )
+        if (
+            global_count != len(model.schema.global_features)
+            or self.body_features.shape != expected_body
+            or self.body_mask.shape != expected_body[:-1]
+            or self.body_mask.dtype != torch.bool
+        ):
+            raise ValueError("training observations do not match the model schema")
+        if self.initial_state.shape != expected_state:
+            raise ValueError("initial recurrent state does not match the model")
         scalar_shape = (time, batch)
         for value in (
             self.old_log_prob,
+            self.old_kind_log_prob,
+            self.old_wait_log_prob,
+            self.old_coordinate_log_prob,
             self.old_values,
             self.advantages,
             self.returns,
@@ -122,6 +150,9 @@ class RecurrentTrainingBatch:
             self.actions.wait_index,
             self.actions.xy,
             self.old_log_prob,
+            self.old_kind_log_prob,
+            self.old_wait_log_prob,
+            self.old_coordinate_log_prob,
             self.old_values,
             self.advantages,
             self.returns,
@@ -137,12 +168,17 @@ class RecurrentTrainingBatch:
                 "stored rollout tensors must be detached from collection graphs"
             )
         parameter = next(model.parameters())
+        if self.global_features.device != parameter.device:
+            raise ValueError("training tensors and model must share one device")
         for value in (
             self.global_features,
             self.body_features,
             self.initial_state,
             self.actions.xy,
             self.old_log_prob,
+            self.old_kind_log_prob,
+            self.old_wait_log_prob,
+            self.old_coordinate_log_prob,
             self.old_values,
             self.advantages,
             self.returns,
@@ -155,6 +191,9 @@ class RecurrentTrainingBatch:
                 self.global_features,
                 self.body_features,
                 self.old_log_prob,
+                self.old_kind_log_prob,
+                self.old_wait_log_prob,
+                self.old_coordinate_log_prob,
                 self.old_values,
                 self.advantages,
                 self.returns,
@@ -162,13 +201,15 @@ class RecurrentTrainingBatch:
             )
         ):
             raise ValueError("training batch contains nonfinite values")
-        model(
-            self.global_features,
-            self.body_features,
-            self.body_mask,
-            self.initial_state,
-            reset_before=self.reset_before,
-        )
+        if not torch.allclose(
+            self.old_kind_log_prob
+            + self.old_wait_log_prob
+            + self.old_coordinate_log_prob,
+            self.old_log_prob,
+            rtol=0,
+            atol=1e-6,
+        ):
+            raise ValueError("old likelihood components do not sum to total")
         return time, batch
 
 
@@ -178,11 +219,47 @@ class PPOUpdateStats:
     value_loss: float
     entropy: float
     approximate_kl: float
+    kind_approximate_kl: float
+    wait_approximate_kl: float
+    coordinate_approximate_kl: float
     clip_fraction: float
     gradient_norm: float
+    kind_entropy: float
+    wait_entropy: float
+    coordinate_entropy: float
     learning_rate: float
     optimizer_steps: int
     early_stopped: bool
+
+
+def clipped_surrogate_loss(
+    ratio: Tensor, advantages: Tensor, train_mask: Tensor, clip_ratio: float
+) -> Tensor:
+    """Return the masked PPO clipped-surrogate loss for audited fixtures."""
+
+    if (
+        ratio.shape != advantages.shape
+        or train_mask.shape != ratio.shape
+        or train_mask.dtype != torch.bool
+        or not torch.any(train_mask)
+    ):
+        raise ValueError("surrogate inputs need one nonempty shared mask")
+    if (
+        not math.isfinite(clip_ratio)
+        or not 0 < clip_ratio < 1
+        or not torch.isfinite(ratio[train_mask]).all()
+        or not torch.isfinite(advantages[train_mask]).all()
+        or torch.any(ratio[train_mask] <= 0)
+    ):
+        raise ValueError("surrogate ratio, advantages, or clip ratio is invalid")
+    unclipped = ratio * advantages
+    clipped = ratio.clamp(1.0 - clip_ratio, 1.0 + clip_ratio) * advantages
+    return -torch.minimum(unclipped, clipped)[train_mask].mean()
+
+
+def _masked_metric(value: Tensor, mask: Tensor) -> tuple[float, int]:
+    count = int(mask.sum())
+    return (float(value[mask].mean().detach()), count) if count else (0.0, 0)
 
 
 class LinearLearningRate:
@@ -297,13 +374,15 @@ class PPOTrainer:
         self.sampler.manual_seed(sampler_seed)
 
     def update(self, batch: RecurrentTrainingBatch) -> PPOUpdateStats:
+        if self.schedule.completed_updates >= self.schedule.total_updates:
+            raise RuntimeError("PPO update budget is exhausted")
         _, lane_count = batch.validate(self.model)
         self.verify_batch_policy(batch)
         valid_advantages = batch.advantages[batch.train_mask]
         advantage_mean = valid_advantages.mean()
         advantage_std = valid_advantages.std(unbiased=False).clamp_min(1e-8)
         normalized_advantages = (batch.advantages - advantage_mean) / advantage_std
-        records: list[tuple[tuple[float, float, float, float, float, float], int]] = []
+        records: list[dict[str, tuple[float, int]]] = []
         early_stopped = False
         learning_rate_used = self.schedule.learning_rate
         for _ in range(self.config.epochs):
@@ -336,14 +415,29 @@ class PPOTrainer:
                     batch.actions.wait_index[:, lanes],
                     batch.actions.xy[:, lanes],
                 )
-                new_log_prob = distribution.log_prob(actions)
+                new_components = distribution.log_prob_components(actions)
+                new_log_prob = new_components.total
                 entropy_values = distribution.entropy()
+                entropy_components = distribution.entropy_components()
                 old_log_prob = batch.old_log_prob[:, lanes]
                 log_ratio = torch.where(train_mask, new_log_prob - old_log_prob, 0.0)
                 ratio = torch.exp(log_ratio)
+                is_wait = actions.kind == 0
+                wait_train_mask = train_mask & is_wait
+                coordinate_train_mask = train_mask & ~is_wait
+                branch = (actions.kind - 1).clamp(0, 1)
+                coordinate_entropy = entropy_components.coordinates.gather(
+                    -1, branch.unsqueeze(-1)
+                ).squeeze(-1)
                 selected = (
                     new_log_prob[train_mask],
+                    new_components.kind[train_mask],
+                    new_components.wait[wait_train_mask],
+                    new_components.coordinates[coordinate_train_mask],
                     entropy_values[train_mask],
+                    entropy_components.kind[train_mask],
+                    entropy_components.wait[wait_train_mask],
+                    coordinate_entropy[coordinate_train_mask],
                     output.values[train_mask],
                     ratio[train_mask],
                 )
@@ -351,14 +445,9 @@ class PPOTrainer:
                     raise FloatingPointError("nonfinite PPO model output")
                 entropy = entropy_values[train_mask].mean()
                 advantages = normalized_advantages[:, lanes]
-                unclipped = ratio * advantages
-                clipped = (
-                    ratio.clamp(
-                        1.0 - self.config.clip_ratio, 1.0 + self.config.clip_ratio
-                    )
-                    * advantages
+                policy_loss = clipped_surrogate_loss(
+                    ratio, advantages, train_mask, self.config.clip_ratio
                 )
-                policy_loss = -torch.minimum(unclipped, clipped)[train_mask].mean()
 
                 old_values = batch.old_values[:, lanes]
                 returns = batch.returns[:, lanes]
@@ -389,23 +478,62 @@ class PPOTrainer:
 
                 with torch.no_grad():
                     approximate_kl = ((ratio - 1.0) - log_ratio)[train_mask].mean()
+                    kind_log_ratio = torch.where(
+                        train_mask,
+                        new_components.kind - batch.old_kind_log_prob[:, lanes],
+                        0.0,
+                    )
+                    wait_log_ratio = torch.where(
+                        wait_train_mask,
+                        new_components.wait - batch.old_wait_log_prob[:, lanes],
+                        0.0,
+                    )
+                    coordinate_log_ratio = torch.where(
+                        coordinate_train_mask,
+                        new_components.coordinates
+                        - batch.old_coordinate_log_prob[:, lanes],
+                        0.0,
+                    )
+                    kind_kl = torch.exp(kind_log_ratio) - 1.0 - kind_log_ratio
+                    wait_kl = torch.exp(wait_log_ratio) - 1.0 - wait_log_ratio
+                    coordinate_kl = (
+                        torch.exp(coordinate_log_ratio) - 1.0 - coordinate_log_ratio
+                    )
                     clip_fraction = (
                         (torch.abs(ratio - 1.0) > self.config.clip_ratio)[train_mask]
                         .float()
                         .mean()
                     )
+                train_count = int(train_mask.sum())
                 records.append(
-                    (
-                        (
-                            float(policy_loss.detach()),
-                            float(value_loss.detach()),
-                            float(entropy.detach()),
+                    {
+                        "policy_loss": (float(policy_loss.detach()), train_count),
+                        "value_loss": (float(value_loss.detach()), train_count),
+                        "entropy": (float(entropy.detach()), train_count),
+                        "approximate_kl": (
                             float(approximate_kl.detach()),
-                            float(clip_fraction.detach()),
-                            float(gradient_norm.detach()),
+                            train_count,
                         ),
-                        int(train_mask.sum()),
-                    )
+                        "kind_approximate_kl": _masked_metric(kind_kl, train_mask),
+                        "wait_approximate_kl": _masked_metric(wait_kl, wait_train_mask),
+                        "coordinate_approximate_kl": _masked_metric(
+                            coordinate_kl, coordinate_train_mask
+                        ),
+                        "clip_fraction": (
+                            float(clip_fraction.detach()),
+                            train_count,
+                        ),
+                        "gradient_norm": (float(gradient_norm.detach()), train_count),
+                        "kind_entropy": _masked_metric(
+                            entropy_components.kind, train_mask
+                        ),
+                        "wait_entropy": _masked_metric(
+                            entropy_components.wait, wait_train_mask
+                        ),
+                        "coordinate_entropy": _masked_metric(
+                            coordinate_entropy, coordinate_train_mask
+                        ),
+                    }
                 )
                 if approximate_kl > self.config.target_kl:
                     early_stopped = True
@@ -415,16 +543,32 @@ class PPOTrainer:
         if not records:
             raise RuntimeError("PPO update produced no optimizer steps")
         self.schedule.step()
-        total_weight = sum(weight for _, weight in records)
-        means = [
-            sum(row[index] * weight for row, weight in records) / total_weight
-            for index in range(6)
-        ]
+
+        def weighted_mean(name: str) -> float:
+            total_weight = sum(record[name][1] for record in records)
+            return (
+                sum(value * weight for value, weight in (r[name] for r in records))
+                / total_weight
+                if total_weight
+                else 0.0
+            )
+
         return PPOUpdateStats(
-            *means,
-            learning_rate_used,
-            len(records),
-            early_stopped,
+            policy_loss=weighted_mean("policy_loss"),
+            value_loss=weighted_mean("value_loss"),
+            entropy=weighted_mean("entropy"),
+            approximate_kl=weighted_mean("approximate_kl"),
+            kind_approximate_kl=weighted_mean("kind_approximate_kl"),
+            wait_approximate_kl=weighted_mean("wait_approximate_kl"),
+            coordinate_approximate_kl=weighted_mean("coordinate_approximate_kl"),
+            clip_fraction=weighted_mean("clip_fraction"),
+            gradient_norm=weighted_mean("gradient_norm"),
+            kind_entropy=weighted_mean("kind_entropy"),
+            wait_entropy=weighted_mean("wait_entropy"),
+            coordinate_entropy=weighted_mean("coordinate_entropy"),
+            learning_rate=learning_rate_used,
+            optimizer_steps=len(records),
+            early_stopped=early_stopped,
         )
 
     @torch.no_grad()
@@ -447,7 +591,8 @@ class PPOTrainer:
             kind_mask=batch.kind_mask,
             wait_mask=batch.wait_mask,
         )
-        log_prob = distribution.log_prob(batch.actions)
+        components = distribution.log_prob_components(batch.actions)
+        log_prob = components.total
         if not torch.allclose(
             log_prob[batch.train_mask],
             batch.old_log_prob[batch.train_mask],
@@ -457,6 +602,24 @@ class PPOTrainer:
             raise ValueError(
                 "stored action likelihoods do not match the collection policy"
             )
+        for name, actual, expected in (
+            ("kind", components.kind, batch.old_kind_log_prob),
+            ("wait", components.wait, batch.old_wait_log_prob),
+            (
+                "coordinate",
+                components.coordinates,
+                batch.old_coordinate_log_prob,
+            ),
+        ):
+            if not torch.allclose(
+                actual[batch.train_mask],
+                expected[batch.train_mask],
+                rtol=0,
+                atol=tolerance,
+            ):
+                raise ValueError(
+                    f"stored {name} likelihoods do not match the collection policy"
+                )
         if not torch.allclose(
             output.values[batch.train_mask],
             batch.old_values[batch.train_mask],
