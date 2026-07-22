@@ -262,12 +262,9 @@ class RecurrentActorCritic(nn.Module):
         raw_coordinates = self.coordinate_head(encoded).reshape(time, batch, 2, 2, 2)
         if self.config.coordinate_parameterization == "mean-log-concentration":
             coordinate_mean = torch.sigmoid(raw_coordinates[..., 0])
-            concentration_mass = torch.exp(
-                raw_coordinates[..., 1].clamp(-10.0, 10.0)
-            )
+            concentration_mass = torch.exp(raw_coordinates[..., 1].clamp(-10.0, 10.0))
             alpha = (
-                self.config.minimum_concentration
-                + coordinate_mean * concentration_mass
+                self.config.minimum_concentration + coordinate_mean * concentration_mass
             )
             beta = (
                 self.config.minimum_concentration

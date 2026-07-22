@@ -30,7 +30,9 @@ The action is constrained by the ordinary `deployment-v1` action mask to a weak
 shot with normalized `(x, y)` coordinates. A native `PROJECTILE_HIT` event
 against the reset body is success. Full structured event ownership is opt-in;
 the normal high-throughput adapter copies only event counts, while diagnostic
-and resume tests copy press/release payloads before lazy views expire.
+and resume tests copy press/release payloads before lazy views expire. The
+capture mode is persisted in adapter checkpoint v2 and mismatched restores are
+rejected before environment mutation.
 
 Height families and seed splits are disjoint:
 
@@ -83,6 +85,12 @@ under identical 120-update and seed-split budgets. Selection uses median
 validation hit rate, then median aim score, then lower learning rate. The exact
 test split uses allocator key `20260722` and is opened only after selection.
 
+The checked TOML is the executable experiment source, not parallel
+documentation. It supplies model/task/reward/PPO/runtime settings, all allocator
+and random seeds, and canonical budgets; the result embeds the parsed config and
+its SHA-256. Noncanonical overrides can run as diagnostics but cannot pass the
+canonical acceptance predicate.
+
 The selected `1e-4` is provisional and scoped only to this diagnostic. It
 triggered KL early stopping on 9, 17, and 9 of 120 updates, versus 72–76 at
 `3e-4` and 108–110 at `6e-4`. That supports the conservative choice here; it
@@ -103,13 +111,24 @@ stored pass bit. The gates are:
   70 percentage points;
 - every raw-score audit reports count/min/max/sum and remains exactly zero;
 - no invalid action or nonfinite optimization statistic;
+- the exact worker and mapped physics library match the accepted runtime
+  identity, including protocol, pointer width, capacity, and backend;
+- every selected seed's PPO validation hit rate is at least its paired
+  warm-start rate;
+- all three accepted policy states are published as immutable, checksummed,
+  weights-only checkpoints;
 - a checkpoint fixture reproduces the complete next sampled action → native
   transition/events → task batch → PPO update exactly on the supported CPU
   stack.
 
 The recorded run selected `1e-4`. The three selected models hit 126/128,
 128/128, and 128/128 exact test episodes; random hit 0/128. BC hit 128/128
-validation episodes. The integrated resume fixture validates a sampled action,
+validation episodes. Paired PPO gains over the warm starts were 3.125, 3.906,
+and 5.469 percentage points. The accepted states and identities are stored in
+[`benchmarks/results/rl-r2b-one-body-models`](../benchmarks/results/rl-r2b-one-body-models/),
+and tests verify every manifest/state hash before strict model loading.
+
+The integrated resume fixture validates a sampled action,
 native transition/events, direct one-step task batch, and PPO update, but it
 does not claim that the evidence run used the production multi-step collector.
 These are task-specific engineering results, not full-game or sim-to-real

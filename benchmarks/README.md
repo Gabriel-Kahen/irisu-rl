@@ -23,6 +23,8 @@ validation heights, and opens the exact-backend test family only after
 selection. See `docs/rl-r2b.md`; its result is curriculum-specific and remains
 `deployable=false`.
 The checked evidence is `results/rl-r2b-one-body-2026-07-22.json`.
+The three accepted weights-only policy checkpoints and their immutable
+manifests are in `results/rl-r2b-one-body-models/`.
 
 Build and run the default benchmark from the repository root:
 
