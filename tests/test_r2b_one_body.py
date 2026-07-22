@@ -10,6 +10,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
+from benchmarks.rl_r2b import acceptance_predicates
 from irisu_env import EventKind, PaddedVectorEnv
 from irisu_rl import MacroVectorAdapter, TeacherStateEncoder
 from irisu_rl.actions import ActionSpec
@@ -83,8 +84,12 @@ class OneBodyContractTests(unittest.TestCase):
         artifact = json.loads(
             (ROOT / "benchmarks/results/rl-r2b-one-body-2026-07-22.json").read_text()
         )
-        self.assertTrue(artifact["held_out_test"]["pass"])
-        self.assertEqual(artifact["selection"]["selected_learning_rate"], 1e-4)
+        predicates = acceptance_predicates(artifact)
+        self.assertEqual(artifact["acceptance"]["predicates"], predicates)
+        self.assertEqual(artifact["acceptance"]["pass"], all(predicates.values()))
+        self.assertTrue(artifact["acceptance"]["pass"])
+        self.assertEqual(artifact["selected_learning_rate"], 1e-4)
+        self.assertFalse(artifact["source"]["dirty"])
         self.assertFalse(artifact["deployable"])
         self.assertEqual(artifact["task"]["sha256"], OneBodySpec().sha256)
 

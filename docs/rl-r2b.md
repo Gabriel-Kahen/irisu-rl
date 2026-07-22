@@ -1,10 +1,13 @@
 # R2b one-body learning proof
 
-R2b is a bounded integration proof for the recurrent training stack. It shows
-that scripted behavioral cloning can fit legal target coordinates and that PPO
-can preserve/improve that policy using simulator outcomes on disjoint scenario
-families. It is **not** a full-game result and is **not** evidence that a policy
-can yet observe or control the original game.
+R2b is a bounded coordinate-learning proof. It shows that behavioral cloning
+can fit legal target coordinates and that one-step PPO fine-tuning can preserve
+or improve that policy from simulator outcomes on disjoint scenario families.
+It does **not** exercise recurrent credit assignment, variable-duration SMDP
+returns, learned action kind/WAIT decisions, or the production rollout-buffer
+and GAE path. Those components have separate R2a contract tests; joining them in
+a multi-step learning run remains R3 work. This is not a full-game result or
+evidence that a policy can yet observe or control the original game.
 
 Every R2b model uses privileged `teacher-v1` simulator state and is stamped
 `deployable=false`. The real-game gate remains the R4 causal tracker, capture
@@ -12,20 +15,22 @@ timing model, coordinate calibration, and input bridge.
 
 ## Task contract
 
-`one-body-direct-hit-v1` changes only legal reset parameters:
+`one-body-direct-hit-v1` is an intentionally noncanonical diagnostic:
 
 - zero initial rotten bodies;
 - one initial falling body;
-- ordinary spawn height moved to `-200` so it cannot interfere with the
-  two-tick task;
+- ordinary spawn height moved to `-200` to suppress interference during the
+  two-tick task; this ongoing mechanics simplification is not just reset
+  randomization and must never be treated as nominal-game evidence;
 - one legal weak press followed by the normal forced release;
 - native collision, projectile, event, gauge, score, and physics behavior is
   unchanged.
 
 The action is constrained by the ordinary `deployment-v1` action mask to a weak
 shot with normalized `(x, y)` coordinates. A native `PROJECTILE_HIT` event
-against the reset body is success. The adapter now owns every structured press
-and release event before the backend's lazy event view can expire.
+against the reset body is success. Full structured event ownership is opt-in;
+the normal high-throughput adapter copies only event counts, while diagnostic
+and resume tests copy press/release payloads before lazy views expire.
 
 Height families and seed splits are disjoint:
 
@@ -70,33 +75,45 @@ Its two-phase objective first fits coordinate mean, then retains a strong mean
 constraint while optimizing conditional likelihood and Beta variance.
 
 PPO starts from a fixed 200-step expert warm start. That is deliberate: R2b
-tests the correctness and stability of on-policy improvement, not whether
-millions of sparse-reward samples can rediscover the obvious click-target
-demonstrator. Three model/optimizer seeds compare `1e-4`, `3e-4`, and `6e-4`
+tests one-step on-policy fine-tuning, not whether sparse reward can rediscover
+the click-target demonstrator. Each episode starts from zero recurrent state;
+the task fixes weak-shot kind and release timing, and constructs a one-step PPO
+batch directly. Three model/optimizer seeds compare `1e-4`, `3e-4`, and `6e-4`
 under identical 120-update and seed-split budgets. Selection uses median
-validation hit rate, then median aim score, then the lower learning rate. The
-test split is opened only after that selection.
+validation hit rate, then median aim score, then lower learning rate. The exact
+test split uses allocator key `20260722` and is opened only after selection.
+
+The selected `1e-4` is provisional and scoped only to this diagnostic. It
+triggered KL early stopping on 9, 17, and 9 of 120 updates, versus 72–76 at
+`3e-4` and 108–110 at `6e-4`. That supports the conservative choice here; it
+does not establish a generally optimal learning rate for later curricula.
 
 ## Acceptance evidence
 
 The checked [result artifact](../benchmarks/results/rl-r2b-one-body-2026-07-22.json)
-records source, dependency lock, portable library,
-exact worker, mechanics-config, task, action/schema, and seed identities. The
-acceptance gates are:
+is the direct `--summary` output of the recorded reproduction command. It binds
+the clean source commit, dependency lock, runtime, portable library, exact
+worker/build, mechanics configs, task, model/action/schema, allocator keys, and
+seed identities. Acceptance is recomputed in tests rather than trusting a
+stored pass bit. The gates are:
 
 - BC validation hit rate at least 90%;
 - every selected-LR model seed hits at least 90% on the exact-backend test;
 - selected median test hit rate exceeds the matched random policy by at least
   70 percentage points;
-- raw score delta remains independently reported;
+- every raw-score audit reports count/min/max/sum and remains exactly zero;
 - no invalid action or nonfinite optimization statistic;
 - a checkpoint fixture reproduces the complete next sampled action → native
   transition/events → task batch → PPO update exactly on the supported CPU
   stack.
 
-The recorded run selected `1e-4`. All three selected models hit 128/128 exact
-test episodes; random hit 2/128. BC hit 128/128 validation episodes. These are
-task-specific engineering results, not full-game or sim-to-real claims.
+The recorded run selected `1e-4`. The three selected models hit 126/128,
+128/128, and 128/128 exact test episodes; random hit 0/128. BC hit 128/128
+validation episodes. The integrated resume fixture validates a sampled action,
+native transition/events, direct one-step task batch, and PPO update, but it
+does not claim that the evidence run used the production multi-step collector.
+These are task-specific engineering results, not full-game or sim-to-real
+claims.
 
 ## What remains
 
