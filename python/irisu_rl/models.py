@@ -7,6 +7,7 @@ import math
 
 import torch
 from torch import Tensor, nn
+from torch.nn import functional as F
 
 from .actions import ActionSpec
 from .schema import TensorSchema
@@ -20,6 +21,7 @@ class RecurrentModelConfig:
     recurrent_hidden: int = 192
     recurrent_layers: int = 1
     minimum_concentration: float = 1.001
+    coordinate_parameterization: str = "independent-alpha-beta"
     coordinate_concentration_log_bias: float = 2.0
 
     def __post_init__(self) -> None:
@@ -42,9 +44,18 @@ class RecurrentModelConfig:
             or not -5 <= self.coordinate_concentration_log_bias <= 5
         ):
             raise ValueError("coordinate concentration log bias must be within [-5, 5]")
+        if self.coordinate_parameterization not in {
+            "independent-alpha-beta",
+            "mean-log-concentration",
+        }:
+            raise ValueError("unknown coordinate parameterization")
 
-    def manifest(self) -> dict[str, int | float]:
-        return asdict(self)
+    def manifest(self) -> dict[str, int | float | str]:
+        manifest = asdict(self)
+        if self.coordinate_parameterization == "independent-alpha-beta":
+            manifest.pop("coordinate_parameterization")
+            manifest.pop("coordinate_concentration_log_bias")
+        return manifest
 
 
 @dataclass(frozen=True, slots=True)
@@ -137,10 +148,13 @@ class RecurrentActorCritic(nn.Module):
         nn.init.orthogonal_(self.kind_head.weight, gain=0.01)
         nn.init.orthogonal_(self.wait_head.weight, gain=0.01)
         nn.init.orthogonal_(self.coordinate_head.weight, gain=0.01)
-        coordinate_bias = self.coordinate_head.bias.reshape(2, 2, 2)
-        with torch.no_grad():
-            coordinate_bias[..., 0].zero_()
-            coordinate_bias[..., 1].fill_(self.config.coordinate_concentration_log_bias)
+        if self.config.coordinate_parameterization == "mean-log-concentration":
+            coordinate_bias = self.coordinate_head.bias.reshape(2, 2, 2)
+            with torch.no_grad():
+                coordinate_bias[..., 0].zero_()
+                coordinate_bias[..., 1].fill_(
+                    self.config.coordinate_concentration_log_bias
+                )
         nn.init.orthogonal_(self.value_head.weight, gain=1.0)
 
     @staticmethod
@@ -169,7 +183,11 @@ class RecurrentActorCritic(nn.Module):
 
     def manifest(self) -> dict[str, object]:
         return {
-            "architecture": "recurrent-actor-critic-v2",
+            "architecture": (
+                "recurrent-actor-critic-v2"
+                if self.config.coordinate_parameterization == "mean-log-concentration"
+                else "recurrent-actor-critic-v1"
+            ),
             "actor_schema": self.schema.version,
             "actor_schema_sha256": self.schema.sha256,
             "critic_schema": self.schema.version,
@@ -242,13 +260,24 @@ class RecurrentActorCritic(nn.Module):
             sequence.append(value)
         encoded = torch.cat(sequence, dim=0)
         raw_coordinates = self.coordinate_head(encoded).reshape(time, batch, 2, 2, 2)
-        coordinate_mean = torch.sigmoid(raw_coordinates[..., 0])
-        concentration_mass = torch.exp(raw_coordinates[..., 1].clamp(-10.0, 10.0))
-        alpha = self.config.minimum_concentration + coordinate_mean * concentration_mass
-        beta = (
-            self.config.minimum_concentration
-            + (1.0 - coordinate_mean) * concentration_mass
-        )
+        if self.config.coordinate_parameterization == "mean-log-concentration":
+            coordinate_mean = torch.sigmoid(raw_coordinates[..., 0])
+            concentration_mass = torch.exp(
+                raw_coordinates[..., 1].clamp(-10.0, 10.0)
+            )
+            alpha = (
+                self.config.minimum_concentration
+                + coordinate_mean * concentration_mass
+            )
+            beta = (
+                self.config.minimum_concentration
+                + (1.0 - coordinate_mean) * concentration_mass
+            )
+        else:
+            concentration = (
+                F.softplus(raw_coordinates) + self.config.minimum_concentration
+            )
+            alpha, beta = concentration[..., 0], concentration[..., 1]
         return PolicyValueOutput(
             self.kind_head(encoded),
             self.wait_head(encoded),

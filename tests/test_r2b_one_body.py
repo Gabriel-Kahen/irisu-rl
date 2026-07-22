@@ -37,7 +37,9 @@ from irisu_rl.seeds import SeedAllocator
 
 ROOT = Path(__file__).resolve().parents[1]
 PORTABLE = ROOT / "build-physics-integration-portable" / "libirisu_clone.so"
-SMALL = RecurrentModelConfig(8, 8, 12, 12, 1)
+SMALL = RecurrentModelConfig(
+    8, 8, 12, 12, 1, coordinate_parameterization="mean-log-concentration"
+)
 
 
 class OneBodyContractTests(unittest.TestCase):
@@ -70,6 +72,13 @@ class OneBodyContractTests(unittest.TestCase):
         self.assertTrue(torch.all(output.coordinate_beta > 1))
         self.assertEqual(model.manifest()["architecture"], "recurrent-actor-critic-v2")
 
+    def test_default_head_keeps_r2a_v1_identity(self) -> None:
+        model = RecurrentActorCritic(
+            TEACHER_V1, config=RecurrentModelConfig(8, 8, 12, 12, 1)
+        )
+        self.assertEqual(model.manifest()["architecture"], "recurrent-actor-critic-v1")
+        self.assertNotIn("coordinate_parameterization", model.config.manifest())
+
     def test_checked_learning_artifact_passes_without_claiming_deployment(self) -> None:
         artifact = json.loads(
             (ROOT / "benchmarks/results/rl-r2b-one-body-2026-07-22.json").read_text()
@@ -96,7 +105,9 @@ class OneBodyContractTests(unittest.TestCase):
             library_path=PORTABLE,
             config=OneBodySpec.mechanics_config(100.0),
         ) as vector:
-            adapter = MacroVectorAdapter(vector, encoder=TeacherStateEncoder())
+            adapter = MacroVectorAdapter(
+                vector, encoder=TeacherStateEncoder(), capture_events=True
+            )
             current = adapter.reset()
             x = current.body_features[
                 :, 0, TEACHER_V1.body_features.index("effect_x_norm")
@@ -123,6 +134,32 @@ class OneBodyContractTests(unittest.TestCase):
                 transition.diagnostics.event_count,
                 len(transition.diagnostics.events),
             )
+
+    @unittest.skipUnless(PORTABLE.exists(), "portable integration library not built")
+    def test_adapter_counts_events_without_copying_them_by_default(self) -> None:
+        with PaddedVectorEnv(
+            2,
+            library_path=PORTABLE,
+            config=OneBodySpec.mechanics_config(100.0),
+        ) as vector:
+            adapter = MacroVectorAdapter(vector, encoder=TeacherStateEncoder())
+            current = adapter.reset()
+            x_index = TEACHER_V1.body_features.index("effect_x_norm")
+            y_index = TEACHER_V1.body_features.index("effect_y_norm")
+            transitions = adapter.step(
+                tuple(
+                    ActionSpec().decode(
+                        1,
+                        0,
+                        float(current.body_features[lane, 0, x_index]),
+                        float(current.body_features[lane, 0, y_index]),
+                    )
+                    for lane in range(2)
+                )
+            )
+        for transition in transitions:
+            self.assertGreater(transition.diagnostics.event_count, 0)
+            self.assertEqual(transition.diagnostics.events, ())
 
     @unittest.skipUnless(PORTABLE.exists(), "portable integration library not built")
     def test_buffer_accepts_task_reward_without_overwriting_raw_score(self) -> None:
@@ -216,6 +253,7 @@ class IntegratedResumeTests(unittest.TestCase):
                 vector,
                 encoder=TeacherStateEncoder(),
                 seed_allocator=SeedAllocator("train", key=73),
+                capture_events=True,
             )
             observations = adapter.reset()
             model = RecurrentActorCritic(TEACHER_V1, config=SMALL)
@@ -259,6 +297,7 @@ class IntegratedResumeTests(unittest.TestCase):
                 vector,
                 encoder=TeacherStateEncoder(),
                 seed_allocator=SeedAllocator("train", key=73),
+                capture_events=True,
             )
             adapter.reset()
             observations = adapter.restore_checkpoint(restored_checkpoint)

@@ -7,8 +7,11 @@ import argparse
 import copy
 import hashlib
 import json
+import math
+import platform
 import statistics
 import subprocess
+import sys
 from contextlib import ExitStack
 from pathlib import Path
 
@@ -31,9 +34,13 @@ from irisu_rl.torch_distribution import ActionTensor
 
 
 ROOT = Path(__file__).resolve().parents[1]
-MODEL_CONFIG = RecurrentModelConfig(32, 32, 64, 64, 1)
+MODEL_CONFIG = RecurrentModelConfig(
+    32, 32, 64, 64, 1, coordinate_parameterization="mean-log-concentration"
+)
 MODEL_SEEDS = (17, 29, 43)
 LEARNING_RATES = (1e-4, 3e-4, 6e-4)
+VALIDATION_ALLOCATOR_KEY = 702
+FINAL_TEST_ALLOCATOR_KEY = 20260722
 
 
 def source_identity() -> dict[str, object]:
@@ -50,6 +57,80 @@ def source_identity() -> dict[str, object]:
         "commit": git("rev-parse", "HEAD"),
         "dirty": bool(git("status", "--porcelain")),
         "uv_lock_sha256": hashlib.sha256((ROOT / "uv.lock").read_bytes()).hexdigest(),
+    }
+
+
+def acceptance_predicates(result: dict[str, object]) -> dict[str, bool]:
+    test = result["held_out_test"]
+    policy_runs = test["policy_runs"]
+    random = test["random"]
+    evaluations = [
+        result["behavioral_cloning"]["calibration"],
+        result["behavioral_cloning"]["validation"],
+        result["random_validation"],
+        random,
+        *policy_runs,
+    ]
+    training_summaries = []
+    for runs in result["ppo_candidates"].values():
+        for run in runs:
+            evaluations.extend((run["pre_ppo_validation"], run["validation"]))
+            training_summaries.append(run["training"])
+
+    raw_score_audit_passes = all(
+        evaluation["raw_score_delta_count"] == evaluation["episodes"]
+        and evaluation["raw_score_delta_sum"] == 0
+        and evaluation["raw_score_delta_min"] == 0
+        and evaluation["raw_score_delta_max"] == 0
+        and evaluation["invalid_action_count"] == 0
+        for evaluation in evaluations
+    )
+    optimization_statistics_are_finite = all(
+        math.isfinite(value)
+        for training in training_summaries
+        for key, value in training.items()
+        if isinstance(value, float)
+    )
+    return {
+        "bc_validation_at_least_90_percent": result["behavioral_cloning"][
+            "validation"
+        ]["hit_rate"]
+        >= 0.90,
+        "exact_test_backend": test["backend"] == "exact",
+        "every_policy_seed_at_least_90_percent": min(
+            run["hit_rate"] for run in policy_runs
+        )
+        >= 0.90,
+        "median_margin_over_random_at_least_70_points": statistics.median(
+            run["hit_rate"] for run in policy_runs
+        )
+        >= random["hit_rate"] + 0.70,
+        "all_raw_score_audits_zero_and_no_invalid_actions": raw_score_audit_passes,
+        "all_optimization_statistics_finite": optimization_statistics_are_finite,
+    }
+
+
+def summarize_result(result: dict[str, object]) -> dict[str, object]:
+    return {
+        "schema": result["schema"],
+        "source": result["source"],
+        "runtime": result["runtime"],
+        "runtime_files": result["runtime_files"],
+        "exact_runtime_build_info": result["exact_runtime_build_info"],
+        "seed_manifest_sha256": result["seed_manifest_sha256"],
+        "task": result["task"],
+        "model": result["model"],
+        "budgets": result["budgets"],
+        "learning_rate_candidates": result["learning_rate_candidates"],
+        "behavioral_cloning": result["behavioral_cloning"],
+        "random_validation": result["random_validation"],
+        "ppo_candidates": result["ppo_candidates"],
+        "selected_learning_rate": result["selected_learning_rate"],
+        "held_out_test": result["held_out_test"],
+        "acceptance": result["acceptance"],
+        "deployable": False,
+        "observation_provenance": "privileged_simulator",
+        "transfer_gate": result["transfer_gate"],
     }
 
 
@@ -112,7 +193,7 @@ class TaskFamily:
         return outcomes
 
 
-def summarize(outcomes) -> dict[str, float]:
+def summarize(outcomes) -> dict[str, float | int]:
     hit = torch.cat([value.hit for value in outcomes]).float()
     aim = torch.cat([value.aim_score for value in outcomes])
     reward = torch.cat([value.optimizer_reward for value in outcomes])
@@ -125,6 +206,13 @@ def summarize(outcomes) -> dict[str, float]:
         "aim_score": float(aim.mean()),
         "optimizer_return": float(reward.mean()),
         "raw_score_delta": float(raw.double().mean()),
+        "raw_score_delta_count": int(raw.numel()),
+        "raw_score_delta_sum": int(raw.sum()),
+        "raw_score_delta_min": int(raw.min()),
+        "raw_score_delta_max": int(raw.max()),
+        # OneBodyTask aborts and poisons itself before returning an outcome if
+        # either primitive reports an invalid action.
+        "invalid_action_count": 0,
         "coordinate_rmse": float((action - target).square().mean().sqrt()),
     }
 
@@ -330,11 +418,14 @@ def main() -> None:
     parser.add_argument("--lanes", type=int, default=8)
     parser.add_argument("--evaluation-rounds", type=int, default=8)
     parser.add_argument("--bc-steps", type=int, default=500)
+    parser.add_argument("--summary", action="store_true")
     args = parser.parse_args()
     if min(args.updates, args.lanes, args.evaluation_rounds, args.bc_steps) <= 0:
         parser.error("all budgets must be positive")
     if not args.library.is_file():
         parser.error("portable training library does not exist")
+    if not args.exact_worker.is_file():
+        parser.error("the attested exact worker is required for R2b evidence")
     torch.set_num_threads(8)
     torch.set_num_interop_threads(1)
     torch.use_deterministic_algorithms(True)
@@ -342,9 +433,23 @@ def main() -> None:
     result: dict[str, object] = {
         "schema": "irisu-r2b-learning-proof-v1",
         "source": source_identity(),
+        "runtime": {
+            "platform": platform.platform(),
+            "python": sys.version,
+            "torch": torch.__version__,
+            "threads": 8,
+            "interop_threads": 1,
+            "deterministic_algorithms": True,
+        },
         "task": {**spec.manifest(), "sha256": spec.sha256},
-        "model": MODEL_CONFIG.manifest(),
-        "budgets": vars(args) | {"model_seeds": MODEL_SEEDS},
+        "model": RecurrentActorCritic(TEACHER_V1, config=MODEL_CONFIG).manifest(),
+        "budgets": {
+            "updates": args.updates,
+            "lanes": args.lanes,
+            "evaluation_rounds": args.evaluation_rounds,
+            "bc_steps": args.bc_steps,
+            "model_seeds": MODEL_SEEDS,
+        },
         "learning_rate_candidates": LEARNING_RATES,
         "seed_manifest_sha256": SeedAllocator().manifest_sha256,
         "runtime_files": {
@@ -410,7 +515,7 @@ def main() -> None:
                 validation,
                 split="validation",
                 rounds=args.evaluation_rounds,
-                key=702,
+                key=VALIDATION_ALLOCATOR_KEY,
             ),
         }
         result["random_validation"] = evaluate(
@@ -418,7 +523,7 @@ def main() -> None:
             validation,
             split="validation",
             rounds=args.evaluation_rounds,
-            key=702,
+            key=VALIDATION_ALLOCATOR_KEY,
             random_seed=703,
         )
 
@@ -439,7 +544,7 @@ def main() -> None:
                     validation,
                     split="validation",
                     rounds=args.evaluation_rounds,
-                    key=702,
+                    key=VALIDATION_ALLOCATOR_KEY,
                 )
                 warm_model = RecurrentActorCritic(TEACHER_V1, config=MODEL_CONFIG)
                 warm_model.load_state_dict(pre_ppo_state, strict=True)
@@ -448,7 +553,7 @@ def main() -> None:
                     validation,
                     split="validation",
                     rounds=args.evaluation_rounds,
-                    key=702,
+                    key=VALIDATION_ALLOCATOR_KEY,
                 )
                 runs.append(
                     {
@@ -475,16 +580,17 @@ def main() -> None:
         )
         result["selected_learning_rate"] = selected
 
-        test_backend = "exact" if args.exact_worker.is_file() else "portable"
+        test_backend = "exact"
         test = TaskFamily(
             spec.test_heights,
             args.lanes,
-            library=args.library if test_backend == "portable" else None,
-            worker=args.exact_worker if test_backend == "exact" else None,
+            library=None,
+            worker=args.exact_worker,
             backend=test_backend,
             spec=spec,
         )
         stack.callback(test.close)
+        result["exact_runtime_build_info"] = test.tasks[0].env.envs[0].build_info
         result["task"]["mechanics_config_hashes"]["test"] = test.config_hashes()
         test_runs = []
         for model_seed, state in zip(MODEL_SEEDS, states[selected]):
@@ -498,7 +604,7 @@ def main() -> None:
                         test,
                         split="test",
                         rounds=args.evaluation_rounds,
-                        key=704,
+                        key=FINAL_TEST_ALLOCATOR_KEY,
                     ),
                 }
             )
@@ -507,7 +613,7 @@ def main() -> None:
             test,
             split="test",
             rounds=args.evaluation_rounds,
-            key=704,
+            key=FINAL_TEST_ALLOCATOR_KEY,
             random_seed=705,
         )
         result["held_out_test"] = {
@@ -517,13 +623,11 @@ def main() -> None:
             "median_policy_hit_rate": statistics.median(
                 run["hit_rate"] for run in test_runs
             ),
-            "pass": (
-                min(run["hit_rate"] for run in test_runs) >= 0.90
-                and statistics.median(run["hit_rate"] for run in test_runs)
-                >= random_test["hit_rate"] + 0.70
-            ),
         }
-    print(json.dumps(result, indent=2, sort_keys=True, default=str, allow_nan=False))
+        predicates = acceptance_predicates(result)
+        result["acceptance"] = {"predicates": predicates, "pass": all(predicates.values())}
+    payload = summarize_result(result) if args.summary else result
+    print(json.dumps(payload, indent=2, sort_keys=True, default=str, allow_nan=False))
 
 
 if __name__ == "__main__":

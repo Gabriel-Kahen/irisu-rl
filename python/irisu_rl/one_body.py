@@ -227,6 +227,8 @@ class OneBodyTask:
         self._target_xy: Tensor | None = None
         self._target_ids: tuple[int, ...] = ()
         self._start_ticks: tuple[int, ...] = ()
+        self._start_scores: tuple[int, ...] = ()
+        self._poisoned = False
 
     def close(self) -> None:
         self.env.close()
@@ -238,6 +240,8 @@ class OneBodyTask:
         self.close()
 
     def reset(self, seeds: Sequence[int]) -> EncodedBatch:
+        if self._poisoned:
+            raise RuntimeError("poisoned one-body task must be recreated")
         if len(seeds) != self.lanes:
             raise ValueError("one-body seed count must equal lane count")
         observations, _ = self.env.reset(seed=seeds)
@@ -251,7 +255,12 @@ class OneBodyTask:
         )
         self._target_ids = tuple(int(value.bodies[0].id) for value in observations)
         self._start_ticks = tuple(int(value.tick) for value in observations)
+        self._start_scores = tuple(int(value.score) for value in observations)
         return encoded
+
+    def _fail_closed(self, message: str) -> None:
+        self._poisoned = True
+        raise RuntimeError(message)
 
     @property
     def target_xy(self) -> Tensor:
@@ -277,15 +286,35 @@ class OneBodyTask:
             SemanticAction.weak(float(x), float(y)) for x, y in actions.xy[0]
         )
         press = [self.action_spec.press(action) for action in semantic]
-        observations, press_reward, terminated, truncated, infos = self.env.step(press)
-        press_events = [self._event_fields(info) for info in infos]
+        try:
+            _, press_reward, terminated, truncated, infos = self.env.step(press)
+            press_events = [self._event_fields(info) for info in infos]
+        except Exception:
+            self._poisoned = True
+            raise
+        if any(
+            bool(info.get("invalid_action", False))
+            or int(info.get("config_hash", -1)) != self.config_hash
+            for info in infos
+        ):
+            self._fail_closed("one-body press violated action/config identity")
         if any(terminated) or any(truncated):
-            raise RuntimeError("one-body task ended during the shot press")
+            self._fail_closed("one-body task ended during the shot press")
         release = [self.action_spec.release() for _ in range(self.lanes)]
-        final, release_reward, terminated, truncated, infos = self.env.step(release)
-        release_events = [self._event_fields(info) for info in infos]
+        try:
+            final, release_reward, terminated, truncated, infos = self.env.step(release)
+            release_events = [self._event_fields(info) for info in infos]
+        except Exception:
+            self._poisoned = True
+            raise
+        if any(
+            bool(info.get("invalid_action", False))
+            or int(info.get("config_hash", -1)) != self.config_hash
+            for info in infos
+        ):
+            self._fail_closed("one-body release violated action/config identity")
         if any(terminated) or any(truncated):
-            raise RuntimeError("one-body task ended during release")
+            self._fail_closed("one-body task ended during release")
         hit_kind = int(EventKind.PROJECTILE_HIT)
         hit = torch.tensor(
             [
@@ -306,11 +335,17 @@ class OneBodyTask:
             [left + right for left, right in zip(press_reward, release_reward)],
             dtype=torch.int64,
         )
+        score_delta = torch.tensor(
+            [int(value.score) - start for value, start in zip(final, self._start_scores)],
+            dtype=torch.int64,
+        )
+        if not torch.equal(raw, score_delta):
+            self._fail_closed("one-body raw reward does not equal score delta")
         elapsed = torch.tensor(
             [int(value.tick) - start for value, start in zip(final, self._start_ticks)],
             dtype=torch.int64,
         )
         if torch.any(elapsed != 2):
-            raise RuntimeError("one-body shot macro did not advance exactly two ticks")
+            self._fail_closed("one-body shot macro did not advance exactly two ticks")
         self._target_xy = None
         return OneBodyOutcome(raw, reward, hit, aim, target_xy, action_xy, elapsed)

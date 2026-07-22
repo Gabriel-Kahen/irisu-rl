@@ -5,11 +5,13 @@ action_schema = "deployment-v1"
 deployable = false
 observation_provenance = "privileged_simulator"
 transfer_gate = "R4 causal tracker and real input calibration pending"
+diagnostic_scope = "coordinate BC and one-step PPO only"
 
 [mechanics]
 initial_rotten_count = 0
 initial_falling_count = 1
 spawn_y = -200.0
+noncanonical_spawn_suppression = true
 max_episode_ticks = 500
 train_heights = [60.0, 80.0, 100.0, 120.0, 140.0]
 calibration_heights = [50.0, 150.0]
@@ -35,6 +37,7 @@ updates = 120
 lanes_per_height = 8
 model_seeds = [17, 29, 43]
 candidate_learning_rates = [0.0001, 0.0003, 0.0006]
+learning_rate_scope = "provisional for one-body-direct-hit-v1 only"
 final_learning_rate_fraction = 0.2
 epochs = 3
 lane_minibatch_size = 20
@@ -55,3 +58,5 @@ test_backend = "exact"
 minimum_each_seed_test_hit_rate = 0.90
 minimum_median_margin_over_random = 0.70
 test_opened_only_after_learning_rate_selection = true
+validation_allocator_key = 702
+final_test_allocator_key = 20260722

@@ -42,11 +42,8 @@ class OwnedEvent:
 class OwnedDiagnostics:
     config_hash: int
     invalid_action: bool
+    event_count: int
     events: tuple[OwnedEvent, ...]
-
-    @property
-    def event_count(self) -> int:
-        return len(self.events)
 
 
 @dataclass(frozen=True, slots=True)
@@ -105,12 +102,14 @@ class MacroVectorAdapter:
         | None = None,
         seed_allocator: SeedAllocator | None = None,
         action_spec: ActionSpec | None = None,
+        capture_events: bool = False,
     ) -> None:
         self.env = env
         self.encoder = encoder
         self.observation_transform = observation_transform
         self.seed_allocator = seed_allocator or SeedAllocator()
         self.action_spec = action_spec or ActionSpec()
+        self.capture_events = bool(capture_events)
         self.num_envs = int(env.num_envs)
         self._poisoned = False
         self._initialized = False
@@ -398,14 +397,18 @@ class MacroVectorAdapter:
             final_raw = list(observations)
             final_encoded = [first_encoded.row(index) for index in range(self.num_envs)]
             total_rewards = [int(value) for value in rewards]
-            # Exact/portable event views expire on the next lane step. Copy the
-            # complete press payload before any release can invalidate it.
-            total_events = [
-                self._own_events(
-                    info, "wait" if action.kind is SemanticActionKind.WAIT else "press"
-                )
-                for info, action in zip(infos, validated)
-            ]
+            event_counts = [len(info.get("events", ())) for info in infos]
+            total_events = (
+                [
+                    self._own_events(
+                        info,
+                        "wait" if action.kind is SemanticActionKind.WAIT else "press",
+                    )
+                    for info, action in zip(infos, validated)
+                ]
+                if self.capture_events
+                else [()] * self.num_envs
+            )
             invalid = [bool(info.get("invalid_action", False)) for info in infos]
             config_hashes = [int(info.get("config_hash", 0)) for info in infos]
             final_terminated = [bool(value) for value in terminated]
@@ -451,9 +454,14 @@ class MacroVectorAdapter:
                     phase="release",
                     actions=[validated[lane] for lane in release_lanes],
                 )
-                release_events = [
-                    self._own_events(info, "release") for info in release_infos
+                release_event_counts = [
+                    len(info.get("events", ())) for info in release_infos
                 ]
+                release_events = (
+                    [self._own_events(info, "release") for info in release_infos]
+                    if self.capture_events
+                    else [()] * len(release_infos)
+                )
                 release_invalid = [
                     bool(info.get("invalid_action", False)) for info in release_infos
                 ]
@@ -467,6 +475,7 @@ class MacroVectorAdapter:
                 final_encoded[lane] = release_encoded.row(offset)
                 total_rewards[lane] += int(release_rewards[offset])
                 total_events[lane] += release_events[offset]
+                event_counts[lane] += release_event_counts[offset]
                 invalid[lane] |= release_invalid[offset]
                 config_hashes[lane] = release_hashes[offset]
                 final_terminated[lane] = bool(release_terminated[offset])
@@ -566,7 +575,10 @@ class MacroVectorAdapter:
                         ),
                         trace_mask=not episode_done,
                         diagnostics=OwnedDiagnostics(
-                            config_hashes[lane], invalid[lane], total_events[lane]
+                            config_hashes[lane],
+                            invalid[lane],
+                            event_counts[lane],
+                            total_events[lane],
                         ),
                     )
                 )

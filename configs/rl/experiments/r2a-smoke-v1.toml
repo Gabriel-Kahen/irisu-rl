@@ -22,7 +22,6 @@ fused_hidden = 192
 recurrent_hidden = 192
 recurrent_layers = 1
 minimum_concentration = 1.001
-coordinate_concentration_log_bias = 2.0
 
 [reward]
 raw = "score_after - score_before"
