@@ -29,6 +29,10 @@ from .torch_distribution import (
 @dataclass(frozen=True, slots=True)
 class OneBodySpec:
     version: str = "one-body-direct-hit-v1"
+    initial_rotten_count: int = 0
+    initial_falling_count: int = 1
+    spawn_y: float = -200.0
+    max_episode_ticks: int = 500
     train_heights: tuple[float, ...] = (60.0, 80.0, 100.0, 120.0, 140.0)
     calibration_heights: tuple[float, ...] = (50.0, 150.0)
     validation_heights: tuple[float, ...] = (70.0, 130.0)
@@ -50,6 +54,13 @@ class OneBodySpec:
         if len(flattened) != len(set(flattened)):
             raise ValueError("one-body height families must be disjoint")
         if (
+            self.initial_rotten_count != 0
+            or self.initial_falling_count != 1
+            or not math.isfinite(self.spawn_y)
+            or self.max_episode_ticks <= 2
+        ):
+            raise ValueError("one-body mechanics parameters are invalid")
+        if (
             not math.isclose(self.hit_weight + self.aim_weight, 1.0)
             or self.hit_weight <= 0
             or self.aim_weight <= 0
@@ -67,16 +78,15 @@ class OneBodySpec:
         ).encode()
         return hashlib.sha256(payload).hexdigest()
 
-    @staticmethod
-    def mechanics_config(height: float) -> dict[str, int | float]:
+    def mechanics_config(self, height: float) -> dict[str, int | float]:
         if not math.isfinite(height):
             raise ValueError("initial height must be finite")
         return {
-            "initial_rotten_count": 0,
-            "initial_falling_count": 1,
+            "initial_rotten_count": self.initial_rotten_count,
+            "initial_falling_count": self.initial_falling_count,
             "initial_falling_y": float(height),
-            "spawn_y": -200.0,
-            "max_episode_ticks": 500,
+            "spawn_y": self.spawn_y,
+            "max_episode_ticks": self.max_episode_ticks,
         }
 
 
@@ -252,10 +262,27 @@ class OneBodyTask:
             raise RuntimeError("poisoned one-body task must be recreated")
         if len(seeds) != self.lanes:
             raise ValueError("one-body seed count must equal lane count")
-        observations, _ = self.env.reset(seed=seeds)
-        encoded = self.encoder.encode(observations)
-        if not np.all(encoded.body_mask.sum(axis=1) == 1):
-            raise RuntimeError("one-body reset did not produce exactly one body")
+        if any(
+            isinstance(seed, bool) or not isinstance(seed, int) or not 0 <= seed < 2**32
+            for seed in seeds
+        ):
+            raise ValueError("one-body seeds must be canonical uint32 values")
+        try:
+            observations, infos = self.env.reset(seed=seeds)
+            if len(observations) != self.lanes or len(infos) != self.lanes:
+                self._fail_closed("one-body reset returned a malformed lane batch")
+            if any(
+                int(info.get("config_hash", -1)) != self.config_hash
+                or int(info.get("seed", seed)) != seed
+                for info, seed in zip(infos, seeds)
+            ):
+                self._fail_closed("one-body reset violated seed/config identity")
+            encoded = self.encoder.encode(observations)
+            if not np.all(encoded.body_mask.sum(axis=1) == 1):
+                self._fail_closed("one-body reset did not produce exactly one body")
+        except Exception:
+            self._poisoned = True
+            raise
         x_index = encoded.schema.body_features.index("effect_x_norm")
         y_index = encoded.schema.body_features.index("effect_y_norm")
         self._target_xy = torch.from_numpy(
@@ -344,7 +371,10 @@ class OneBodyTask:
             dtype=torch.int64,
         )
         score_delta = torch.tensor(
-            [int(value.score) - start for value, start in zip(final, self._start_scores)],
+            [
+                int(value.score) - start
+                for value, start in zip(final, self._start_scores)
+            ],
             dtype=torch.int64,
         )
         if not torch.equal(raw, score_delta):

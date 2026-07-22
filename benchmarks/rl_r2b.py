@@ -12,13 +12,16 @@ import platform
 import statistics
 import subprocess
 import sys
+import tomllib
 from contextlib import ExitStack
+from dataclasses import asdict
 from pathlib import Path
 
 import torch
 from torch import nn
 
 from irisu_rl.models import RecurrentActorCritic, RecurrentModelConfig
+from irisu_rl.checkpoints import save_checkpoint
 from irisu_rl.one_body import (
     OneBodySpec,
     OneBodyTask,
@@ -29,18 +32,51 @@ from irisu_rl.one_body import (
 )
 from irisu_rl.ppo import PPOConfig, PPOTrainer
 from irisu_rl.schema import TEACHER_V1
+from irisu_rl.runtime_identity import ACCEPTED_EXACT_RUNTIME_2026_07_21
 from irisu_rl.seeds import SeedAllocator
 from irisu_rl.torch_distribution import ActionTensor
 
 
 ROOT = Path(__file__).resolve().parents[1]
-MODEL_CONFIG = RecurrentModelConfig(
-    32, 32, 64, 64, 1, coordinate_parameterization="mean-log-concentration"
-)
-MODEL_SEEDS = (17, 29, 43)
-LEARNING_RATES = (1e-4, 3e-4, 6e-4)
-VALIDATION_ALLOCATOR_KEY = 702
-FINAL_TEST_ALLOCATOR_KEY = 20260722
+EXPERIMENT_PATH = ROOT / "configs/rl/experiments/r2b-one-body-v1.toml"
+EXPERIMENT_BYTES = EXPERIMENT_PATH.read_bytes()
+EXPERIMENT = tomllib.loads(EXPERIMENT_BYTES.decode())
+MODEL_CONFIG = RecurrentModelConfig(**EXPERIMENT["model"])
+MODEL_SEEDS = tuple(EXPERIMENT["ppo"]["model_seeds"])
+LEARNING_RATES = tuple(EXPERIMENT["ppo"]["candidate_learning_rates"])
+VALIDATION_ALLOCATOR_KEY = EXPERIMENT["seeds"]["validation_allocator_key"]
+FINAL_TEST_ALLOCATOR_KEY = EXPERIMENT["seeds"]["final_test_allocator_key"]
+CALIBRATION_ALLOCATOR_KEY = EXPERIMENT["seeds"]["calibration_allocator_key"]
+RANDOM_VALIDATION_SEED = EXPERIMENT["seeds"]["random_validation"]
+RANDOM_TEST_SEED = EXPERIMENT["seeds"]["random_test"]
+PPO_SAMPLER_XOR = EXPERIMENT["seeds"]["ppo_sampler_xor"]
+BC_SEED = EXPERIMENT["behavioral_cloning"]["seed"]
+CANONICAL_BUDGETS = {
+    "updates": EXPERIMENT["ppo"]["updates"],
+    "lanes": EXPERIMENT["ppo"]["lanes_per_height"],
+    "evaluation_rounds": EXPERIMENT["evaluation"]["rounds"],
+    "bc_steps": EXPERIMENT["behavioral_cloning"]["steps"],
+    "model_seeds": list(MODEL_SEEDS),
+}
+
+
+def experiment_spec() -> OneBodySpec:
+    mechanics = EXPERIMENT["mechanics"]
+    reward = EXPERIMENT["reward"]
+    return OneBodySpec(
+        version=EXPERIMENT["task_version"],
+        initial_rotten_count=mechanics["initial_rotten_count"],
+        initial_falling_count=mechanics["initial_falling_count"],
+        spawn_y=mechanics["spawn_y"],
+        max_episode_ticks=mechanics["max_episode_ticks"],
+        train_heights=tuple(mechanics["train_heights"]),
+        calibration_heights=tuple(mechanics["calibration_heights"]),
+        validation_heights=tuple(mechanics["validation_heights"]),
+        test_heights=tuple(mechanics["test_heights"]),
+        hit_weight=reward["projectile_hit_weight"],
+        aim_weight=reward["gaussian_aim_weight"],
+        aim_sigma=reward["gaussian_aim_sigma_normalized"],
+    )
 
 
 def source_identity() -> dict[str, object]:
@@ -91,15 +127,36 @@ def acceptance_predicates(result: dict[str, object]) -> dict[str, bool]:
         for key, value in training.items()
         if isinstance(value, float)
     )
+    selected_runs = result["ppo_candidates"][f"{result['selected_learning_rate']:.1e}"]
+    minimum_delta = EXPERIMENT["evaluation"][
+        "minimum_selected_seed_ppo_validation_delta"
+    ]
+    accepted_runtime = result["exact_runtime_attestation"]["accepted_identity"]
+    exact_build = result["exact_runtime_build_info"]
+    exact_runtime_matches = (
+        exact_build["worker_executable_sha256"] == accepted_runtime["worker_sha256"]
+        and exact_build["exact_library_sha256"]
+        == accepted_runtime["exact_library_sha256"]
+        and exact_build["protocol_version"] == accepted_runtime["protocol_version"]
+        and exact_build["body_capacity"] == accepted_runtime["body_capacity"]
+        and exact_build["pointer_bits"] == accepted_runtime["pointer_bits"]
+        and exact_build["worker_backend"] == accepted_runtime["backend"]
+        and result["exact_runtime_attestation"]["provenance"]["sha256"]
+        == accepted_runtime["exact_library_sha256"]
+    )
     return {
         "clean_source_tree": result["source"]["dirty"] is False,
+        "checked_experiment_is_canonical": result["experiment"]["resolved"]
+        == EXPERIMENT
+        and result["budgets"] == CANONICAL_BUDGETS,
+        "accepted_exact_runtime_attested": exact_runtime_matches,
         "exact_worker_hash_matches_runtime": result["exact_runtime_build_info"][
             "worker_executable_sha256"
         ]
         == result["runtime_files"]["exact_worker_sha256"],
-        "bc_validation_at_least_90_percent": result["behavioral_cloning"][
-            "validation"
-        ]["hit_rate"]
+        "bc_validation_at_least_90_percent": result["behavioral_cloning"]["validation"][
+            "hit_rate"
+        ]
         >= 0.90,
         "exact_test_backend": test["backend"] == "exact",
         "every_policy_seed_at_least_90_percent": min(
@@ -112,6 +169,20 @@ def acceptance_predicates(result: dict[str, object]) -> dict[str, bool]:
         >= random["hit_rate"] + 0.70,
         "all_raw_score_audits_zero_and_no_invalid_actions": raw_score_audit_passes,
         "all_optimization_statistics_finite": optimization_statistics_are_finite,
+        "every_selected_seed_ppo_preserves_warm_start": all(
+            run["validation"]["hit_rate"]
+            >= run["pre_ppo_validation"]["hit_rate"] + minimum_delta
+            for run in selected_runs
+        ),
+        "selected_policy_checkpoints_persisted": len(
+            result["selected_policy_checkpoints"]
+        )
+        == len(MODEL_SEEDS)
+        and all(
+            len(checkpoint["manifest_sha256"]) == 64
+            and len(checkpoint["state_sha256"]) == 64
+            for checkpoint in result["selected_policy_checkpoints"]
+        ),
     }
 
 
@@ -121,8 +192,10 @@ def summarize_result(result: dict[str, object]) -> dict[str, object]:
         "source": result["source"],
         "runtime": result["runtime"],
         "runtime_files": result["runtime_files"],
+        "experiment": result["experiment"],
         "reproduction": result["reproduction"],
         "exact_runtime_build_info": result["exact_runtime_build_info"],
+        "exact_runtime_attestation": result["exact_runtime_attestation"],
         "seed_manifest_sha256": result["seed_manifest_sha256"],
         "task": result["task"],
         "model": result["model"],
@@ -133,6 +206,7 @@ def summarize_result(result: dict[str, object]) -> dict[str, object]:
         "random_validation": result["random_validation"],
         "ppo_candidates": result["ppo_candidates"],
         "selected_learning_rate": result["selected_learning_rate"],
+        "selected_policy_checkpoints": result["selected_policy_checkpoints"],
         "held_out_test": result["held_out_test"],
         "acceptance": result["acceptance"],
         "deployable": False,
@@ -272,7 +346,12 @@ def fit_expert(
     seed: int,
     dataset_rounds: int,
 ) -> dict[str, float]:
-    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3, eps=1e-5, foreach=False)
+    optimizer = torch.optim.Adam(
+        model.parameters(),
+        lr=EXPERIMENT["behavioral_cloning"]["learning_rate"],
+        eps=1e-5,
+        foreach=False,
+    )
     allocator = SeedAllocator("train", key=seed)
     observation_batches = []
     target_batches = []
@@ -328,7 +407,13 @@ def train_bc(
 ) -> tuple[RecurrentActorCritic, dict[str, float]]:
     torch.manual_seed(seed)
     model = RecurrentActorCritic(TEACHER_V1, config=MODEL_CONFIG)
-    return model, fit_expert(model, family, steps=steps, seed=seed, dataset_rounds=8)
+    return model, fit_expert(
+        model,
+        family,
+        steps=steps,
+        seed=seed,
+        dataset_rounds=EXPERIMENT["behavioral_cloning"]["dataset_rounds"],
+    )
 
 
 def train_ppo(
@@ -340,28 +425,33 @@ def train_ppo(
 ) -> tuple[RecurrentActorCritic, dict[str, float], dict[str, torch.Tensor]]:
     torch.manual_seed(model_seed)
     model = RecurrentActorCritic(TEACHER_V1, config=MODEL_CONFIG)
-    expert_steps = 200
+    ppo = EXPERIMENT["ppo"]
+    expert_steps = ppo["expert_warm_start_steps"]
     fit_expert(
         model,
         family,
         steps=expert_steps,
         seed=model_seed,
-        dataset_rounds=4,
+        dataset_rounds=ppo["expert_warm_start_dataset_rounds"],
     )
     pre_ppo_state = copy.deepcopy(model.state_dict())
     config = PPOConfig(
         learning_rate=learning_rate,
-        final_learning_rate_fraction=0.2,
-        epochs=3,
-        lane_minibatch_size=20,
-        entropy_coefficient=0.002,
-        target_kl=0.08,
+        final_learning_rate_fraction=ppo["final_learning_rate_fraction"],
+        epochs=ppo["epochs"],
+        lane_minibatch_size=ppo["lane_minibatch_size"],
+        clip_ratio=ppo["clip_ratio"],
+        value_clip=ppo["value_clip"],
+        value_coefficient=ppo["value_coefficient"],
+        entropy_coefficient=ppo["entropy_coefficient"],
+        max_gradient_norm=ppo["max_gradient_norm"],
+        target_kl=ppo["target_kl"],
     )
     trainer = PPOTrainer(
         model,
         config=config,
         total_updates=updates,
-        sampler_seed=model_seed ^ 0xA5A5,
+        sampler_seed=model_seed ^ PPO_SAMPLER_XOR,
     )
     allocator = SeedAllocator("train", key=model_seed)
     hit_history = []
@@ -428,10 +518,19 @@ def main() -> None:
         / "build-physics-integration-exact-multiworld-2"
         / "irisu-exact-worker",
     )
-    parser.add_argument("--updates", type=int, default=120)
-    parser.add_argument("--lanes", type=int, default=8)
-    parser.add_argument("--evaluation-rounds", type=int, default=8)
-    parser.add_argument("--bc-steps", type=int, default=500)
+    parser.add_argument("--updates", type=int, default=CANONICAL_BUDGETS["updates"])
+    parser.add_argument("--lanes", type=int, default=CANONICAL_BUDGETS["lanes"])
+    parser.add_argument(
+        "--evaluation-rounds",
+        type=int,
+        default=CANONICAL_BUDGETS["evaluation_rounds"],
+    )
+    parser.add_argument("--bc-steps", type=int, default=CANONICAL_BUDGETS["bc_steps"])
+    parser.add_argument(
+        "--checkpoint-root",
+        type=Path,
+        default=ROOT / "benchmarks/results/rl-r2b-one-body-models",
+    )
     parser.add_argument("--summary", action="store_true")
     args = parser.parse_args()
     if min(args.updates, args.lanes, args.evaluation_rounds, args.bc_steps) <= 0:
@@ -440,10 +539,23 @@ def main() -> None:
         parser.error("portable training library does not exist")
     if not args.exact_worker.is_file():
         parser.error("the attested exact worker is required for R2b evidence")
-    torch.set_num_threads(8)
-    torch.set_num_interop_threads(1)
-    torch.use_deterministic_algorithms(True)
-    spec = OneBodySpec()
+    if args.checkpoint_root.exists():
+        parser.error("checkpoint root must not already exist")
+    attestation = ACCEPTED_EXACT_RUNTIME_2026_07_21.attest(args.exact_worker.resolve())
+    attestation["build_info"].pop("worker_pid", None)
+    attestation["build_info"].pop("config_hash", None)
+    attestation = {
+        "accepted_identity": asdict(ACCEPTED_EXACT_RUNTIME_2026_07_21),
+        "build_info": attestation["build_info"],
+        "provenance": {
+            key: attestation["provenance"][key] for key in ("status", "bytes", "sha256")
+        },
+    }
+    runtime = EXPERIMENT["runtime"]
+    torch.set_num_threads(runtime["torch_threads"])
+    torch.set_num_interop_threads(runtime["torch_interop_threads"])
+    torch.use_deterministic_algorithms(runtime["deterministic_algorithms"])
+    spec = experiment_spec()
     result: dict[str, object] = {
         "schema": "irisu-r2b-learning-proof-v1",
         "source": source_identity(),
@@ -451,10 +563,16 @@ def main() -> None:
             "platform": platform.platform(),
             "python": sys.version,
             "torch": torch.__version__,
-            "threads": 8,
-            "interop_threads": 1,
-            "deterministic_algorithms": True,
+            "threads": runtime["torch_threads"],
+            "interop_threads": runtime["torch_interop_threads"],
+            "deterministic_algorithms": runtime["deterministic_algorithms"],
         },
+        "experiment": {
+            "path": str(EXPERIMENT_PATH.relative_to(ROOT)),
+            "sha256": hashlib.sha256(EXPERIMENT_BYTES).hexdigest(),
+            "resolved": EXPERIMENT,
+        },
+        "exact_runtime_attestation": attestation,
         "task": {**spec.manifest(), "sha256": spec.sha256},
         "model": RecurrentActorCritic(TEACHER_V1, config=MODEL_CONFIG).manifest(),
         "budgets": {
@@ -462,7 +580,7 @@ def main() -> None:
             "lanes": args.lanes,
             "evaluation_rounds": args.evaluation_rounds,
             "bc_steps": args.bc_steps,
-            "model_seeds": MODEL_SEEDS,
+            "model_seeds": list(MODEL_SEEDS),
         },
         "learning_rate_candidates": LEARNING_RATES,
         "seed_manifest_sha256": SeedAllocator().manifest_sha256,
@@ -525,7 +643,7 @@ def main() -> None:
             "validation": validation.config_hashes(),
         }
 
-        bc_model, bc_training = train_bc(train, steps=args.bc_steps, seed=7)
+        bc_model, bc_training = train_bc(train, steps=args.bc_steps, seed=BC_SEED)
         result["behavioral_cloning"] = {
             "training": bc_training,
             "calibration": evaluate(
@@ -533,7 +651,7 @@ def main() -> None:
                 calibration,
                 split="calibration",
                 rounds=args.evaluation_rounds,
-                key=701,
+                key=CALIBRATION_ALLOCATOR_KEY,
             ),
             "validation": evaluate(
                 bc_model,
@@ -549,7 +667,7 @@ def main() -> None:
             split="validation",
             rounds=args.evaluation_rounds,
             key=VALIDATION_ALLOCATOR_KEY,
-            random_seed=703,
+            random_seed=RANDOM_VALIDATION_SEED,
         )
 
         candidates: dict[str, list[dict[str, object]]] = {}
@@ -641,7 +759,7 @@ def main() -> None:
             split="test",
             rounds=args.evaluation_rounds,
             key=FINAL_TEST_ALLOCATOR_KEY,
-            random_seed=705,
+            random_seed=RANDOM_TEST_SEED,
         )
         result["held_out_test"] = {
             "backend": test_backend,
@@ -651,8 +769,56 @@ def main() -> None:
                 run["hit_rate"] for run in test_runs
             ),
         }
+        selected_checkpoints = []
+        for model_seed, state, test_metrics in zip(
+            MODEL_SEEDS, states[selected], test_runs
+        ):
+            identity = {
+                "schema": "irisu-r2b-selected-policy-v1",
+                "source": result["source"],
+                "experiment_sha256": result["experiment"]["sha256"],
+                "task_sha256": result["task"]["sha256"],
+                "model": result["model"],
+                "model_seed": model_seed,
+                "selected_learning_rate": selected,
+                "held_out_test": test_metrics,
+                "exact_runtime": result["exact_runtime_attestation"][
+                    "accepted_identity"
+                ],
+                "seed_manifest_sha256": result["seed_manifest_sha256"],
+                "observation_provenance": "privileged_simulator",
+                "deployable": False,
+            }
+            generation = f"seed-{model_seed}"
+            directory = save_checkpoint(
+                args.checkpoint_root,
+                generation,
+                identity=identity,
+                state={"model": state},
+            )
+            manifest_path = directory / "manifest.json"
+            manifest = json.loads(manifest_path.read_text())
+            selected_checkpoints.append(
+                {
+                    "generation": generation,
+                    "path": str(
+                        directory.relative_to(ROOT)
+                        if directory.is_relative_to(ROOT)
+                        else directory
+                    ),
+                    "identity": identity,
+                    "manifest_sha256": hashlib.sha256(
+                        manifest_path.read_bytes()
+                    ).hexdigest(),
+                    "state_sha256": manifest["files"]["state.pt"],
+                }
+            )
+        result["selected_policy_checkpoints"] = selected_checkpoints
         predicates = acceptance_predicates(result)
-        result["acceptance"] = {"predicates": predicates, "pass": all(predicates.values())}
+        result["acceptance"] = {
+            "predicates": predicates,
+            "pass": all(predicates.values()),
+        }
     payload = summarize_result(result) if args.summary else result
     print(json.dumps(payload, indent=2, sort_keys=True, default=str, allow_nan=False))
 

@@ -7,6 +7,21 @@ observation_provenance = "privileged_simulator"
 transfer_gate = "R4 causal tracker and real input calibration pending"
 diagnostic_scope = "coordinate BC and one-step PPO only"
 
+[runtime]
+torch_threads = 8
+torch_interop_threads = 1
+deterministic_algorithms = true
+
+[model]
+global_hidden = 32
+body_hidden = 32
+fused_hidden = 64
+recurrent_hidden = 64
+recurrent_layers = 1
+minimum_concentration = 1.001
+coordinate_parameterization = "mean-log-concentration"
+coordinate_concentration_log_bias = 2.0
+
 [mechanics]
 initial_rotten_count = 0
 initial_falling_count = 1
@@ -31,6 +46,7 @@ steps = 500
 dataset_rounds = 8
 objective = "75%: 100*mse; 25%: 1000*mse + nll + 100*beta_variance"
 learning_rate = 0.001
+seed = 7
 
 [ppo]
 updates = 120
@@ -50,6 +66,14 @@ target_kl = 0.08
 expert_warm_start_steps = 200
 expert_warm_start_dataset_rounds = 4
 
+[seeds]
+calibration_allocator_key = 701
+validation_allocator_key = 702
+final_test_allocator_key = 20260722
+random_validation = 703
+random_test = 705
+ppo_sampler_xor = 42405
+
 [evaluation]
 rounds = 8
 episodes_per_height = 64
@@ -58,5 +82,4 @@ test_backend = "exact"
 minimum_each_seed_test_hit_rate = 0.90
 minimum_median_margin_over_random = 0.70
 test_opened_only_after_learning_rate_selection = true
-validation_allocator_key = 702
-final_test_allocator_key = 20260722
+minimum_selected_seed_ppo_validation_delta = 0.0

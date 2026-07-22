@@ -75,6 +75,7 @@ class AdapterCheckpoint:
     schema_sha256: str
     action_sha256: str
     num_envs: int
+    capture_events: bool
     current: EncodedBatch
     raw_ticks: tuple[int, ...]
     raw_scores: tuple[int, ...]
@@ -246,10 +247,11 @@ class MacroVectorAdapter:
         state_hashes = tuple(int(value) for value in self.env.state_hash())
         self._require_lengths(self.num_envs, snapshots, state_hashes)
         return AdapterCheckpoint(
-            "macro-vector-adapter-checkpoint-v1",
+            "macro-vector-adapter-checkpoint-v2",
             self._schema.sha256,
             self.action_spec.sha256,
             self.num_envs,
+            self.capture_events,
             self._current.copy(),
             tuple(self._raw_ticks),
             tuple(self._raw_scores),
@@ -267,10 +269,12 @@ class MacroVectorAdapter:
             raise RuntimeError("cannot restore a poisoned adapter")
         if not self._initialized:
             raise RuntimeError("reset the fresh backend once before checkpoint restore")
-        if checkpoint.version != "macro-vector-adapter-checkpoint-v1":
+        if checkpoint.version != "macro-vector-adapter-checkpoint-v2":
             raise ValueError("adapter checkpoint version mismatch")
         if checkpoint.num_envs != self.num_envs:
             raise ValueError("adapter checkpoint lane count mismatch")
+        if checkpoint.capture_events != self.capture_events:
+            raise ValueError("adapter checkpoint event-capture mode mismatch")
         if checkpoint.action_sha256 != self.action_spec.sha256:
             raise ValueError("adapter checkpoint action identity mismatch")
         checkpoint.current.validate()

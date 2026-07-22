@@ -1,16 +1,24 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import tempfile
 import tomllib
 import unittest
+from dataclasses import asdict
 from pathlib import Path
 
 import numpy as np
 import torch
 
-from benchmarks.rl_r2b import acceptance_predicates
+from benchmarks.rl_r2b import (
+    CANONICAL_BUDGETS,
+    EXPERIMENT,
+    MODEL_CONFIG,
+    acceptance_predicates,
+    experiment_spec,
+)
 from irisu_env import EventKind, PaddedVectorEnv
 from irisu_rl import MacroVectorAdapter, TeacherStateEncoder
 from irisu_rl.actions import ActionSpec
@@ -34,6 +42,7 @@ from irisu_rl.ppo import PPOConfig, PPOTrainer
 from irisu_rl.recurrent_buffer import RecurrentRolloutBuffer
 from irisu_rl.schema import TEACHER_V1
 from irisu_rl.seeds import SeedAllocator
+from irisu_rl.runtime_identity import ACCEPTED_EXACT_RUNTIME_2026_07_21
 from irisu_rl.torch_distribution import LogProbabilityComponents
 
 
@@ -61,6 +70,19 @@ class OneBodyContractTests(unittest.TestCase):
         self.assertEqual(config["mechanics"]["train_heights"], list(spec.train_heights))
         self.assertFalse(config["deployable"])
         self.assertEqual(config["observation_provenance"], "privileged_simulator")
+        self.assertEqual(config, EXPERIMENT)
+        self.assertEqual(experiment_spec(), spec)
+        self.assertEqual(config["model"], MODEL_CONFIG.manifest())
+        self.assertEqual(config["ppo"]["updates"], CANONICAL_BUDGETS["updates"])
+        mechanics = spec.mechanics_config(100.0)
+        self.assertEqual(mechanics["initial_falling_y"], 100.0)
+        for key in (
+            "initial_rotten_count",
+            "initial_falling_count",
+            "spawn_y",
+            "max_episode_ticks",
+        ):
+            self.assertEqual(mechanics[key], config["mechanics"][key])
 
     def test_mean_concentration_head_is_finite_and_explicit(self) -> None:
         model = RecurrentActorCritic(TEACHER_V1, config=SMALL)
@@ -93,6 +115,28 @@ class OneBodyContractTests(unittest.TestCase):
         self.assertFalse(artifact["source"]["dirty"])
         self.assertFalse(artifact["deployable"])
         self.assertEqual(artifact["task"]["sha256"], OneBodySpec().sha256)
+        self.assertEqual(artifact["experiment"]["resolved"], EXPERIMENT)
+        self.assertEqual(
+            artifact["experiment"]["sha256"],
+            hashlib.sha256(
+                (ROOT / artifact["experiment"]["path"]).read_bytes()
+            ).hexdigest(),
+        )
+        accepted = artifact["exact_runtime_attestation"]["accepted_identity"]
+        self.assertEqual(accepted, asdict(ACCEPTED_EXACT_RUNTIME_2026_07_21))
+        for checkpoint in artifact["selected_policy_checkpoints"]:
+            directory = ROOT / checkpoint["path"]
+            self.assertEqual(
+                checkpoint["manifest_sha256"],
+                hashlib.sha256((directory / "manifest.json").read_bytes()).hexdigest(),
+            )
+            state, _, _ = load_checkpoint(
+                directory.parent,
+                generation=checkpoint["generation"],
+                expected_identity=checkpoint["identity"],
+            )
+            model = RecurrentActorCritic(TEACHER_V1, config=MODEL_CONFIG)
+            model.load_state_dict(state["model"], strict=True)
 
     @unittest.skipUnless(PORTABLE.exists(), "portable integration library not built")
     def test_expert_hits_and_raw_reward_remains_separate(self) -> None:
@@ -109,7 +153,7 @@ class OneBodyContractTests(unittest.TestCase):
         with PaddedVectorEnv(
             2,
             library_path=PORTABLE,
-            config=OneBodySpec.mechanics_config(100.0),
+            config=OneBodySpec().mechanics_config(100.0),
         ) as vector:
             adapter = MacroVectorAdapter(
                 vector, encoder=TeacherStateEncoder(), capture_events=True
@@ -146,7 +190,7 @@ class OneBodyContractTests(unittest.TestCase):
         with PaddedVectorEnv(
             2,
             library_path=PORTABLE,
-            config=OneBodySpec.mechanics_config(100.0),
+            config=OneBodySpec().mechanics_config(100.0),
         ) as vector:
             adapter = MacroVectorAdapter(vector, encoder=TeacherStateEncoder())
             current = adapter.reset()
@@ -168,11 +212,27 @@ class OneBodyContractTests(unittest.TestCase):
             self.assertEqual(transition.diagnostics.events, ())
 
     @unittest.skipUnless(PORTABLE.exists(), "portable integration library not built")
+    def test_adapter_checkpoint_rejects_event_capture_mode_drift(self) -> None:
+        config = OneBodySpec().mechanics_config(100.0)
+        with PaddedVectorEnv(2, library_path=PORTABLE, config=config) as vector:
+            source = MacroVectorAdapter(
+                vector, encoder=TeacherStateEncoder(), capture_events=True
+            )
+            source.reset()
+            checkpoint = source.checkpoint()
+        self.assertTrue(checkpoint.capture_events)
+        with PaddedVectorEnv(2, library_path=PORTABLE, config=config) as vector:
+            restored = MacroVectorAdapter(vector, encoder=TeacherStateEncoder())
+            restored.reset()
+            with self.assertRaisesRegex(ValueError, "event-capture mode"):
+                restored.restore_checkpoint(checkpoint)
+
+    @unittest.skipUnless(PORTABLE.exists(), "portable integration library not built")
     def test_buffer_accepts_task_reward_without_overwriting_raw_score(self) -> None:
         with PaddedVectorEnv(
             2,
             library_path=PORTABLE,
-            config=OneBodySpec.mechanics_config(100.0),
+            config=OneBodySpec().mechanics_config(100.0),
         ) as vector:
             adapter = MacroVectorAdapter(vector, encoder=TeacherStateEncoder())
             current = adapter.reset()
@@ -263,7 +323,7 @@ class IntegratedResumeTests(unittest.TestCase):
         with PaddedVectorEnv(
             2,
             library_path=PORTABLE,
-            config=OneBodySpec.mechanics_config(100.0),
+            config=OneBodySpec().mechanics_config(100.0),
         ) as vector:
             adapter = MacroVectorAdapter(
                 vector,
@@ -307,7 +367,7 @@ class IntegratedResumeTests(unittest.TestCase):
         with PaddedVectorEnv(
             2,
             library_path=PORTABLE,
-            config=OneBodySpec.mechanics_config(100.0),
+            config=OneBodySpec().mechanics_config(100.0),
         ) as vector:
             adapter = MacroVectorAdapter(
                 vector,

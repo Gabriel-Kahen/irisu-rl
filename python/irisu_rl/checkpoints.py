@@ -170,6 +170,7 @@ def pack_adapter_checkpoint(
         "schema_sha256": checkpoint.schema_sha256,
         "action_sha256": checkpoint.action_sha256,
         "num_envs": checkpoint.num_envs,
+        "capture_events": checkpoint.capture_events,
         "raw_ticks": list(checkpoint.raw_ticks),
         "raw_scores": list(checkpoint.raw_scores),
         "seeds": list(checkpoint.seeds),
@@ -206,6 +207,7 @@ def unpack_adapter_checkpoint(
         "schema_sha256",
         "action_sha256",
         "num_envs",
+        "capture_events",
         "raw_ticks",
         "raw_scores",
         "seeds",
@@ -217,7 +219,7 @@ def unpack_adapter_checkpoint(
     }
     if set(state) != expected:
         raise ValueError("adapter checkpoint state keys do not match the version")
-    if state["version"] != "macro-vector-adapter-checkpoint-v1":
+    if state["version"] != "macro-vector-adapter-checkpoint-v2":
         raise ValueError("adapter checkpoint version mismatch")
     if (
         state["schema_sha256"] != schema.sha256
@@ -232,6 +234,9 @@ def unpack_adapter_checkpoint(
         or lane_count <= 0
     ):
         raise ValueError("adapter checkpoint lane count is invalid")
+    capture_events = state["capture_events"]
+    if not isinstance(capture_events, bool):
+        raise ValueError("adapter checkpoint event-capture mode is invalid")
     canonical_names = [f"lane-{lane:04d}.snapshot" for lane in range(lane_count)]
     if names != canonical_names or set(names) != set(blobs):
         raise ValueError("adapter checkpoint snapshot set mismatch")
@@ -262,6 +267,7 @@ def unpack_adapter_checkpoint(
         str(state["schema_sha256"]),
         str(state["action_sha256"]),
         lane_count,
+        capture_events,
         encoded,
         tuple(int(value) for value in state["raw_ticks"]),
         tuple(int(value) for value in state["raw_scores"]),
