@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import functools
 import unittest
 import tempfile
 from pathlib import Path
@@ -88,7 +89,7 @@ class R3BRunBuilderTests(unittest.TestCase):
         with builder.build(job):
             pass
         changed["model"] = True
-        with self.assertRaisesRegex(RuntimeError, "runner implementation changed"):
+        with self.assertRaisesRegex(TypeError, "must return RecurrentActorCritic"):
             builder.build(job)
 
         changed["model"] = False
@@ -98,6 +99,50 @@ class R3BRunBuilderTests(unittest.TestCase):
         changed["vector"] = True
         with self.assertRaisesRegex(RuntimeError, "runner implementation changed"):
             builder.build(job)
+
+        modes = iter((1, 2))
+
+        def configured_environment_factory():
+            environment = FakeSnapshotVector()
+            environment.behavior_mode = next(modes)
+            return environment
+
+        configured = R3BRunBuilder(
+            plan,
+            curriculum,
+            store,
+            runtime_attestation=_RUNTIME_ATTESTATION,
+            lanes=2,
+            collector_config=CollectorConfig(
+                max_decisions=1,
+                target_simulated_ticks=plan.ticks_per_update,
+            ),
+            ppo_config=PPOConfig(
+                learning_rate=1e-4,
+                final_learning_rate_fraction=plan.final_learning_rate_fraction,
+                epochs=1,
+                lane_minibatch_size=2,
+            ),
+            model_factory=model_factory,
+            environment_factory=configured_environment_factory,
+        )
+        with configured.build(job):
+            pass
+        with self.assertRaisesRegex(RuntimeError, "runner implementation changed"):
+            configured.build(job)
+
+        with self.assertRaisesRegex(TypeError, "plain functions or classes"):
+            R3BRunBuilder(
+                plan,
+                curriculum,
+                store,
+                runtime_attestation=_RUNTIME_ATTESTATION,
+                lanes=2,
+                collector_config=configured.collector_config,
+                ppo_config=configured.ppo_config,
+                model_factory=model_factory,
+                environment_factory=functools.partial(FakeSnapshotVector),
+            )
 
     def test_arms_share_initial_model_assignments_and_seed_plan(self) -> None:
         plan = load_plan(ROOT / "configs/rl/experiments/r3b-completion-v1.toml")
@@ -301,6 +346,39 @@ class R3BRunBuilderTests(unittest.TestCase):
                 failing_builder.build(failed_job, authorization=failed_lease)
             with self.assertRaisesRegex(RuntimeError, "lease is not active"):
                 ledger.fail_job(failed_lease, "must already be terminal")
+
+            cleanup_job = plan.trial_jobs("test", test_auth)[2]
+            cleanup_lease = ledger.claim_job(test_auth, cleanup_job)
+
+            class BadLaneVector(FakeSnapshotVector):
+                def __init__(self):
+                    super().__init__()
+                    self.num_envs = 1
+
+                def close(self):
+                    raise RuntimeError("close failed")
+
+            cleanup_builder = R3BRunBuilder(
+                plan,
+                curriculum,
+                store,
+                runtime_attestation=_RUNTIME_ATTESTATION,
+                lanes=2,
+                collector_config=builder.collector_config,
+                ppo_config=builder.ppo_config,
+                model_factory=model_factory,
+                environment_factory=BadLaneVector,
+                sealed_test_ledger=ledger,
+            )
+            with self.assertRaisesRegex(ValueError, "wrong lane count") as raised:
+                cleanup_builder.build(cleanup_job, authorization=cleanup_lease)
+            self.assertTrue(
+                any(
+                    "cleanup also failed" in note for note in raised.exception.__notes__
+                )
+            )
+            with self.assertRaisesRegex(RuntimeError, "lease is not active"):
+                ledger.fail_job(cleanup_lease, "must already be terminal")
 
         with tempfile.TemporaryDirectory() as directory:
             with builder.build(validation_job, authorization=validation_auth) as source:

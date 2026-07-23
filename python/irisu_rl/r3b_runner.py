@@ -145,7 +145,10 @@ def _audit_sha256(value: object) -> str:
 
 
 def _implementation_identity(
-    value: object, *, bind_callable_state: bool = False
+    value: object,
+    *,
+    bind_callable_state: bool = False,
+    bind_instance_state: bool = False,
 ) -> dict[str, str]:
     """Bind a concrete callable/type to executable Python implementation bytes."""
 
@@ -159,7 +162,11 @@ def _implementation_identity(
         bound_state = {}
     else:
         target = type(value)
-        bound_state = getattr(value, "__dict__", {}) if bind_callable_state else {}
+        bound_state = (
+            getattr(value, "__dict__", {})
+            if bind_callable_state or bind_instance_state
+            else {}
+        )
     code = getattr(target, "__code__", None)
     try:
         source = inspect.getsource(target).encode()
@@ -178,12 +185,31 @@ def _implementation_identity(
     if not source and code is None and not source_file:
         raise TypeError("runner implementation identity is not inspectable")
 
-    def capture(value: object) -> object:
+    def capture(value: object, seen: frozenset[int] = frozenset()) -> object:
         if inspect.isfunction(value) or inspect.isclass(value):
             return _implementation_identity(value)
+        identity = id(value)
+        if identity in seen:
+            return {
+                "cycle_type": f"{type(value).__module__}.{type(value).__qualname__}"
+            }
+        nested_seen = seen | {identity}
+        if isinstance(value, Mapping):
+            return {
+                str(key): capture(item, nested_seen)
+                for key, item in sorted(value.items(), key=lambda item: str(item[0]))
+            }
+        if isinstance(value, (tuple, list)):
+            return [capture(item, nested_seen) for item in value]
         try:
             return _audit_normalize(value)
         except TypeError:
+            state = getattr(value, "__dict__", None)
+            if isinstance(state, Mapping):
+                return {
+                    "object_type": f"{type(value).__module__}.{type(value).__qualname__}",
+                    "state": capture(state, nested_seen),
+                }
             return {
                 "opaque_type": f"{type(value).__module__}.{type(value).__qualname__}"
             }
@@ -264,35 +290,51 @@ def verify_exact_resume_continuation(
     restored = restored_factory()
     if not isinstance(restored, R3ATrainingSession) or restored is source:
         raise ValueError("exact-resume verification requires an independent session")
-    restored.restore(
-        checkpoint_directory,
-        generation=generation,
-        identity=checkpoint_identity,
-    )
-    source_policy = source.policy_sha256
-    if restored.policy_sha256 != source_policy:
-        raise ValueError("restored checkpoint policy differs before continuation")
-    initial_rng = capture_rng_state(source.numpy_generator)
-    initial_source = _audit_sha256(_session_continuation_state(source))
-    initial_restored = _audit_sha256(_session_continuation_state(restored))
-    if initial_source != initial_restored:
-        raise ValueError("restored checkpoint state differs before continuation")
-    source_update = source.run_update()
-    source_update_sha256 = _audit_sha256(source_update)
-    source_after_sha256 = _audit_sha256(_session_continuation_state(source))
-    restore_rng_state(initial_rng, restored.numpy_generator)
-    restored_update = restored.run_update()
-    restored_update_sha256 = _audit_sha256(restored_update)
-    restored_after_sha256 = _audit_sha256(_session_continuation_state(restored))
-    return _verified_exact_resume_artifact(
-        trial_manifest_sha256,
-        checkpoint.checkpoint_manifest_sha256,
-        source_policy,
-        source_update_sha256,
-        restored_update_sha256,
-        source_after_sha256,
-        restored_after_sha256,
-    )
+    restored_environment = restored.collector.adapter.env
+    close = getattr(restored_environment, "close", None)
+    try:
+        restored.restore(
+            checkpoint_directory,
+            generation=generation,
+            identity=checkpoint_identity,
+        )
+        source_policy = source.policy_sha256
+        if restored.policy_sha256 != source_policy:
+            raise ValueError("restored checkpoint policy differs before continuation")
+        initial_rng = capture_rng_state(source.numpy_generator)
+        initial_source = _audit_sha256(_session_continuation_state(source))
+        initial_restored = _audit_sha256(_session_continuation_state(restored))
+        if initial_source != initial_restored:
+            raise ValueError("restored checkpoint state differs before continuation")
+        source_update = source.run_update()
+        source_update_sha256 = _audit_sha256(source_update)
+        source_after_sha256 = _audit_sha256(_session_continuation_state(source))
+        restore_rng_state(initial_rng, restored.numpy_generator)
+        restored_update = restored.run_update()
+        restored_update_sha256 = _audit_sha256(restored_update)
+        restored_after_sha256 = _audit_sha256(_session_continuation_state(restored))
+        artifact = _verified_exact_resume_artifact(
+            trial_manifest_sha256,
+            checkpoint.checkpoint_manifest_sha256,
+            source_policy,
+            source_update_sha256,
+            restored_update_sha256,
+            source_after_sha256,
+            restored_after_sha256,
+        )
+    except BaseException as error:
+        if close is not None:
+            try:
+                close()
+            except BaseException as close_error:
+                error.add_note(
+                    "restored-session cleanup also failed: "
+                    f"{type(close_error).__name__}: {close_error}"
+                )
+        raise
+    if close is not None:
+        close()
+    return artifact
 
 
 @dataclass(frozen=True, slots=True)
@@ -611,6 +653,14 @@ class R3BRunBuilder:
         self.lanes = lanes
         self.collector_config = collector_config
         self.ppo_config = ppo_config
+        if not (
+            (inspect.isfunction(model_factory) or inspect.isclass(model_factory))
+            and (
+                inspect.isfunction(environment_factory)
+                or inspect.isclass(environment_factory)
+            )
+        ):
+            raise TypeError("R3b factories must be plain functions or classes")
         self.model_factory = model_factory
         self.environment_factory = environment_factory
         if (
@@ -758,6 +808,10 @@ class R3BRunBuilder:
             with torch.random.fork_rng(devices=cuda_devices, enabled=True):
                 torch.manual_seed(seed_plan.model_initialization)
                 model = self.model_factory()
+            if type(model) is not RecurrentActorCritic:
+                raise TypeError(
+                    "model factory must return RecurrentActorCritic exactly"
+                )
             if model.config.critic_condition_features != 1:
                 raise ValueError("every R3b arm requires the same conditioned critic")
             initial_model_sha256 = model_state_sha256(model)
@@ -774,7 +828,9 @@ class R3BRunBuilder:
                 "model_factory": _implementation_identity(
                     self.model_factory, bind_callable_state=True
                 ),
-                "environment": _implementation_identity(environment),
+                "environment": _implementation_identity(
+                    environment, bind_instance_state=True
+                ),
                 "environment_factory": _implementation_identity(
                     self.environment_factory, bind_callable_state=True
                 ),
@@ -957,7 +1013,13 @@ class R3BRunBuilder:
         except BaseException as error:
             close = getattr(environment, "close", None)
             if close is not None:
-                close()
+                try:
+                    close()
+                except BaseException as close_error:
+                    error.add_note(
+                        "runner environment cleanup also failed: "
+                        f"{type(close_error).__name__}: {close_error}"
+                    )
             if lease_started:
                 assert isinstance(authorization, SealedTestJobLease)
                 assert sealed_test_ledger is not None

@@ -139,8 +139,10 @@ encoder, collector and PPO configuration, lane count, reward scale, snapshot
 store, runtime, deterministic Torch settings, Python/NumPy/Torch build data,
 every Python module in `irisu_rl` and `irisu_env`, the concrete model/vector and
 factory implementations (including auditable captured state), and the checked
-dependency files; a builder rejects any implementation that changes it. One
-runner identity is carried from calibration through validation and sealed test. Selection
+dependency files. Factories are restricted to inspectable plain functions or
+classes, and the model must be the supported concrete actor-critic type; a
+builder rejects any implementation or initial vector configuration that changes.
+One runner identity is carried from calibration through validation and sealed test. Selection
 rejects results when any seed or paired arm
 disagrees on that specification, initial model, assignment, seed plan,
 runner-pairing, or evaluation-suite identities. A trial manifest additionally

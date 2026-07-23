@@ -94,6 +94,7 @@ class TailSessionIntegrationTests(unittest.TestCase):
             source = build_tail_session()
             source.initialize()
             source.run_update()
+            closed_restored_environments: list[str] = []
 
             def assert_next_update_exact(generation: str) -> None:
                 destination = source.save(directory, generation, identity=identity)
@@ -112,6 +113,14 @@ class TailSessionIntegrationTests(unittest.TestCase):
                     source.policy_sha256,
                     "e" * 64,
                 )
+
+                def restored_factory() -> R3ATrainingSession:
+                    restored = build_tail_session()
+                    restored.collector.adapter.env.close = lambda: (
+                        closed_restored_environments.append(generation)
+                    )
+                    return restored
+
                 artifact = verify_exact_resume_continuation(
                     trial_manifest_sha256="a" * 64,
                     checkpoint=checkpoint,
@@ -119,7 +128,7 @@ class TailSessionIntegrationTests(unittest.TestCase):
                     generation=generation,
                     checkpoint_identity=identity,
                     source=source,
-                    restored_factory=build_tail_session,
+                    restored_factory=restored_factory,
                 )
                 self.assertEqual(
                     artifact.source_next_update_sha256,
@@ -134,6 +143,10 @@ class TailSessionIntegrationTests(unittest.TestCase):
             assert_next_update_exact("mid-drain")
             # One score-only update completed: the following optimizer step is exact.
             assert_next_update_exact("mid-score-only")
+            self.assertEqual(
+                closed_restored_environments,
+                ["mid-sweep", "sweep-boundary", "mid-drain", "mid-score-only"],
+            )
 
     def test_drain_rollout_cannot_advance_optimizer_clock(self) -> None:
         base = curriculum()
