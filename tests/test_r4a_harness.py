@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import FrozenInstanceError, replace
 import sys
 import threading
 import unittest
@@ -25,6 +26,7 @@ from irisu_rl.original_game.harness import (  # noqa: E402
     HarnessLimits,
     InputAcknowledgement,
     InputCapabilities,
+    MONOTONIC_CLOCK_DOMAIN,
     OriginalGameHarness,
     Rect,
     SafetyError,
@@ -32,6 +34,7 @@ from irisu_rl.original_game.harness import (  # noqa: E402
     ScreenState,
     SessionSafety,
     ShotKind,
+    TargetRuntimeDescriptor,
     UnsupportedInputError,
     WindowIdentity,
     WindowIdentityError,
@@ -40,6 +43,10 @@ from irisu_rl.original_game.harness import (  # noqa: E402
 
 IDENTITY = WindowIdentity("0xabc", "capture-7")
 OTHER = WindowIdentity("0xdef", "capture-8")
+EXECUTABLE_SHA256 = "a" * 64
+RUNTIME_SHA256 = "b" * 64
+BROKER_INSTANCE = "fixture-broker-1"
+CLAIM_GENERATION = 7
 
 
 class Clock:
@@ -116,6 +123,11 @@ class FakeProvider:
         self.held_buttons: set[str] = set()
         self.release_deadlines: dict[str, int] = {}
         self.renew_headroom_ns: int | None = None
+        self.claim_generation = CLAIM_GENERATION
+        self.broker_instance = BROKER_INSTANCE
+        self.executable_sha256 = EXECUTABLE_SHA256
+        self.runtime_sha256 = RUNTIME_SHA256
+        self.operation_id = 0
 
     def _event(
         self, name: str, identity: WindowIdentity, token: ClaimToken | None = None
@@ -128,10 +140,55 @@ class FakeProvider:
         if name in self.fail:
             raise RuntimeError(f"forced {name} failure")
 
-    def _ack(self) -> InputAcknowledgement:
+    def _descriptor(
+        self, identity: WindowIdentity | None = None
+    ) -> TargetRuntimeDescriptor:
+        return TargetRuntimeDescriptor(
+            identity or self.claim_identity,
+            1234,
+            self.executable_sha256,
+            self.runtime_sha256,
+        )
+
+    def _lease(
+        self,
+        expires_ns: int,
+        *,
+        identity: WindowIdentity | None = None,
+    ) -> ClaimLease:
+        claimed_identity = identity or self.claim_identity
+        return ClaimLease(
+            claimed_identity,
+            self.token,
+            expires_ns,
+            self.claim_generation,
+            self.broker_instance,
+            self._descriptor(claimed_identity),
+        )
+
+    def _ack(
+        self,
+        *,
+        identity: WindowIdentity = IDENTITY,
+        button: str,
+        button_state: str,
+        release_deadline_ns: int | None,
+    ) -> InputAcknowledgement:
         injected = self.clock()
         self.clock.advance(10)
-        return InputAcknowledgement(injected, self.clock())
+        self.operation_id += 1
+        return InputAcknowledgement(
+            injected,
+            self.clock(),
+            operation_id=self.operation_id,
+            identity=identity,
+            claim_generation=self.claim_generation,
+            broker_instance=self.broker_instance,
+            button=button,
+            button_state=button_state,
+            accepted_release_deadline_ns=release_deadline_ns,
+            clock_domain=MONOTONIC_CLOCK_DOMAIN,
+        )
 
     def current_session_safety(self) -> SessionSafety:
         self.events.append(("safety",))
@@ -148,25 +205,23 @@ class FakeProvider:
     ) -> ClaimLease:
         self._event("claim", identity)
         self.claimed = True
-        return ClaimLease(
-            self.claim_identity,
-            self.token,
+        return self._lease(
             self.clock() + lease_seconds * 1_000_000_000,
+            identity=self.claim_identity,
         )
 
     def renew_exact_window_claim(
         self, identity: WindowIdentity, token: ClaimToken, lease_seconds: int
     ) -> ClaimLease:
         self._event("renew", identity, token)
-        return ClaimLease(
-            identity,
-            token,
+        return self._lease(
             self.clock()
             + (
                 lease_seconds * 1_000_000_000
                 if self.renew_headroom_ns is None
                 else self.renew_headroom_ns
             ),
+            identity=identity,
         )
 
     def release_exact_window_claim(
@@ -226,7 +281,11 @@ class FakeProvider:
             raise RuntimeError("invalid broker release deadline")
         self.held_buttons.add(button)
         self.release_deadlines[button] = release_deadline_ns
-        return self._ack()
+        return self._ack(
+            button=button,
+            button_state="down",
+            release_deadline_ns=release_deadline_ns,
+        )
 
     def targeted_button_up(
         self,
@@ -240,9 +299,14 @@ class FakeProvider:
         self._event(f"up:{button}:{x}:{y}", identity, token)
         if "up" in self.fail:
             raise RuntimeError("forced up failure")
+        release_deadline_ns = self.release_deadlines.get(button)
         self.held_buttons.discard(button)
         self.release_deadlines.pop(button, None)
-        return self._ack()
+        return self._ack(
+            button=button,
+            button_state="up",
+            release_deadline_ns=release_deadline_ns,
+        )
 
     def release_all_buttons(
         self, identity: WindowIdentity, token: ClaimToken
@@ -250,7 +314,11 @@ class FakeProvider:
         self._event("release_all", identity, token)
         self.held_buttons.clear()
         self.release_deadlines.clear()
-        return self._ack()
+        return self._ack(
+            button="all",
+            button_state="neutral",
+            release_deadline_ns=None,
+        )
 
     def enforce_release_deadlines(self) -> None:
         for button, deadline in tuple(self.release_deadlines.items()):
@@ -302,6 +370,22 @@ class HarnessTests(unittest.TestCase):
         token = ClaimToken("do-not-print-me")
         self.assertNotIn("do-not-print-me", repr(token))
         self.assertNotIn("do-not-print-me", str(token))
+
+    def test_claim_binds_an_immutable_target_and_runtime_descriptor(self) -> None:
+        harness, provider, _, _ = self.make()
+        harness.open()
+        descriptor = harness.target_descriptor
+        self.assertEqual(descriptor, provider._descriptor(IDENTITY))
+        assert descriptor is not None
+        with self.assertRaises(FrozenInstanceError):
+            descriptor.process_id = 42  # type: ignore[misc]
+
+        provider.runtime_sha256 = "c" * 64
+        with self.assertRaisesRegex(
+            WindowIdentityError, "target/runtime identity"
+        ):
+            harness.renew()
+        self.assertFalse(provider.claimed)
 
     def test_safety_identity_and_capability_fields_are_strictly_typed(self) -> None:
         with self.assertRaises((TypeError, ValueError)):
@@ -604,6 +688,32 @@ class HarnessTests(unittest.TestCase):
             harness.fire("weak", 20, 20)
         self.assertFalse(provider.claimed)
 
+    def test_provider_timestamps_must_be_inside_the_local_call(self) -> None:
+        harness, provider, _, _ = self.make()
+        original_capture = provider.capture_exact_window
+
+        def early_capture(identity, token):
+            packet = original_capture(identity, token)
+            return replace(packet, request_ns=packet.request_ns - 1)
+
+        provider.capture_exact_window = early_capture  # type: ignore[method-assign]
+        with self.assertRaisesRegex(HarnessError, "provider-call interval"):
+            harness.open()
+        self.assertFalse(provider.claimed)
+
+        harness, provider, _, clock = self.make()
+
+        def early_cursor(identity, token):
+            provider._event("cursor", identity, token)
+            from irisu_rl.original_game.harness import CursorSample
+
+            return CursorSample(*provider.cursor, clock() - 1)
+
+        provider.current_cursor = early_cursor  # type: ignore[method-assign]
+        with self.assertRaisesRegex(HarnessError, "provider-call interval"):
+            harness.open()
+        self.assertFalse(provider.claimed)
+
     def test_invalid_bounds_rate_and_cursor_contract_fail_closed(self) -> None:
         cases = (
             (limits(), "weak", float("nan"), 0, "finite"),
@@ -758,6 +868,47 @@ class HarnessTests(unittest.TestCase):
                 self.assertFalse(provider.held_buttons)
                 self.assertTrue(harness.watchdog.buttons_neutral)
 
+    def test_input_acknowledgment_is_bound_to_claim_and_operation(self) -> None:
+        mutations = (
+            {"identity": OTHER},
+            {"claim_generation": CLAIM_GENERATION + 1},
+            {"broker_instance": "other-broker"},
+            {"button": "right"},
+            {"button_state": "up"},
+            {"accepted_release_deadline_ns": 1},
+            {"clock_domain": "other-clock"},
+        )
+        for mutation in mutations:
+            with self.subTest(mutation=mutation):
+                harness, provider, _, _ = self.make()
+                harness.open()
+                original_down = provider.targeted_button_down
+
+                def mismatched_down(
+                    *args,
+                    _original_down=original_down,
+                    _mutation=mutation,
+                    **kwargs,
+                ):
+                    return replace(
+                        _original_down(*args, **kwargs), **_mutation
+                    )
+
+                provider.targeted_button_down = mismatched_down  # type: ignore[method-assign]
+                with self.assertRaisesRegex(ActionError, "not bound"):
+                    harness.fire("weak", 10, 10)
+                self.assertFalse(provider.claimed)
+                self.assertFalse(provider.held_buttons)
+
+        harness, provider, _, _ = self.make()
+        harness.open()
+        harness._last_input_operation_id = 5  # type: ignore[attr-defined]
+        provider.operation_id = 4
+        with self.assertRaisesRegex(ActionError, "not bound"):
+            harness.fire("weak", 10, 10)
+        self.assertFalse(provider.claimed)
+        self.assertFalse(provider.held_buttons)
+
     def test_concurrent_fire_is_serialized_at_pending_depth_one(self) -> None:
         harness, provider, _, _ = self.make(config=limits(min_click_interval_ns=1))
         harness.open()
@@ -855,13 +1006,58 @@ class HarnessTests(unittest.TestCase):
             provider.release_deadlines[button] = release_deadline_ns
             clock.advance(release_deadline_ns - clock() + 1)
             provider.enforce_release_deadlines()
-            return InputAcknowledgement(injected, injected + 1)
+            provider.operation_id += 1
+            return InputAcknowledgement(
+                injected,
+                injected + 1,
+                operation_id=provider.operation_id,
+                identity=IDENTITY,
+                claim_generation=provider.claim_generation,
+                broker_instance=provider.broker_instance,
+                button=button,
+                button_state="down",
+                accepted_release_deadline_ns=release_deadline_ns,
+                clock_domain=MONOTONIC_CLOCK_DOMAIN,
+            )
 
         provider.targeted_button_down = stalled_down  # type: ignore[method-assign]
         with self.assertRaisesRegex(ActionError, "returned after"):
             harness.fire("strong", 10, 10)
         self.assertFalse(provider.held_buttons)
         self.assertTrue(harness.watchdog.buttons_neutral)
+
+    def test_button_up_must_return_before_the_accepted_deadline(self) -> None:
+        harness, provider, _, clock = self.make(
+            config=limits(lease_cleanup_margin_ns=100)
+        )
+        harness.open()
+
+        def late_up(identity, token, button, x, y):
+            provider._event(f"up:{button}:{x}:{y}", identity, token)
+            deadline = provider.release_deadlines[button]
+            injected = clock()
+            clock.advance(deadline - clock())
+            provider.held_buttons.discard(button)
+            provider.release_deadlines.pop(button)
+            provider.operation_id += 1
+            return InputAcknowledgement(
+                injected,
+                clock(),
+                operation_id=provider.operation_id,
+                identity=identity,
+                claim_generation=provider.claim_generation,
+                broker_instance=provider.broker_instance,
+                button=button,
+                button_state="up",
+                accepted_release_deadline_ns=deadline,
+                clock_domain=MONOTONIC_CLOCK_DOMAIN,
+            )
+
+        provider.targeted_button_up = late_up  # type: ignore[method-assign]
+        with self.assertRaisesRegex(ActionError, "button-up returned after"):
+            harness.fire("weak", 10, 10)
+        self.assertFalse(provider.claimed)
+        self.assertFalse(provider.held_buttons)
 
     def test_renewal_must_preserve_identity_and_token(self) -> None:
         harness, provider, _, _ = self.make()
@@ -870,14 +1066,55 @@ class HarnessTests(unittest.TestCase):
         self.assertTrue(provider.claimed)
         harness.close()
 
+    def test_renewal_must_extend_and_still_be_live_when_it_returns(self) -> None:
+        harness, provider, _, clock = self.make()
+        harness.open()
+        lease = harness._lease  # type: ignore[attr-defined]
+        assert lease is not None
+
+        def nonextending(identity, token, lease_seconds):
+            provider._event("renew", identity, token)
+            return provider._lease(lease.expires_ns, identity=identity)
+
+        provider.renew_exact_window_claim = nonextending  # type: ignore[method-assign]
+        with self.assertRaisesRegex(WindowIdentityError, "did not extend"):
+            harness.renew()
+        self.assertFalse(provider.claimed)
+
+        harness, provider, _, clock = self.make()
+        harness.open()
+
+        def expired(identity, token, lease_seconds):
+            provider._event("renew", identity, token)
+            clock.advance(10)
+            return provider._lease(clock(), identity=identity)
+
+        provider.renew_exact_window_claim = expired  # type: ignore[method-assign]
+        with self.assertRaisesRegex(
+            WindowIdentityError, "expired before the provider call returned"
+        ):
+            harness.renew()
+        self.assertFalse(provider.claimed)
+
+    def test_claim_expiry_during_provider_capture_fails_closed(self) -> None:
+        harness, provider, _, clock = self.make()
+        harness.open()
+        harness._lease = provider._lease(  # type: ignore[attr-defined]
+            clock() + 5, identity=IDENTITY
+        )
+        with self.assertRaisesRegex(
+            WindowIdentityError, "expired during capture"
+        ):
+            harness.capture()
+        self.assertFalse(provider.claimed)
+        self.assertTrue(harness.watchdog.buttons_neutral)
+
     def test_near_expiry_claim_is_renewed_before_button_down(self) -> None:
         harness, provider, _, clock = self.make(
             config=limits(lease_cleanup_margin_ns=100)
         )
         harness.open()
-        harness._lease = ClaimLease(  # type: ignore[attr-defined]
-            IDENTITY, provider.token, clock() + 120
-        )
+        harness._lease = provider._lease(clock() + 120, identity=IDENTITY)  # type: ignore[attr-defined]
         result = harness.fire("weak", 10, 10)
         self.assertEqual(result.status, ExecutionStatus.EXECUTED)
         names = [str(event[0]).split(":")[0] for event in provider.events]
@@ -889,8 +1126,8 @@ class HarnessTests(unittest.TestCase):
             config=limits(lease_cleanup_margin_ns=100)
         )
         harness.open()
-        harness._lease = ClaimLease(  # type: ignore[attr-defined]
-            IDENTITY, provider.token, clock() + 120
+        harness._lease = provider._lease(  # type: ignore[attr-defined]
+            clock() + 119, identity=IDENTITY
         )
         provider.renew_headroom_ns = 120
         with self.assertRaisesRegex(
@@ -910,9 +1147,7 @@ class HarnessTests(unittest.TestCase):
             config=limits(lease_cleanup_margin_ns=100)
         )
         harness.open()
-        harness._lease = ClaimLease(  # type: ignore[attr-defined]
-            IDENTITY, provider.token, clock() + 120
-        )
+        harness._lease = provider._lease(clock() + 120, identity=IDENTITY)  # type: ignore[attr-defined]
         provider.fail.add("renew")
         with self.assertRaisesRegex(RuntimeError, "forced renew failure"):
             harness.fire("strong", 10, 10)

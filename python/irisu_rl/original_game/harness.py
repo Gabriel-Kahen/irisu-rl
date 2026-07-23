@@ -90,6 +90,38 @@ class WindowIdentity:
             raise ValueError("window address and capture identity must be non-empty")
 
 
+MONOTONIC_CLOCK_DOMAIN = "linux.clock_monotonic"
+
+
+def _sha256(value: object, name: str) -> str:
+    if (
+        not isinstance(value, str)
+        or len(value) != 64
+        or any(character not in "0123456789abcdef" for character in value)
+        or value == "0" * 64
+    ):
+        raise ValueError(f"{name} must be a nonzero lowercase SHA-256")
+    return value
+
+
+@dataclass(frozen=True, slots=True)
+class TargetRuntimeDescriptor:
+    """Immutable process/runtime identity authorized by one window claim."""
+
+    identity: WindowIdentity
+    process_id: int
+    executable_sha256: str
+    runtime_sha256: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.identity, WindowIdentity):
+            raise TypeError("target descriptor identity is invalid")
+        if type(self.process_id) is not int or self.process_id <= 0:
+            raise ValueError("target descriptor process ID must be positive")
+        _sha256(self.executable_sha256, "target executable SHA-256")
+        _sha256(self.runtime_sha256, "target runtime SHA-256")
+
+
 class ClaimToken:
     """Opaque fencing token whose representation never discloses its value."""
 
@@ -181,6 +213,9 @@ class ClaimLease:
     identity: WindowIdentity
     token: ClaimToken
     expires_ns: int
+    generation: int | None = None
+    broker_instance: str | None = None
+    target: TargetRuntimeDescriptor | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.identity, WindowIdentity) or not isinstance(
@@ -189,6 +224,25 @@ class ClaimLease:
             raise TypeError("claim lease identity/token types are invalid")
         if type(self.expires_ns) is not int or self.expires_ns <= 0:
             raise ValueError("claim expiry must be a positive monotonic timestamp")
+        if self.generation is not None and (
+            type(self.generation) is not int or self.generation <= 0
+        ):
+            raise ValueError("claim generation must be positive")
+        if self.broker_instance is not None and (
+            not isinstance(self.broker_instance, str)
+            or not self.broker_instance
+            or len(self.broker_instance) > 256
+            or any(
+                character in self.broker_instance
+                for character in ("\0", "\n", "\r")
+            )
+        ):
+            raise ValueError("broker instance is invalid")
+        if self.target is not None:
+            if not isinstance(self.target, TargetRuntimeDescriptor):
+                raise TypeError("claim target descriptor is invalid")
+            if self.target.identity != self.identity:
+                raise ValueError("claim target descriptor identity differs")
 
 
 @dataclass(frozen=True, slots=True)
@@ -363,6 +417,14 @@ class InputAcknowledgement:
     acknowledged_ns: int
     acknowledged: bool = True
     detail: str = ""
+    operation_id: int | None = None
+    identity: WindowIdentity | None = None
+    claim_generation: int | None = None
+    broker_instance: str | None = None
+    button: str | None = None
+    button_state: str | None = None
+    accepted_release_deadline_ns: int | None = None
+    clock_domain: str | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -374,6 +436,46 @@ class InputAcknowledgement:
             raise ValueError("input acknowledgment timestamps are invalid")
         if type(self.acknowledged) is not bool or not isinstance(self.detail, str):
             raise TypeError("invalid input acknowledgment fields")
+        if self.operation_id is not None and (
+            type(self.operation_id) is not int or self.operation_id <= 0
+        ):
+            raise ValueError("input operation ID must be positive")
+        if self.identity is not None and not isinstance(
+            self.identity, WindowIdentity
+        ):
+            raise TypeError("input acknowledgment identity is invalid")
+        if self.claim_generation is not None and (
+            type(self.claim_generation) is not int
+            or self.claim_generation <= 0
+        ):
+            raise ValueError("input acknowledgment claim generation must be positive")
+        if self.broker_instance is not None and (
+            not isinstance(self.broker_instance, str)
+            or not self.broker_instance
+            or len(self.broker_instance) > 256
+        ):
+            raise ValueError("input acknowledgment broker instance is invalid")
+        if self.button is not None and self.button not in {
+            "left",
+            "right",
+            "all",
+        }:
+            raise ValueError("input acknowledgment button is invalid")
+        if self.button_state is not None and self.button_state not in {
+            "down",
+            "up",
+            "neutral",
+        }:
+            raise ValueError("input acknowledgment button state is invalid")
+        if self.accepted_release_deadline_ns is not None and (
+            type(self.accepted_release_deadline_ns) is not int
+            or self.accepted_release_deadline_ns <= 0
+        ):
+            raise ValueError("accepted release deadline must be positive")
+        if self.clock_domain is not None and (
+            not isinstance(self.clock_domain, str) or not self.clock_domain
+        ):
+            raise ValueError("input acknowledgment clock domain is invalid")
 
 
 @runtime_checkable
@@ -647,6 +749,7 @@ class OriginalGameHarness:
         self._timing_observer = timing_observer
         self.buffer = BoundedFrameBuffer(self.limits.frame_buffer_capacity)
         self._lease: ClaimLease | None = None
+        self._target: TargetRuntimeDescriptor | None = None
         self._capabilities: InputCapabilities | None = None
         self._cursor: CursorSample | None = None
         self._pending = False
@@ -658,6 +761,7 @@ class OriginalGameHarness:
         self._dropped_frames = 0
         self._frame_sequence = 0
         self._action_sequence = 0
+        self._last_input_operation_id = 0
         self._last_click_ns: int | None = None
         self._proposed: list[ProposedAction] = []
         self._executed: list[ExecutedAction] = []
@@ -670,6 +774,10 @@ class OriginalGameHarness:
     @property
     def executed_actions(self) -> tuple[ExecutedAction, ...]:
         return tuple(self._executed)
+
+    @property
+    def target_descriptor(self) -> TargetRuntimeDescriptor | None:
+        return self._target
 
     @property
     def _pending_effects(self) -> int:
@@ -716,6 +824,67 @@ class OriginalGameHarness:
         if text not in self._reasons:
             self._reasons.append(text)
 
+    def _validate_lease(
+        self,
+        lease: object,
+        returned_ns: int,
+        *,
+        previous: ClaimLease | None = None,
+    ) -> ClaimLease:
+        if not isinstance(lease, ClaimLease):
+            raise WindowIdentityError("provider returned an invalid claim lease")
+        if lease.identity != self.identity:
+            raise WindowIdentityError("claim changed window identity")
+        if (
+            lease.generation is None
+            or lease.broker_instance is None
+            or lease.target is None
+        ):
+            raise WindowIdentityError(
+                "claim lacks generation, broker, or target/runtime binding"
+            )
+        if lease.target.identity != self.identity:
+            raise WindowIdentityError("claim target descriptor changed window identity")
+        if returned_ns >= lease.expires_ns:
+            raise WindowIdentityError("claim expired before the provider call returned")
+        if previous is not None:
+            if lease.token != previous.token:
+                raise WindowIdentityError("claim renewal changed fencing token")
+            if lease.generation != previous.generation:
+                raise WindowIdentityError("claim renewal changed generation")
+            if lease.broker_instance != previous.broker_instance:
+                raise WindowIdentityError("claim renewal changed broker instance")
+            if lease.target != previous.target:
+                raise WindowIdentityError("claim renewal changed target/runtime identity")
+            if lease.expires_ns <= previous.expires_ns:
+                raise WindowIdentityError("claim renewal did not extend its expiry")
+        return lease
+
+    @staticmethod
+    def _validate_provider_interval(
+        start_ns: int,
+        end_ns: int,
+        reported_start_ns: int,
+        reported_end_ns: int,
+        operation: str,
+    ) -> None:
+        if not (
+            start_ns
+            <= reported_start_ns
+            <= reported_end_ns
+            <= end_ns
+        ):
+            raise HarnessError(
+                f"{operation} timestamps are outside the local provider-call interval"
+            )
+
+    @staticmethod
+    def _ensure_lease_live(
+        lease: ClaimLease, at_ns: int, operation: str
+    ) -> None:
+        if at_ns >= lease.expires_ns:
+            raise WindowIdentityError(f"window claim expired during {operation}")
+
     def open(self) -> OriginalGameHarness:
         with self._state_lock:
             return self._open()
@@ -731,6 +900,9 @@ class OriginalGameHarness:
             lease = self.provider.claim_exact_window(
                 self.identity, self.limits.lease_seconds
             )
+            claim_return_ns = self._clock_ns()
+            if not isinstance(lease, ClaimLease):
+                raise WindowIdentityError("provider returned an invalid claim lease")
             if lease.identity != self.identity:
                 # Releasing the unexpected lease is safe; sending even a
                 # release-all input to that unapproved identity is not.  A
@@ -753,9 +925,22 @@ class OriginalGameHarness:
                         f"release_unexpected_window_claim: {cleanup_exc}"
                     )
                 raise WindowIdentityError("provider claimed a different window")
-            self._lease = lease
+            self._lease = self._validate_lease(lease, claim_return_ns)
+            self._target = self._lease.target
+            self._last_input_operation_id = 0
             self.capture()
+            lease = self._require_active()
+            cursor_request_ns = self._clock_ns()
             cursor = self.provider.current_cursor(self.identity, lease.token)
+            cursor_return_ns = self._clock_ns()
+            self._validate_provider_interval(
+                cursor_request_ns,
+                cursor_return_ns,
+                cursor.observed_ns,
+                cursor.observed_ns,
+                "cursor observation",
+            )
+            self._ensure_lease_live(lease, cursor_return_ns, "cursor observation")
             self._validate_window_point(cursor.x, cursor.y)
             self._cursor = cursor
             return self
@@ -776,9 +961,10 @@ class OriginalGameHarness:
             renewed = self.provider.renew_exact_window_claim(
                 self.identity, lease.token, self.limits.lease_seconds
             )
-            if renewed.identity != self.identity or renewed.token != lease.token:
-                raise WindowIdentityError("claim renewal changed identity or fencing token")
-            self._lease = renewed
+            returned_ns = self._clock_ns()
+            self._lease = self._validate_lease(
+                renewed, returned_ns, previous=lease
+            )
         except Exception as exc:
             self._abort(exc)
 
@@ -859,10 +1045,20 @@ class OriginalGameHarness:
             safety = self.provider.current_session_safety()
             if not safety.ready:
                 raise SafetyError(safety.detail or "current session became unsafe")
+            capture_request_ns = self._clock_ns()
+            self._ensure_lease_live(lease, capture_request_ns, "capture")
             packet = self.provider.capture_exact_window(self.identity, lease.token)
             if packet.identity != self.identity:
                 raise WindowIdentityError("capture identity changed")
             now_ns = self._clock_ns()
+            self._validate_provider_interval(
+                capture_request_ns,
+                now_ns,
+                packet.request_ns,
+                packet.completion_ns,
+                "capture",
+            )
+            self._ensure_lease_live(lease, now_ns, "capture")
             assessment = self.geometry.assess(packet, now_ns)
             self._validate_geometry(assessment, packet)
             screen = self.screen_classifier.classify(packet, assessment)
@@ -942,7 +1138,15 @@ class OriginalGameHarness:
         return parsed, client_x, client_y
 
     def _validate_ack(
-        self, request_ns: int, ack: InputAcknowledgement, edge: str
+        self,
+        request_ns: int,
+        ack: InputAcknowledgement,
+        edge: str,
+        lease: ClaimLease,
+        *,
+        button: str,
+        button_state: str,
+        release_deadline_ns: int | None,
     ) -> int:
         if not isinstance(ack, InputAcknowledgement):
             raise ActionError(f"{edge} returned an invalid acknowledgment")
@@ -953,6 +1157,23 @@ class OriginalGameHarness:
         post_return_ns = self._clock_ns()
         if ack.acknowledged_ns > post_return_ns:
             raise ActionError(f"{edge} acknowledgment is in the future")
+        expected = (
+            ack.operation_id is not None
+            and ack.operation_id > self._last_input_operation_id
+            and ack.identity == self.identity
+            and ack.claim_generation == lease.generation
+            and ack.broker_instance == lease.broker_instance
+            and ack.button == button
+            and ack.button_state == button_state
+            and ack.accepted_release_deadline_ns == release_deadline_ns
+            and ack.clock_domain == MONOTONIC_CLOCK_DOMAIN
+        )
+        if not expected:
+            raise ActionError(
+                f"{edge} acknowledgment is not bound to this operation and claim"
+            )
+        assert ack.operation_id is not None
+        self._last_input_operation_id = ack.operation_id
         return post_return_ns
 
     def _validate_cursor_travel(self, x: float, y: float, now_ns: int) -> None:
@@ -980,11 +1201,9 @@ class OriginalGameHarness:
             lease.token,
             self.limits.lease_seconds,
         )
-        if renewed.identity != self.identity or renewed.token != lease.token:
-            raise WindowIdentityError(
-                "claim renewal changed identity or fencing token"
-            )
-        if renewed.expires_ns - self._clock_ns() <= required:
+        returned_ns = self._clock_ns()
+        renewed = self._validate_lease(renewed, returned_ns, previous=lease)
+        if renewed.expires_ns - returned_ns <= required:
             raise WindowIdentityError(
                 "renewed claim lacks button-up cleanup headroom"
             )
@@ -1096,13 +1315,20 @@ class OriginalGameHarness:
                 release_deadline_ns,
             )
             down_return_ns = self._validate_ack(
-                down_request, down, "button-down"
+                down_request,
+                down,
+                "button-down",
+                lease,
+                button=parsed.button,
+                button_state="down",
+                release_deadline_ns=release_deadline_ns,
             )
             self._buttons_neutral = False
             if down_return_ns >= release_deadline_ns:
                 raise ActionError(
                     "button-down returned after its automatic release deadline"
                 )
+            self._ensure_lease_live(lease, down_return_ns, "button-down")
             if (
                 lease.expires_ns - down.acknowledged_ns
                 <= press_duration + self.limits.lease_cleanup_margin_ns
@@ -1123,9 +1349,25 @@ class OriginalGameHarness:
                 window_x,
                 window_y,
             )
-            self._validate_ack(up_request, up, "button-up")
+            up_return_ns = self._validate_ack(
+                up_request,
+                up,
+                "button-up",
+                lease,
+                button=parsed.button,
+                button_state="up",
+                release_deadline_ns=release_deadline_ns,
+            )
+            if (
+                up.acknowledged_ns >= release_deadline_ns
+                or up_return_ns >= release_deadline_ns
+            ):
+                raise ActionError(
+                    "button-up returned after its automatic release deadline"
+                )
+            self._ensure_lease_live(lease, up_return_ns, "button-up")
             self._buttons_neutral = True
-            completed = self._clock_ns()
+            completed = up_return_ns
             if completed < up.acknowledged_ns:
                 raise ActionError("action completion predates button-up acknowledgment")
             result = ExecutedAction(
@@ -1301,7 +1543,15 @@ class OriginalGameHarness:
         try:
             request_ns = self._clock_ns()
             ack = self.provider.release_all_buttons(self.identity, lease.token)
-            self._validate_ack(request_ns, ack, "release-all")
+            self._validate_ack(
+                request_ns,
+                ack,
+                "release-all",
+                lease,
+                button="all",
+                button_state="neutral",
+                release_deadline_ns=None,
+            )
             self._buttons_neutral = True
         except Exception as exc:
             self._buttons_neutral = False
