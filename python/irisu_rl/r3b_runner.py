@@ -553,9 +553,9 @@ class BuiltTrial:
                 exact_backend_parity_artifact,
                 LearnedPolicyBackendParityArtifact,
             )
-            or exact_backend_parity_artifact.portable_suite.sha256
+            or exact_backend_parity_artifact.exact_suite.sha256
             != metrics_artifact.suite.sha256
-            or exact_backend_parity_artifact.portable_report.sha256
+            or exact_backend_parity_artifact.exact_report.sha256
             != metrics_artifact.final_report.sha256
             or exact_backend_parity_artifact.policy_sha256 != deployment_identity.sha256
         ):
@@ -710,6 +710,8 @@ class R3BRunBuilder:
         job: TrialJob,
         authorization: ValidationRunAuthorization | SealedTestJobLease | None,
         sealed_test_ledger: SealedTestLedger | None,
+        *,
+        require_running_lease: bool = False,
     ) -> None:
         if not isinstance(job, TrialJob) or job.plan_sha256 != self.plan.sha256:
             raise ValueError("trial job does not belong to the frozen plan")
@@ -769,7 +771,10 @@ class R3BRunBuilder:
                 == Path(authorization.sealed_run.ledger_path)
             )
             if valid_authorization:
-                authorization.assert_active()
+                if require_running_lease:
+                    authorization.assert_running()
+                else:
+                    authorization.assert_active()
         if not valid_authorization:
             raise ValueError("trial job lacks its phase-selection authorization")
 
@@ -779,8 +784,85 @@ class R3BRunBuilder:
         *,
         authorization: ValidationRunAuthorization | SealedTestJobLease | None = None,
     ) -> BuiltTrial:
+        return self._build(
+            job,
+            authorization=authorization,
+            resume_audit=False,
+            begin_sealed_lease=True,
+        )
+
+    def build_under_running_sealed_lease(
+        self,
+        job: TrialJob,
+        *,
+        authorization: SealedTestJobLease,
+    ) -> BuiltTrial:
+        """Recreate a test runner after its one-shot lease already began."""
+
+        if not isinstance(authorization, SealedTestJobLease):
+            raise TypeError("running sealed build requires a job lease")
+        return self._build(
+            job,
+            authorization=authorization,
+            resume_audit=False,
+            begin_sealed_lease=False,
+        )
+
+    def build_resume_audit_session(
+        self,
+        job: TrialJob,
+        *,
+        authorization: SealedTestJobLease,
+    ) -> R3ATrainingSession:
+        """Build an independent verifier session under an already-running lease.
+
+        The returned session owns its environment and is intended only for
+        ``verify_exact_resume_continuation``, which closes that environment.
+        It carries no sealed-job receipt and therefore cannot mint outcome
+        evidence for the ledger.
+        """
+
+        if not isinstance(authorization, SealedTestJobLease):
+            raise TypeError("resume audit requires a sealed-test job lease")
+        built = self._build(
+            job,
+            authorization=authorization,
+            resume_audit=True,
+            begin_sealed_lease=False,
+        )
+        try:
+            authorization.assert_running()
+        except BaseException as error:
+            try:
+                built.close()
+            except BaseException as close_error:
+                error.add_note(
+                    "resume-audit cleanup also failed: "
+                    f"{type(close_error).__name__}: {close_error}"
+                )
+            raise
+        return built.session
+
+    def _build(
+        self,
+        job: TrialJob,
+        *,
+        authorization: ValidationRunAuthorization | SealedTestJobLease | None,
+        resume_audit: bool,
+        begin_sealed_lease: bool,
+    ) -> BuiltTrial:
         sealed_test_ledger = self._sealed_test_ledger
-        self._validate_job(job, authorization, sealed_test_ledger)
+        self._validate_job(
+            job,
+            authorization,
+            sealed_test_ledger,
+            require_running_lease=resume_audit
+            or (
+                isinstance(authorization, SealedTestJobLease) and not begin_sealed_lease
+            ),
+        )
+        if resume_audit and not isinstance(authorization, SealedTestJobLease):
+            raise RuntimeError("invalid sealed-runner construction mode")
         arm = job.arm
         learner_seed = job.learner_seed
         seed_plan = TrialSeedPlan.derive(self.plan.sha256, learner_seed)
@@ -788,7 +870,7 @@ class R3BRunBuilder:
         environment = None
         lease_started = False
         try:
-            if isinstance(authorization, SealedTestJobLease):
+            if isinstance(authorization, SealedTestJobLease) and begin_sealed_lease:
                 assert sealed_test_ledger is not None
                 sealed_test_ledger.begin_job(authorization)
                 lease_started = True
@@ -1015,7 +1097,7 @@ class R3BRunBuilder:
                 manifest,
                 environment,
                 authorization.sha256
-                if isinstance(authorization, SealedTestJobLease)
+                if not resume_audit and isinstance(authorization, SealedTestJobLease)
                 else None,
             )
         except BaseException as error:

@@ -16,7 +16,7 @@ import numpy as np
 import torch
 from torch import Tensor
 
-from .actions import ActionSpec, SemanticAction
+from .actions import ActionSpec, SemanticAction, SemanticActionKind
 from .checkpoints import (
     capture_rng_state,
     load_checkpoint,
@@ -670,6 +670,34 @@ class RecurrentCollector:
                 composer.validate_identity()
                 kind_mask, wait_mask = self.task.action_masks(self.model.action_spec)
                 critic_condition = self._task_critic_condition()
+                target = self.config.target_simulated_ticks
+                if target is not None:
+                    remaining = max(1, target - collected_ticks)
+                    maximum_wait = max(1, remaining // self.lanes)
+                    budget_mask = torch.tensor(
+                        tuple(
+                            ticks <= maximum_wait
+                            for ticks in self.model.action_spec.wait_choices
+                        ),
+                        dtype=torch.bool,
+                    )
+                    wait_mask = wait_mask & budget_mask.unsqueeze(0)
+                    no_budgeted_wait = ~wait_mask.any(dim=1)
+                    if torch.any(no_budgeted_wait):
+                        kind_mask = kind_mask.clone()
+                        kind_mask[
+                            no_budgeted_wait,
+                            int(SemanticActionKind.WAIT),
+                        ] = False
+                    if not bool(torch.all(kind_mask.any(dim=1))):
+                        raise ValueError(
+                            "no legal action fits the remaining tick budget"
+                        )
+                    if remaining < self.lanes:
+                        if not torch.any(no_budgeted_wait):
+                            kind_mask = kind_mask.clone()
+                            kind_mask[:, int(SemanticActionKind.FIRE_WEAK)] = False
+                            kind_mask[:, int(SemanticActionKind.FIRE_STRONG)] = False
                 expected_wait = (self.lanes, len(self.model.action_spec.wait_choices))
                 if kind_mask.shape != (self.lanes, 3) or kind_mask.dtype != torch.bool:
                     raise ValueError("task kind mask must be boolean [B, 3]")

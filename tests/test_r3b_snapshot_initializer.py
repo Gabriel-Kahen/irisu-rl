@@ -210,6 +210,7 @@ class ResetBoundReplaySimulator:
     def __init__(self) -> None:
         self.initialized = False
         self.tick = 0
+        self.invalid_action = False
 
     def reset(self, *, seed):
         self.initialized = True
@@ -226,7 +227,13 @@ class ResetBoundReplaySimulator:
 
     def step(self, action):
         self.tick += int(action.wait_ticks)
-        return {"tick": self.tick, "score": self.tick}, self.tick, False, False, {}
+        return (
+            {"tick": self.tick, "score": self.tick},
+            self.tick,
+            False,
+            False,
+            {"invalid_action": self.invalid_action},
+        )
 
     def clone_state(self):
         return b"verified-replay-state"
@@ -358,6 +365,10 @@ class SnapshotInitializerTests(unittest.TestCase):
             ),
             snapshot,
         )
+        invalid = ResetBoundReplaySimulator()
+        invalid.invalid_action = True
+        with self.assertRaisesRegex(ValueError, "invalid action"):
+            replay_snapshot_recipe(invalid, recipe)
         with self.assertRaisesRegex(ValueError, "runtime identity"):
             replay_snapshot_recipe(
                 ResetBoundReplaySimulator(),

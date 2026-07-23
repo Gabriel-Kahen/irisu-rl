@@ -127,8 +127,11 @@ For each learner seed, `TrialSeedPlan` derives independent SHA-256 streams for:
 - policy sampling;
 - PPO minibatch ordering;
 - curriculum assignments;
-- session NumPy state;
-- evaluation.
+- session NumPy state.
+
+Evaluation uses one frozen seed per phase, shared across learner seeds and arms.
+This gives every policy the same episode and stochastic-action streams for
+paired comparisons without making suite identity depend on the learner seed.
 
 The derivation is arm-independent. A job binds phase, grid arm, learner seed,
 authorized update budget, sealed status, and (for test jobs) the validation
@@ -172,6 +175,12 @@ score-only control and at least 95% final-mean retention. Validation selects;
 it does not confirm. Validation jobs require a typed authorization that carries
 the complete retained calibration results and recomputes the one-LR-per-alpha
 selection; a standalone selection hash cannot authorize work.
+
+Tick-aligned learning-curve AUC is evaluated on the frozen first 32 logical
+snapshots at each 50-update checkpoint. Final mean, p10, retention,
+cross-backend diagnostics, and sealed gates use the complete 512-cell
+validation/test suite (64 cells for calibration). Curve and final reports carry
+different typed suite identities; a curve report cannot satisfy a final gate.
 
 The test suite is committed before validation in a durable SQLite ledger. The
 validation authorization carries that commitment. After validation fixes one
@@ -232,18 +241,28 @@ baselines are:
 - imminent-rot hazard policy.
 
 All required baselines need at least 512 fixed episodes, zero invalid actions,
-deterministic replay, exact raw-score accounting, and portable/exact parity.
+deterministic exact-backend replay, exact raw-score accounting, and a paired
+portable diagnostic.
 Parity uses two backend-specific suites and stores because portable and exact
 snapshot schemas differ. Their physical library, store, assignment, recipe,
 and snapshot identities may differ. A typed manifest pairs recipes only after
 their config, reset seed, legal semantic trace, action schema, expected
 tick/score, split, and scenario provenance match; arbitrary logical-cell labels
-cannot establish parity. Normalized episode metrics must then match exactly.
+cannot establish parity. Native state hashes remain backend-local. Long-horizon
+episode metrics are not required to match because the portable approximation
+and exact backend can truthfully diverge. The exact backend is primary;
+per-cell exact-minus-portable score/tick/decision/gauge/outcome deltas are
+retained as fidelity diagnostics rather than suppressed.
 Each report's backend identity
 comes from the live runtime attestation. Acceptance rejects primary evidence
 from any suite other than the sealed test suite.
 `one_step_greedy` is optional and cannot substitute for a missing required
 baseline.
+
+The required baseline executions are part of the one-shot sealed attempt.
+Their exact primary reports, deterministic exact replays, and portable
+diagnostics are recorded as one ledger batch; a crash after the batch begins
+is terminal, and finalization requires the exact recorded evidence hashes.
 
 ## Failure and evidence policy
 
@@ -283,14 +302,13 @@ from irisu_rl.r3b_experiments import load_plan
 plan = load_plan("configs/rl/experiments/r3b-completion-v1.toml")
 ```
 
-The next operational work is to generate the versioned full-game snapshot
-library, precommit the test suite with `SealedTestLedger.precommit`, run the
-bounded calibration jobs, create validation jobs through
-`bind_validation_run`, and inspect every retained failure/diagnostic artifact.
-Only after validation freezes one candidate may `authorize_once` emit the exact
-sealed job set. Each job then follows `claim_job`, `begin_job`, and
-`complete_job` (or `fail_job`); only a claimed-but-unstarted lease may be
-recovered with `resume_job`. `finalize_once` consumes the recorded outcomes and
-returns the authoritative report. In parallel, R4 must complete the real-game
-causal observation and input calibration path. A successful R3b simulator
-result does not remove that transfer gate.
+The operational runner, atomic snapshot pipeline, content-addressed artifact
+store, progressive calibration workflow, exact-resume audit path, and
+deterministic evaluation sharding are described in
+`docs/rl-r3-operations.md`. The next empirical work is to generate the
+versioned full-game bundles, run a bounded local smoke, precommit the test suite
+and baseline batch, execute calibration, bind validation, authorize the sealed
+test once, and finalize from the ledger. Until those artifacts exist and pass,
+the protocol remains a design rather than a result. In parallel, R4 must
+complete the real-game causal observation and input calibration path. A
+successful R3b simulator result does not remove that transfer gate.

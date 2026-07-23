@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from dataclasses import replace
 import functools
+import hashlib
 import unittest
 import tempfile
 from pathlib import Path
@@ -10,12 +12,16 @@ from irisu_rl.models import RecurrentActorCritic, RecurrentModelConfig
 from irisu_rl.ppo import PPOConfig
 from irisu_rl.r3b_experiments import (
     SealedTestLedger,
+    TrainingCheckpointArtifact,
     TrialJob,
     bind_validation_run,
     load_plan,
 )
-from irisu_rl.r3b_runner import R3BRunBuilder
-from irisu_rl.r3b_runner import _environment_implementation_identity
+from irisu_rl.r3b_runner import (
+    R3BRunBuilder,
+    _environment_implementation_identity,
+    verify_exact_resume_continuation,
+)
 from irisu_env.vector import SyncVectorEnv
 from irisu_rl.schema import TEACHER_V1
 from tests.test_r3b_snapshot_initializer import (
@@ -28,6 +34,7 @@ from tests.test_r3b_experiments import (
     TEST_EVALUATION_SUITE,
     VALIDATION_EVALUATION_SUITE,
     authorization_validation_results,
+    phase_result,
     validation_authorization,
 )
 from tests.test_r3a_curriculum import curriculum as multistage_curriculum
@@ -436,6 +443,175 @@ class R3BRunBuilderTests(unittest.TestCase):
                 model_factory=lambda: None,  # type: ignore[arg-type]
                 environment_factory=FakeSnapshotVector,
             )
+
+    def test_sealed_resume_audit_uses_running_lease_without_outcome_authority(
+        self,
+    ) -> None:
+        plan = load_plan(ROOT / "configs/rl/experiments/r3b-completion-v1.toml")
+        curriculum, blobs = _fixture()
+        store = SnapshotBlobStore(curriculum.library, blobs)
+
+        def model_factory():
+            return RecurrentActorCritic(
+                TEACHER_V1,
+                config=RecurrentModelConfig(
+                    8, 8, 12, 12, 1, critic_condition_features=1
+                ),
+            )
+
+        with tempfile.TemporaryDirectory() as directory:
+            ledger = SealedTestLedger(Path(directory) / "sealed.sqlite3")
+            commitment = ledger.precommit(plan, TEST_EVALUATION_SUITE)
+            calibration = validation_authorization(
+                plan, plan.learning_rates[0]
+            ).calibration_results
+            validation_run = bind_validation_run(plan, calibration, commitment)
+            validation_results = authorization_validation_results(
+                plan,
+                plan.arms[0],
+                next(arm for arm in plan.arms if arm.alpha_weight_ppm > 0),
+                validation_run=validation_run,
+            )
+            sealed_run = ledger.authorize_once(
+                plan,
+                validation_run,
+                validation_results,
+                VALIDATION_EVALUATION_SUITE,
+                TEST_EVALUATION_SUITE,
+            )
+            jobs = plan.trial_jobs("test", sealed_run)
+            job = jobs[0]
+            lease = ledger.claim_job(sealed_run, job)
+            builder = R3BRunBuilder(
+                plan,
+                curriculum,
+                store,
+                runtime_attestation=_RUNTIME_ATTESTATION,
+                lanes=2,
+                collector_config=CollectorConfig(
+                    max_decisions=1,
+                    target_simulated_ticks=plan.ticks_per_update,
+                ),
+                ppo_config=PPOConfig(
+                    learning_rate=1e-4,
+                    final_learning_rate_fraction=plan.final_learning_rate_fraction,
+                    epochs=1,
+                    lane_minibatch_size=2,
+                ),
+                model_factory=model_factory,
+                environment_factory=FakeSnapshotVector,
+                sealed_test_ledger=ledger,
+            )
+
+            checkpoint_root = Path(directory) / "checkpoint"
+            with builder.build(job, authorization=lease) as primary:
+                lease.assert_running()
+                primary.session.initialize()
+                identity = {"trial_manifest_sha256": primary.manifest.sha256}
+                destination = primary.session.save(
+                    checkpoint_root, "resume-source", identity=identity
+                )
+                checkpoint = TrainingCheckpointArtifact(
+                    job.learner_seed,
+                    primary.session.trainer.schedule.completed_updates,
+                    primary.session.collector.simulated_ticks,
+                    primary.session.collector.simulated_ticks,
+                    plan.sha256,
+                    job.sha256,
+                    primary.manifest.sha256,
+                    primary.manifest.runner_spec_sha256,
+                    hashlib.sha256(
+                        (destination / "manifest.json").read_bytes()
+                    ).hexdigest(),
+                    primary.session.policy_sha256,
+                    "e" * 64,
+                )
+                standalone_audit = builder.build_resume_audit_session(
+                    job, authorization=lease
+                )
+                self.assertIsNot(standalone_audit, primary.session)
+                self.assertIsNot(
+                    standalone_audit.collector.adapter.env,
+                    primary.environment,
+                )
+                self.assertFalse(hasattr(standalone_audit, "engineering_evidence"))
+                close = getattr(standalone_audit.collector.adapter.env, "close", None)
+                if close is not None:
+                    close()
+
+                artifact = verify_exact_resume_continuation(
+                    trial_manifest_sha256=primary.manifest.sha256,
+                    checkpoint=checkpoint,
+                    checkpoint_directory=checkpoint_root,
+                    generation="resume-source",
+                    checkpoint_identity=identity,
+                    source=primary.session,
+                    restored_factory=lambda: builder.build_resume_audit_session(
+                        job, authorization=lease
+                    ),
+                )
+                self.assertEqual(
+                    artifact.source_next_update_sha256,
+                    artifact.restored_next_update_sha256,
+                )
+                lease.assert_running()
+
+            unstarted_job = jobs[1]
+            unstarted = ledger.claim_job(sealed_run, unstarted_job)
+            with self.assertRaisesRegex(RuntimeError, "lease is not active"):
+                builder.build_resume_audit_session(
+                    unstarted_job, authorization=unstarted
+                )
+            self.assertEqual(
+                ledger.resume_job(
+                    sealed_run,
+                    unstarted_job,
+                    lease_token=unstarted.lease_token,
+                ),
+                unstarted,
+            )
+            with self.assertRaisesRegex(ValueError, "phase-selection authorization"):
+                builder.build_resume_audit_session(job, authorization=unstarted)
+
+            synthetic = phase_result(
+                job.arm,
+                "test",
+                (job.learner_seed,),
+                budget=plan.test_updates,
+                auc=100,
+                final=100,
+                authorization_sha256=sealed_run.sha256,
+            ).outcomes[0]
+            assert synthetic.engineering_evidence is not None
+            metrics = replace(
+                synthetic.metrics_artifact,
+                checkpoints=tuple(
+                    replace(
+                        evaluated,
+                        checkpoint=replace(
+                            evaluated.checkpoint,
+                            job_sha256=job.sha256,
+                        ),
+                    )
+                    for evaluated in synthetic.metrics_artifact.checkpoints
+                ),
+            )
+            completed = replace(
+                synthetic,
+                seed_plan_sha256=job.seed_plan_sha256,
+                metrics_artifact=metrics,
+                engineering_evidence=replace(
+                    synthetic.engineering_evidence,
+                    job_sha256=job.sha256,
+                    sealed_job_lease_sha256=lease.sha256,
+                    metrics_sha256=metrics.sha256,
+                    final_checkpoint_artifact=metrics.checkpoints[-1].checkpoint,
+                    resume_checkpoint_artifact=metrics.checkpoints[-2].checkpoint,
+                ),
+            )
+            ledger.complete_job(lease, completed)
+            with self.assertRaisesRegex(RuntimeError, "lease is not active"):
+                builder.build_resume_audit_session(job, authorization=lease)
 
     def test_runtime_and_model_factory_are_frozen(self) -> None:
         plan = load_plan(ROOT / "configs/rl/experiments/r3b-completion-v1.toml")

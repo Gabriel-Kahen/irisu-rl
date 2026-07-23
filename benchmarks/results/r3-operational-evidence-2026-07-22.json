@@ -1,0 +1,35 @@
+{
+  "acceptance_eligible": false,
+  "exact_evaluation": {
+    "all_episodes_terminal": true,
+    "cells": 16,
+    "scalar_seconds": 73.431,
+    "total_simulated_ticks": 25224,
+    "vector_seconds": 62.107,
+    "vector_speedup": 1.1823
+  },
+  "exact_training_smoke": {
+    "seconds": 23.43,
+    "tick_target_max_relative_error": 0.00381,
+    "updates": 5
+  },
+  "host": {
+    "cpu": "AMD Ryzen 7 3700X",
+    "logical_threads": 16,
+    "physical_cores": 8,
+    "torch_threads": 4
+  },
+  "indexed_artifact_recovery": {
+    "artifacts": 3000,
+    "full_verified_scan_seconds": 0.141,
+    "indexed_lookup_seconds_per_call": 0.000167,
+    "scan_over_indexed_lookup_ratio": 844.8
+  },
+  "notes": [
+    "Engineering evidence only; this is not a multi-seed R3 result.",
+    "Scalar and vector evaluation reports matched exactly.",
+    "Evaluation used the exact-v1 worker and full 4096-decision/8192-tick bounds."
+  ],
+  "transfer_eligible": false,
+  "version": "r3-operational-evidence-v1"
+}

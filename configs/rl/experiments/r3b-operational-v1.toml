@@ -1,0 +1,49 @@
+version = "r3b-operational-config-v1"
+
+[runtime]
+lanes = 16
+workers = 16
+torch_threads = 4
+max_consecutive_skips = 64
+primary_backend = "exact"
+transfer_eligible = false
+
+[collector]
+max_decisions = 128
+lambda_tick = 0.9862327044933592
+
+[model]
+global_hidden = 96
+body_hidden = 96
+fused_hidden = 192
+recurrent_hidden = 192
+recurrent_layers = 1
+
+[ppo]
+epochs = 4
+lane_minibatch_size = 8
+clip_ratio = 0.2
+value_clip = 0.2
+value_coefficient = 0.5
+entropy_coefficient = 0.01
+max_gradient_norm = 0.5
+target_kl = 0.03
+
+[evaluation]
+curve_snapshots = 32
+shards = 2
+calibration_repetitions = 1
+validation_repetitions = 1
+test_repetitions = 1
+max_decisions = 4096
+max_simulated_ticks = 8192
+
+[snapshots]
+generator_version = "r3b-full-game-generator-v1"
+minimum_train = 64
+minimum_calibration = 64
+minimum_validation = 512
+minimum_test = 512
+
+[artifacts]
+checkpoint_retention = "all_planned_boundaries"

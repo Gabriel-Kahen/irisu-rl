@@ -10,6 +10,7 @@
 # Local experiment outputs.
 /reference/**/*.log
 /reference/**/*.tmp
+/artifacts/
 
 # Python tooling caches.
 __pycache__/
