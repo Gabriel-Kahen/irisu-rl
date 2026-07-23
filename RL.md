@@ -3129,6 +3129,16 @@ Exit gate:
   contracts are frozen and versioned;
 - bulk-training readiness manifest is evaluable and passing.
 
+R4a foundation status (2026-07-22): provider-independent claimed-window
+capture, affine calibration, causal cadence/phase estimation, explicit
+targeted-button safety, deterministic cleanup/watchdogs, recorded-frame tests,
+tamper-evident soak reporting, and evidence-backed deployment-contract
+finalization are implemented. The checked contract remains
+`provisional_unmeasured` and live deployment stays disabled: the installed
+atomic targeted-click route does not expose independently measurable down/up,
+and no fresh 2-D click sweep, live latency calibration, or production-cadence
+soak is claimed. See [`docs/rl-r4a.md`](docs/rl-r4a.md).
+
 ### R5 — Causal/noisy student
 
 Deliver:
