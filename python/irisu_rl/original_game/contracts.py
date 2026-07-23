@@ -2,23 +2,23 @@
 
 from __future__ import annotations
 
-from copy import deepcopy
 import hashlib
 import json
 import math
-from pathlib import Path
 import re
 import tomllib
-from typing import Any, Mapping
+from collections.abc import Mapping
+from copy import deepcopy
+from pathlib import Path
+from typing import Any
 
-from .evidence import EvidenceError, verify_report
-
+from .evidence import REPORT_SCHEMA, EvidenceError, verify_report
 
 CONTRACT_SCHEMA = "original-game-deployment-contract-v2"
-EVIDENCE_SCHEMA = "r4a-deployment-measurements-v1"
-SEMANTIC_SHA256 = "8a56771aaa174d0eca7e0ebab21f3148417aa6f40e693e50524cdc17a5a5437d"
+EVIDENCE_SCHEMA = "r4b-deployment-measurements-v2"
+SEMANTIC_SHA256 = "dd764fd625b2a6604128fe1605b988144cd0def9d044c43b8fa3fb260e16e677"
 PROVISIONAL_BASE_SHA256 = (
-    "16e8609045b7597796b3daf03aa131d9fa84af2823b2ffb25dcb11fd39800843"
+    "aa20ada39669d283cd2a2081ecdc5b769f5d7b2270e739e225790aeb8ef9258c"
 )
 EMPIRICAL_SECTIONS = (
     "wait_duration",
@@ -48,9 +48,7 @@ MEASUREMENT_FIELDS: Mapping[str, tuple[str, ...]] = {
         "effect_to_visible_seconds",
         "request_to_visible_seconds",
     ),
-    "coordinate_calibration": (
-        "residual_client_pixels",
-    ),
+    "coordinate_calibration": ("residual_client_pixels",),
 }
 MEASUREMENT_UNITS: Mapping[str, str] = {
     "gameplay_period_seconds": "seconds",
@@ -94,6 +92,7 @@ TOP_LEVEL_FIELDS = {
     "deterministic_evaluation",
     "serialization",
     "coordinate_log_prob_epsilon",
+    "coordinate_quantization",
     "client_width",
     "client_height",
     "allow_both",
@@ -220,9 +219,7 @@ def _string_list(value: object, where: str) -> tuple[str, ...]:
     return result
 
 
-def _exact_keys(
-    value: Mapping[str, Any], expected: set[str], where: str
-) -> None:
+def _exact_keys(value: Mapping[str, Any], expected: set[str], where: str) -> None:
     if set(value) != expected:
         raise ContractError(
             f"{where} fields disagree: "
@@ -333,6 +330,9 @@ def _validate_common(contract: Mapping[str, Any]) -> None:
         ),
         "serialization": "little-endian <BIdd after canonical validation",
         "coordinate_log_prob_epsilon": 0.000001,
+        "coordinate_quantization": (
+            "floor(normalized * extent), clamped to [0, extent - 1]"
+        ),
     }
     for key, expected in expected_action_fields.items():
         if contract.get(key) != expected:
@@ -400,7 +400,7 @@ def _validate_common(contract: Mapping[str, Any]) -> None:
         raise ContractError("raw original-game frames must remain outside git")
     expected_evidence = {
         "measurement_schema": EVIDENCE_SCHEMA,
-        "soak_report_schema": "r4a-soak-report-v1",
+        "soak_report_schema": REPORT_SCHEMA,
         "raw_frames_allowed_in_git": False,
         "measured_values_require_positive_sample_count": True,
         "measured_values_require_uncertainty": True,
@@ -416,7 +416,9 @@ def _validate_provisional(contract: Mapping[str, Any]) -> None:
         raise ContractError("provisional contract must disable live deployment")
     blockers = _string_list(contract.get("live_deployment_blockers"), "blockers")
     if "explicit_targeted_button_down_up_unavailable" not in blockers:
-        raise ContractError("the current explicit down/up capability blocker is missing")
+        raise ContractError(
+            "the current explicit down/up capability blocker is missing"
+        )
     forbidden = {
         "frame_rate_hz",
         "latency_seconds",
@@ -459,6 +461,7 @@ def _validate_measured(contract: Mapping[str, Any]) -> None:
             "dxlib_sha256",
             "game_config_sha256",
             "measurement_tool_sha256",
+            "wine_prefix_sha256",
             "runtime",
             "hardware_id",
         },
@@ -470,6 +473,7 @@ def _validate_measured(contract: Mapping[str, Any]) -> None:
         "dxlib_sha256",
         "game_config_sha256",
         "measurement_tool_sha256",
+        "wine_prefix_sha256",
     ):
         _sha256(provenance.get(key), f"runtime_provenance.{key}")
     _safe_label(provenance.get("runtime"), "runtime_provenance.runtime")
@@ -508,7 +512,9 @@ def _validate_measured(contract: Mapping[str, Any]) -> None:
 
     for section_name, fields in MEASUREMENT_FIELDS.items():
         section = _mapping(contract[section_name], section_name)
-        measurements = _mapping(section.get("measurements"), f"{section_name}.measurements")
+        measurements = _mapping(
+            section.get("measurements"), f"{section_name}.measurements"
+        )
         _exact_keys(
             measurements,
             set(fields),
@@ -528,7 +534,9 @@ def _validate_measured(contract: Mapping[str, Any]) -> None:
         "abstract_coordinate_fixed_rate",
         "preregistered_immaterial",
     }:
-        raise ContractError("cursor.travel_model does not satisfy the fairness contract")
+        raise ContractError(
+            "cursor.travel_model does not satisfy the fairness contract"
+        )
     _safe_label(cursor.get("quantization"), "cursor.quantization")
     if cursor.get("path_logging") is not True:
         raise ContractError("cursor proposed/executed path logging must be enabled")
@@ -616,9 +624,8 @@ def _validate_evidence(
     stream = _mapping(soak_report.get("event_stream"), "soak event_stream")
     if evidence.get("soak_event_stream_sha256") != stream.get("sha256"):
         raise ContractError("evidence does not bind the soak event stream")
-    if (
-        evidence.get("soak_threshold_config_sha256")
-        != soak_report.get("threshold_config_sha256")
+    if evidence.get("soak_threshold_config_sha256") != soak_report.get(
+        "threshold_config_sha256"
     ):
         raise ContractError("evidence does not bind the soak threshold config")
     if evidence.get("soak_report_sha256") != soak_sha256:
@@ -638,6 +645,7 @@ def _validate_evidence(
             "dxlib_sha256",
             "game_config_sha256",
             "measurement_tool_sha256",
+            "wine_prefix_sha256",
             "runtime",
             "hardware_id",
         },
@@ -649,12 +657,17 @@ def _validate_evidence(
         "dxlib_sha256",
         "game_config_sha256",
         "measurement_tool_sha256",
+        "wine_prefix_sha256",
     ):
         _sha256(provenance.get(key), f"provenance.{key}")
     _safe_label(provenance.get("runtime"), "provenance.runtime")
     _safe_label(provenance.get("hardware_id"), "provenance.hardware_id")
     report_provenance = soak_report["provenance"]["observed"]
-    for key in ("game_executable_sha256", "measurement_tool_sha256"):
+    for key in (
+        "game_executable_sha256",
+        "measurement_tool_sha256",
+        "wine_prefix_sha256",
+    ):
         if report_provenance.get(key) != provenance[key]:
             raise ContractError(f"soak report provenance does not bind {key}")
 
@@ -686,14 +699,14 @@ def _validate_evidence(
                 section.get("experiment_ids"), f"sections.{name}.experiment_ids"
             )
         ):
-            _safe_label(
-                experiment_id, f"sections.{name}.experiment_ids[{index}]"
-            )
+            _safe_label(experiment_id, f"sections.{name}.experiment_ids[{index}]")
             if experiment_id not in soak_experiment_set:
                 raise ContractError(
                     f"sections.{name} cites an experiment absent from the soak"
                 )
-        hashes = _string_list(section.get("artifact_sha256"), f"sections.{name}.artifact_sha256")
+        hashes = _string_list(
+            section.get("artifact_sha256"), f"sections.{name}.artifact_sha256"
+        )
         for index, digest in enumerate(hashes):
             _sha256(digest, f"sections.{name}.artifact_sha256[{index}]")
         required_artifacts = {
@@ -703,10 +716,13 @@ def _validate_evidence(
         }
         if not required_artifacts.issubset(hashes):
             raise ContractError(
-                f"sections.{name}.artifact_sha256 is not bound to verified soak artifacts"
+                f"sections.{name}.artifact_sha256 is not bound to "
+                "verified soak artifacts"
             )
         if name in MEASUREMENT_FIELDS:
-            measurements = _mapping(section.get("measurements"), f"sections.{name}.measurements")
+            measurements = _mapping(
+                section.get("measurements"), f"sections.{name}.measurements"
+            )
             _exact_keys(
                 measurements,
                 set(MEASUREMENT_FIELDS[name]),
@@ -730,10 +746,14 @@ def _validate_evidence(
         "abstract_coordinate_fixed_rate",
         "preregistered_immaterial",
     }:
-        raise ContractError("evidence cursor travel_model is not a legal fairness choice")
+        raise ContractError(
+            "evidence cursor travel_model is not a legal fairness choice"
+        )
     _safe_label(cursor.get("quantization"), "sections.cursor.quantization")
     if cursor.get("path_logging") is not True:
-        raise ContractError("evidence must enable proposed/executed cursor path logging")
+        raise ContractError(
+            "evidence must enable proposed/executed cursor path logging"
+        )
     if cursor.get("cursor_retention") not in {"retained", "measured_episode_reset"}:
         raise ContractError("evidence must freeze cursor retention")
     cursor_measurements = _mapping(
@@ -791,15 +811,11 @@ def finalize_deployment_contract(
         raise ContractError("only the provisional checked-in contract may be finalized")
     if canonical_json_sha256(base) != PROVISIONAL_BASE_SHA256:
         raise ContractError("base contract is not the checked provisional contract")
-    soak_sha256 = _validate_evidence(
-        evidence, soak_report, event_path, threshold_path
-    )
+    soak_sha256 = _validate_evidence(evidence, soak_report, event_path, threshold_path)
     result = deepcopy(dict(base))
     result["measurement_status"] = "measured_pending_review"
     result["live_deployment_enabled"] = False
-    result["live_deployment_blockers"] = [
-        "measurement_bundle_requires_human_review"
-    ]
+    result["live_deployment_blockers"] = ["measurement_bundle_requires_human_review"]
     result["measurement_bundle_sha256"] = canonical_json_sha256(evidence)
     result["soak_report_sha256"] = soak_sha256
     result["runtime_provenance"] = deepcopy(dict(evidence["provenance"]))
@@ -840,8 +856,14 @@ def render_toml(document: Mapping[str, Any]) -> str:
         for key in table:
             if not isinstance(key, str) or TOML_KEY.fullmatch(key) is None:
                 raise ContractError(f"unsafe TOML key: {key!r}")
-        scalars = [(key, value) for key, value in table.items() if not isinstance(value, Mapping)]
-        children = [(key, value) for key, value in table.items() if isinstance(value, Mapping)]
+        scalars = [
+            (key, value)
+            for key, value in table.items()
+            if not isinstance(value, Mapping)
+        ]
+        children = [
+            (key, value) for key, value in table.items() if isinstance(value, Mapping)
+        ]
         if path:
             if lines and lines[-1]:
                 lines.append("")

@@ -3,7 +3,7 @@ plan_id = "r3b-source-v1"
 master_seed = 2026072201
 stage_id = "full-game"
 max_wait_ticks = 12
-action_spec_sha256 = "8a56771aaa174d0eca7e0ebab21f3148417aa6f40e693e50524cdc17a5a5437d"
+action_spec_sha256 = "dd764fd625b2a6604128fe1605b988144cd0def9d044c43b8fa3fb260e16e677"
 
 [backends]
 portable_environment_pool = "r3b-portable-v1"

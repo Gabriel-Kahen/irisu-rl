@@ -8,11 +8,10 @@ import tempfile
 import unittest
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "python"))
 
-from irisu_rl.original_game.evidence import (  # noqa: E402
+from irisu_rl.original_game.evidence import (
     EVENT_SCHEMA,
     METRICS,
     REPORT_SCHEMA,
@@ -28,11 +27,25 @@ from irisu_rl.original_game.evidence import (  # noqa: E402
     write_report_noreplace,
 )
 
-
 PROVENANCE = {
     "game_executable_sha256": hashlib.sha256(b"authorized-game").hexdigest(),
     "deployment_contract_sha256": hashlib.sha256(b"deployment-v1").hexdigest(),
 }
+
+
+def process_binding(experiment_id: str) -> dict[str, int | str]:
+    identity = hashlib.sha256(experiment_id.encode("ascii")).hexdigest()
+    return {
+        "process_id": 1_000 + int(identity[:6], 16),
+        "process_start_ticks": 10_000 + int(identity[6:12], 16),
+        "launch_nonce_sha256": hashlib.sha256(
+            f"{experiment_id}:launch".encode("ascii")
+        ).hexdigest(),
+        "runtime_identity_sha256": hashlib.sha256(
+            f"{experiment_id}:runtime".encode("ascii")
+        ).hexdigest(),
+        "wine_prefix_sha256": "f" * 64,
+    }
 
 
 def thresholds(*, minimum_samples: int = 5) -> dict[str, object]:
@@ -120,11 +133,10 @@ def event(
             "schema": EVENT_SCHEMA,
             "sequence": sequence,
             "monotonic_ns": (
-                sequence * 1_000_000
-                if monotonic_ns is None
-                else monotonic_ns
+                sequence * 1_000_000 if monotonic_ns is None else monotonic_ns
             ),
             "experiment_id": "synthetic-soak-001",
+            "process_binding": process_binding("synthetic-soak-001"),
             "measurements": measurements(sequence) if values is None else values,
             "provenance": PROVENANCE if provenance is None else provenance,
             "threshold_sha256": threshold_digest(threshold_value),
@@ -172,7 +184,13 @@ class R4AEvidenceTests(unittest.TestCase):
         self.assertEqual(first["schema"], REPORT_SCHEMA)
         self.assertEqual(first["status"], "pass")
         self.assertEqual(first["event_stream"]["count"], 5)
-        self.assertEqual(first["event_stream"]["chain_head_sha256"], records[-1]["sha256"])
+        self.assertEqual(
+            first["event_stream"]["chain_head_sha256"], records[-1]["sha256"]
+        )
+        self.assertEqual(
+            first["process_bindings"]["synthetic-soak-001"],
+            process_binding("synthetic-soak-001"),
+        )
         self.assertEqual(set(first["metrics"]), set(METRICS))
         fps = first["metrics"]["capture_fps"]
         self.assertEqual(fps["count"], 5)
@@ -198,6 +216,110 @@ class R4AEvidenceTests(unittest.TestCase):
         self.assertEqual(left["metrics"]["total_latency_seconds"]["count"], 512)
         self.assertEqual(left["metrics"]["action_confirmations"]["total"], 512.0)
 
+    def test_each_experiment_must_pass_instead_of_hiding_in_aggregate(self) -> None:
+        config = thresholds(minimum_samples=2)
+        config["experiment_ids"] = ["healthy", "degraded"]
+        config["minimum_duration_seconds"] = 0.001
+        config["maximum_measurement_gap_seconds"] = 0.001
+        config["metrics"]["resource_growth_bytes"] = {
+            "direction": "max",
+            "minimum_samples": 2,
+            "p50": {"max": 10.0},
+        }
+        previous = "0" * 64
+        records = []
+        for sequence in range(1, 103):
+            experiment_id = "healthy" if sequence <= 100 else "degraded"
+            values = measurements(sequence)
+            values["resource_growth_bytes"] = (
+                0.0 if experiment_id == "healthy" else 100.0
+            )
+            record = seal_event(
+                {
+                    "schema": EVENT_SCHEMA,
+                    "sequence": sequence,
+                    "monotonic_ns": sequence * 1_000_000,
+                    "experiment_id": experiment_id,
+                    "process_binding": process_binding(experiment_id),
+                    "measurements": values,
+                    "provenance": PROVENANCE,
+                    "threshold_sha256": threshold_digest(config),
+                },
+                previous,
+            )
+            records.append(record)
+            previous = record["sha256"]
+        self.events.write_bytes(b"".join(encode_event(item) for item in records))
+        self.write_config(config)
+        report = build_report(self.events, self.config)
+        metric = report["metrics"]["resource_growth_bytes"]
+        self.assertEqual(metric["p50"], 0.0)
+        self.assertEqual(metric["per_experiment"]["degraded"]["p50"], 100.0)
+        self.assertEqual(metric["evaluation"]["status"], "fail")
+        self.assertNotEqual(
+            report["process_bindings"]["healthy"],
+            report["process_bindings"]["degraded"],
+        )
+
+    def test_process_binding_cannot_change_within_an_experiment(self) -> None:
+        records = self.write_events()
+        changed = dict(records[2])
+        unsigned = {
+            key: value
+            for key, value in changed.items()
+            if key not in {"previous_sha256", "sha256"}
+        }
+        unsigned["process_binding"] = {
+            **unsigned["process_binding"],
+            "process_start_ticks": (
+                unsigned["process_binding"]["process_start_ticks"] + 1
+            ),
+        }
+        records[2] = seal_event(unsigned, records[1]["sha256"])
+        previous = records[2]["sha256"]
+        for index in range(3, len(records)):
+            unsigned = {
+                key: value
+                for key, value in records[index].items()
+                if key not in {"previous_sha256", "sha256"}
+            }
+            records[index] = seal_event(unsigned, previous)
+            previous = records[index]["sha256"]
+        self.events.write_bytes(b"".join(encode_event(item) for item in records))
+        self.write_config()
+        with self.assertRaisesRegex(EvidenceError, "process binding changed"):
+            build_report(self.events, self.config)
+
+    def test_distinct_experiment_labels_cannot_reuse_one_process(self) -> None:
+        config = thresholds(minimum_samples=2)
+        config["experiment_ids"] = ["run-a", "run-b"]
+        config["minimum_duration_seconds"] = 0.001
+        config["maximum_measurement_gap_seconds"] = 0.001
+        shared = process_binding("shared-process")
+        previous = "0" * 64
+        records = []
+        for sequence in range(1, 5):
+            experiment_id = "run-a" if sequence <= 2 else "run-b"
+            record = seal_event(
+                {
+                    "schema": EVENT_SCHEMA,
+                    "sequence": sequence,
+                    "monotonic_ns": sequence * 1_000_000,
+                    "experiment_id": experiment_id,
+                    "process_binding": shared,
+                    "measurements": measurements(sequence),
+                    "provenance": PROVENANCE,
+                    "threshold_sha256": threshold_digest(config),
+                },
+                previous,
+            )
+            records.append(record)
+            previous = record["sha256"]
+        self.events.write_bytes(b"".join(encode_event(item) for item in records))
+        self.write_config(config)
+        with self.assertRaisesRegex(EvidenceError, "reuse the same process generation"):
+            build_report(self.events, self.config)
+
     def test_threshold_breach_fails_with_specific_incident(self) -> None:
         def add_failure(sequence, record):
             if sequence == 3:
@@ -213,9 +335,7 @@ class R4AEvidenceTests(unittest.TestCase):
 
         self.write_events(mutate=add_failure)
         # Rebuild the chain after altering the third record.
-        source = [
-            json.loads(line) for line in self.events.read_text().splitlines()
-        ]
+        source = [json.loads(line) for line in self.events.read_text().splitlines()]
         previous = "0" * 64
         rebuilt = []
         for item in source:
@@ -255,15 +375,15 @@ class R4AEvidenceTests(unittest.TestCase):
                 )
                 records.append(sealed)
                 previous = sealed["sha256"]
-            self.events.write_bytes(
-                b"".join(encode_event(item) for item in records)
-            )
+            self.events.write_bytes(b"".join(encode_event(item) for item in records))
             report = build_report(self.events, self.config)
             self.assertEqual(report["status"], "fail")
             failures = report["metrics"][failed_metric]["evaluation"]["failures"]
             self.assertIn("R4a requires total 0.0; observed 1.0", failures)
 
-    def test_insufficient_samples_and_missing_provenance_are_not_evaluable(self) -> None:
+    def test_insufficient_samples_and_missing_provenance_are_not_evaluable(
+        self,
+    ) -> None:
         self.write_events(2)
         self.write_config()
         report = build_report(self.events, self.config)
@@ -282,9 +402,7 @@ class R4AEvidenceTests(unittest.TestCase):
         self.events.write_bytes(b"".join(encode_event(item) for item in records))
         report = build_report(self.events, self.config)
         self.assertEqual(report["status"], "not_evaluable")
-        self.assertEqual(
-            set(report["provenance"]["missing"]), set(PROVENANCE)
-        )
+        self.assertEqual(set(report["provenance"]["missing"]), set(PROVENANCE))
 
     def test_short_soak_is_not_evaluable_even_with_enough_samples(self) -> None:
         self.write_events()
@@ -315,9 +433,7 @@ class R4AEvidenceTests(unittest.TestCase):
         self.write_config()
         report = build_report(self.events, self.config)
         self.assertEqual(report["status"], "not_evaluable")
-        self.assertEqual(
-            report["provenance"]["measurement_events_missing_required"], 4
-        )
+        self.assertEqual(report["provenance"]["measurement_events_missing_required"], 4)
         self.assertAlmostEqual(report["duration"]["seconds"], 0.003)
 
     def test_event_chain_commits_to_thresholds_before_collection(self) -> None:
@@ -363,11 +479,7 @@ class R4AEvidenceTests(unittest.TestCase):
         previous = "0" * 64
         records = []
         for sequence in range(1, 11):
-            values = (
-                measurements(sequence)
-                if sequence <= 5
-                else {"capture_fps": 60.0}
-            )
+            values = measurements(sequence) if sequence <= 5 else {"capture_fps": 60.0}
             record = event(
                 sequence,
                 previous,
@@ -400,7 +512,9 @@ class R4AEvidenceTests(unittest.TestCase):
         records = self.write_events()
         self.write_config()
         records[2]["measurements"]["total_latency_seconds"] = 999.0
-        self.events.write_bytes(b"".join(canonical_json_bytes(item) + b"\n" for item in records))
+        self.events.write_bytes(
+            b"".join(canonical_json_bytes(item) + b"\n" for item in records)
+        )
         with self.assertRaisesRegex(EvidenceError, "SHA-256"):
             build_report(self.events, self.config)
 
@@ -415,6 +529,7 @@ class R4AEvidenceTests(unittest.TestCase):
             "sequence": 1,
             "monotonic_ns": 1,
             "experiment_id": "synthetic-soak-001",
+            "process_binding": process_binding("synthetic-soak-001"),
             "measurements": {},
             "provenance": PROVENANCE,
             "threshold_sha256": threshold_digest(),
@@ -436,9 +551,7 @@ class R4AEvidenceTests(unittest.TestCase):
         self.write_config()
         report = build_report(self.events, self.config)
         self.assertEqual(report["status"], "fail")
-        self.assertEqual(
-            report["provenance"]["mismatched"], ["game_executable_sha256"]
-        )
+        self.assertEqual(report["provenance"]["mismatched"], ["game_executable_sha256"])
 
         records[3] = event(4, records[2]["sha256"], provenance=PROVENANCE)
         records[4] = event(5, records[3]["sha256"], provenance=PROVENANCE)

@@ -1,0 +1,63 @@
+{
+  "blockers": [
+    "atomic_click_only",
+    "explicit_button_down_unavailable",
+    "explicit_button_up_unavailable",
+    "release_all_unavailable",
+    "broker_release_deadline_unavailable",
+    "claim_neutralization_unavailable",
+    "continuous_capture_timestamps_unavailable",
+    "launch_nonce_binding_unavailable",
+    "process_runtime_binding_unavailable"
+  ],
+  "capabilities": {
+    "atomic_click_only": true,
+    "automatic_release_deadline": false,
+    "exact_background_capture": true,
+    "exact_window_claims": true,
+    "explicit_button_down": false,
+    "explicit_button_up": false,
+    "neutralizes_on_claim_end_or_expiry": false,
+    "release_all_buttons": false,
+    "targeted_atomic_input_safe": true
+  },
+  "capture": {
+    "height": 484,
+    "presentation_timestamp_available": false,
+    "raw_frame_committed": false,
+    "sha256": "ebc22a7743fa2cca250d2426a1f1b2a297b69f89a071ab687a8f617c884c04c2",
+    "source_sequence_available": false,
+    "width": 644
+  },
+  "claim": {
+    "exact_address_and_capture_id": true,
+    "released": true
+  },
+  "input_operations_attempted": 0,
+  "observed_date": "2026-07-23",
+  "provider": {
+    "companion_version": "0.2.0",
+    "hyprland_build_sha256": "65e64767a891c269a167300e7ccbcd24de73e2046c8cc44432e0e24b64b94e7c",
+    "native_extension_source_sha256": "70222d64a57d906baa224a7dba9eca79f267c16fec0e1cb1db4c17963939e75f",
+    "native_extension_version": "0.1.4",
+    "route": "wine-xwayland"
+  },
+  "runtime": {
+    "experiment_id": "r4b-preflight-20260723-001",
+    "marker_sha256": "d0e72d39368923c56624b024d8a524111cae7101355c1df7f0f96204a8c50d0b",
+    "runtime_identity_sha256": "1ae2f9a3e075c3e5c5f430cba100081ba6db5d0a0208ac51c49c8c120013d31c",
+    "runtime_sha256": {
+      "box2d_sha256": "34f1387cbe51fb09a3e7cd868236ed3c0b73be2f70fcf5b09ae6c48187d14fcd",
+      "config_data_sha256": "f30b36df3ec09d2ecefc71dbd07199c77c88d571c4c47e161d9b7a14a88c3234",
+      "dat_dxa_sha256": "b36ef6864bf2d0e626d5087edb5b571ef548ebd5dde9fbc9b87f7b4ac3e89d4a",
+      "dxlib_sha256": "d8ef638a078a8b4d24b53b174ca179623fed3690027d3f4acfe71a7d61c8b5c9",
+      "game_config_sha256": "1e29431fe8209c25784d4741f7972737561281169bbb5a56f62e3e0f0b63de35",
+      "game_executable_sha256": "0636d3e44439d88807d0c00aeb1bb072316c69fc13a21f79d67e53affad28255",
+      "img_dxa_sha256": "7ffdf24de7d9465296e14cbee086ed04927c5e8a7e442d6be597984a71e03c50",
+      "snd_dxa_sha256": "65617d2e2692bb5481e68005745cea8146a5021e78664b336325bd7ab2d4c51d"
+    },
+    "wine_executable_sha256": "3d3ec18b80e54eb09477ab9022f69508dc36fc1e10cbc0d1b9fa7a5251cf270a"
+  },
+  "schema": "r4b-current-provider-preflight-v1",
+  "status": "input_ineligible"
+}

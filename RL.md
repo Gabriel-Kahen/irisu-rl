@@ -3148,6 +3148,20 @@ atomic targeted-click route does not expose independently measurable down/up,
 and no fresh 2-D click sweep, live latency calibration, or production-cadence
 soak is claimed. See [`docs/rl-r4a.md`](docs/rl-r4a.md).
 
+R4b operational status (2026-07-23): the live boundary now pins the broker
+binary/backend/clock, launch nonce, PID generation, exact window/capture
+identity, disposable game/runtime/Wine hashes, claim generation, and every
+input acknowledgement. It adds an exclusive disposable-run launcher,
+input-free capability preflight, explicitly armed fixed-lattice calibration
+runner, private hash-chained raw journals, moving-block/Wilson inference,
+per-process soak gates, and raw-derived contract finalization. Simulator and
+live shots share half-open integer-pixel coordinate lowering. A fresh exact
+capture passed, but the installed same-session bridge remains
+input-ineligible because it exposes atomic click only; zero live calibration
+shots were attempted. The contract remains provisional until a separately
+audited explicit-edge broker and the preregistered sweep/soak pass. See
+[`docs/rl-r4b.md`](docs/rl-r4b.md).
+
 ### R5 — Causal/noisy student
 
 Deliver:

@@ -1,14 +1,14 @@
 from __future__ import annotations
 
-from copy import deepcopy
 import hashlib
 import importlib.util
 import json
-from pathlib import Path
 import subprocess
 import sys
 import tempfile
 import unittest
+from copy import deepcopy
+from pathlib import Path
 
 from irisu_rl.original_game.contracts import (
     ContractError,
@@ -27,7 +27,6 @@ from irisu_rl.original_game.evidence import (
     encode_event,
     seal_event,
 )
-
 
 ROOT = Path(__file__).resolve().parents[1]
 DIGEST = "a" * 64
@@ -54,6 +53,7 @@ def soak_artifacts(root: Path) -> tuple[dict[str, object], Path, Path]:
         "required_provenance": {
             "game_executable_sha256": DIGEST,
             "measurement_tool_sha256": DIGEST,
+            "wine_prefix_sha256": DIGEST,
         },
         "minimum_duration_seconds": 0.002,
         "maximum_measurement_gap_seconds": 0.002,
@@ -74,6 +74,13 @@ def soak_artifacts(root: Path) -> tuple[dict[str, object], Path, Path]:
                 "sequence": sequence,
                 "monotonic_ns": sequence * 1_000_000,
                 "experiment_id": "controlled-001",
+                "process_binding": {
+                    "process_id": 1001,
+                    "process_start_ticks": 2001,
+                    "launch_nonce_sha256": "b" * 64,
+                    "runtime_identity_sha256": "c" * 64,
+                    "wine_prefix_sha256": DIGEST,
+                },
                 "measurements": values,
                 "provenance": config["required_provenance"],
                 "threshold_sha256": threshold_sha256,
@@ -184,7 +191,7 @@ def evidence(report: dict[str, object]) -> dict[str, object]:
         {"click_sweep_dimensions": 2, "continuous_drift_check": True}
     )
     return {
-        "schema_version": "r4a-deployment-measurements-v1",
+        "schema_version": "r4b-deployment-measurements-v2",
         "contract_version": "deployment-v1",
         "status": "measured",
         "soak_experiment_ids": ["controlled-001"],
@@ -197,6 +204,7 @@ def evidence(report: dict[str, object]) -> dict[str, object]:
             "dxlib_sha256": DIGEST,
             "game_config_sha256": DIGEST,
             "measurement_tool_sha256": DIGEST,
+            "wine_prefix_sha256": DIGEST,
             "runtime": "Wine test runtime",
             "hardware_id": "opaque-machine-profile",
         },
