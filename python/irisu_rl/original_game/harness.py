@@ -8,15 +8,15 @@ button-down, button-up, and release-all operations.
 
 from __future__ import annotations
 
+import hashlib
+import math
+import threading
+import time
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from enum import Enum
-import hashlib
-import math
 from numbers import Real
-import threading
-import time
 from typing import Protocol, runtime_checkable
 
 
@@ -110,16 +110,23 @@ class TargetRuntimeDescriptor:
 
     identity: WindowIdentity
     process_id: int
+    process_start_ticks: int
+    launch_nonce_sha256: str
     executable_sha256: str
     runtime_sha256: str
+    wine_executable_sha256: str
 
     def __post_init__(self) -> None:
         if not isinstance(self.identity, WindowIdentity):
             raise TypeError("target descriptor identity is invalid")
         if type(self.process_id) is not int or self.process_id <= 0:
             raise ValueError("target descriptor process ID must be positive")
+        if type(self.process_start_ticks) is not int or self.process_start_ticks <= 0:
+            raise ValueError("target descriptor process start time must be positive")
+        _sha256(self.launch_nonce_sha256, "target launch nonce SHA-256")
         _sha256(self.executable_sha256, "target executable SHA-256")
         _sha256(self.runtime_sha256, "target runtime SHA-256")
+        _sha256(self.wine_executable_sha256, "target Wine SHA-256")
 
 
 class ClaimToken:
@@ -233,8 +240,7 @@ class ClaimLease:
             or not self.broker_instance
             or len(self.broker_instance) > 256
             or any(
-                character in self.broker_instance
-                for character in ("\0", "\n", "\r")
+                character in self.broker_instance for character in ("\0", "\n", "\r")
             )
         ):
             raise ValueError("broker instance is invalid")
@@ -288,6 +294,7 @@ class CapturePacket:
     presentation_ns: int | None = None
     source_sequence: int | None = None
     color_format: str = "png"
+    canonical_pixel_sha256: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.identity, WindowIdentity) or not isinstance(
@@ -317,10 +324,19 @@ class CapturePacket:
             raise ValueError("source sequence must be a nonnegative integer")
         if not isinstance(self.color_format, str) or not self.color_format:
             raise ValueError("capture color format must be non-empty text")
+        if self.canonical_pixel_sha256 is not None and (
+            not isinstance(self.canonical_pixel_sha256, str)
+            or len(self.canonical_pixel_sha256) != 64
+            or any(
+                character not in "0123456789abcdef"
+                for character in self.canonical_pixel_sha256
+            )
+        ):
+            raise ValueError("canonical pixel SHA-256 is invalid")
 
     @property
     def sha256(self) -> str:
-        return hashlib.sha256(self.pixels).hexdigest()
+        return self.canonical_pixel_sha256 or hashlib.sha256(self.pixels).hexdigest()
 
 
 @dataclass(frozen=True, slots=True)
@@ -341,9 +357,7 @@ class GeometryAssessment:
         confidence = _finite(self.confidence, "geometry confidence")
         if residual < 0 or not 0 <= confidence <= 1:
             raise ValueError("invalid geometry quality")
-        if type(self.drifted) is not bool or not isinstance(
-            self.calibration_id, str
-        ):
+        if type(self.drifted) is not bool or not isinstance(self.calibration_id, str):
             raise TypeError("invalid geometry drift/calibration fields")
 
 
@@ -440,13 +454,10 @@ class InputAcknowledgement:
             type(self.operation_id) is not int or self.operation_id <= 0
         ):
             raise ValueError("input operation ID must be positive")
-        if self.identity is not None and not isinstance(
-            self.identity, WindowIdentity
-        ):
+        if self.identity is not None and not isinstance(self.identity, WindowIdentity):
             raise TypeError("input acknowledgment identity is invalid")
         if self.claim_generation is not None and (
-            type(self.claim_generation) is not int
-            or self.claim_generation <= 0
+            type(self.claim_generation) is not int or self.claim_generation <= 0
         ):
             raise ValueError("input acknowledgment claim generation must be positive")
         if self.broker_instance is not None and (
@@ -696,15 +707,16 @@ class HarnessLimits:
             value = getattr(self, name)
             if value is not None and (type(value) is not int or value < 1):
                 raise ValueError(f"{name} must be a positive integer or None")
-        if self.cursor_mode not in {"unsupported", "abstract_teleport", "bounded_speed"}:
+        if self.cursor_mode not in {
+            "unsupported",
+            "abstract_teleport",
+            "bounded_speed",
+        }:
             raise ValueError("invalid cursor mode")
         if self.cursor_mode == "bounded_speed":
             if (
                 self.max_cursor_speed_per_second is None
-                or _finite(
-                    self.max_cursor_speed_per_second, "max cursor speed"
-                )
-                <= 0
+                or _finite(self.max_cursor_speed_per_second, "max cursor speed") <= 0
             ):
                 raise ValueError("bounded-speed cursor mode requires a positive limit")
 
@@ -790,7 +802,9 @@ class OriginalGameHarness:
     @property
     def watchdog(self) -> WatchdogState:
         return WatchdogState(
-            healthy=not self._reasons and not self._cleanup_errors and not self._stopped,
+            healthy=not self._reasons
+            and not self._cleanup_errors
+            and not self._stopped,
             stopped=self._stopped,
             reasons=tuple(self._reasons),
             claim_active=self._lease is not None,
@@ -855,7 +869,9 @@ class OriginalGameHarness:
             if lease.broker_instance != previous.broker_instance:
                 raise WindowIdentityError("claim renewal changed broker instance")
             if lease.target != previous.target:
-                raise WindowIdentityError("claim renewal changed target/runtime identity")
+                raise WindowIdentityError(
+                    "claim renewal changed target/runtime identity"
+                )
             if lease.expires_ns <= previous.expires_ns:
                 raise WindowIdentityError("claim renewal did not extend its expiry")
         return lease
@@ -868,20 +884,13 @@ class OriginalGameHarness:
         reported_end_ns: int,
         operation: str,
     ) -> None:
-        if not (
-            start_ns
-            <= reported_start_ns
-            <= reported_end_ns
-            <= end_ns
-        ):
+        if not (start_ns <= reported_start_ns <= reported_end_ns <= end_ns):
             raise HarnessError(
                 f"{operation} timestamps are outside the local provider-call interval"
             )
 
     @staticmethod
-    def _ensure_lease_live(
-        lease: ClaimLease, at_ns: int, operation: str
-    ) -> None:
+    def _ensure_lease_live(lease: ClaimLease, at_ns: int, operation: str) -> None:
         if at_ns >= lease.expires_ns:
             raise WindowIdentityError(f"window claim expired during {operation}")
 
@@ -909,13 +918,9 @@ class OriginalGameHarness:
                 # release-all against the approved identity must be fenced out
                 # if the provider accidentally bound the token elsewhere.
                 try:
-                    self.provider.release_all_buttons(
-                        self.identity, lease.token
-                    )
+                    self.provider.release_all_buttons(self.identity, lease.token)
                 except Exception as cleanup_exc:
-                    self._cleanup_errors.append(
-                        f"release_all_buttons: {cleanup_exc}"
-                    )
+                    self._cleanup_errors.append(f"release_all_buttons: {cleanup_exc}")
                 try:
                     self.provider.release_exact_window_claim(
                         lease.identity, lease.token
@@ -962,9 +967,7 @@ class OriginalGameHarness:
                 self.identity, lease.token, self.limits.lease_seconds
             )
             returned_ns = self._clock_ns()
-            self._lease = self._validate_lease(
-                renewed, returned_ns, previous=lease
-            )
+            self._lease = self._validate_lease(renewed, returned_ns, previous=lease)
         except Exception as exc:
             self._abort(exc)
 
@@ -988,16 +991,16 @@ class OriginalGameHarness:
                 flags.add(FrameFlag.DUPLICATE)
             if packet.completion_ns <= prior.completion_ns:
                 flags.add(FrameFlag.OUT_OF_ORDER)
-            if (
-                packet.source_sequence is not None
-                and prior.source_sequence is not None
-            ):
+            if packet.source_sequence is not None and prior.source_sequence is not None:
                 if packet.source_sequence <= prior.source_sequence:
                     flags.add(FrameFlag.OUT_OF_ORDER)
                 elif packet.source_sequence > prior.source_sequence + 1:
                     dropped = packet.source_sequence - prior.source_sequence - 1
                     flags.add(FrameFlag.DROPPED)
-            if geometry.crop.edge_drift(previous.geometry.crop) > self.limits.max_crop_drift_px:
+            if (
+                geometry.crop.edge_drift(previous.geometry.crop)
+                > self.limits.max_crop_drift_px
+            ):
                 flags.add(FrameFlag.GEOMETRY_DRIFT)
             if (
                 packet.window_bounds.edge_drift(prior.window_bounds)
@@ -1204,9 +1207,7 @@ class OriginalGameHarness:
         returned_ns = self._clock_ns()
         renewed = self._validate_lease(renewed, returned_ns, previous=lease)
         if renewed.expires_ns - returned_ns <= required:
-            raise WindowIdentityError(
-                "renewed claim lacks button-up cleanup headroom"
-            )
+            raise WindowIdentityError("renewed claim lacks button-up cleanup headroom")
         self._lease = renewed
         return renewed
 
@@ -1263,10 +1264,7 @@ class OriginalGameHarness:
                 raise SafetyError(safety.detail or "current session became unsafe")
             frame = self.buffer.latest
             if frame is None or not frame.usable:
-                if (
-                    frame is not None
-                    and FrameFlag.NON_GAMEPLAY in frame.flags
-                ):
+                if frame is not None and FrameFlag.NON_GAMEPLAY in frame.flags:
                     raise ActionError(
                         "latest screen is not confidently classified as gameplay"
                     )
@@ -1282,10 +1280,7 @@ class OriginalGameHarness:
             window_x, window_y = self._validate_window_point(window_x, window_y)
             self._validate_cursor_travel(window_x, window_y, now_ns)
             pre_down_ns = self._clock_ns()
-            if (
-                pre_down_ns - frame.capture.completion_ns
-                > self.limits.stale_after_ns
-            ):
+            if pre_down_ns - frame.capture.completion_ns > self.limits.stale_after_ns:
                 raise FrameError("latest capture became stale before button-down")
             safety = self.provider.current_session_safety()
             if not safety.ready:
@@ -1298,9 +1293,7 @@ class OriginalGameHarness:
             assert press_duration is not None
             down_request = self._clock_ns()
             release_deadline_ns = (
-                down_request
-                + press_duration
-                + self.limits.lease_cleanup_margin_ns
+                down_request + press_duration + self.limits.lease_cleanup_margin_ns
             )
             if release_deadline_ns >= lease.expires_ns:
                 raise WindowIdentityError(
@@ -1339,9 +1332,7 @@ class OriginalGameHarness:
             self._sleep_ns(press_duration)
             up_request = self._clock_ns()
             if up_request >= release_deadline_ns:
-                raise ActionError(
-                    "automatic release deadline elapsed before button-up"
-                )
+                raise ActionError("automatic release deadline elapsed before button-up")
             up = self.provider.targeted_button_up(
                 self.identity,
                 lease.token,
@@ -1559,9 +1550,7 @@ class OriginalGameHarness:
         finally:
             claim_released = False
             try:
-                self.provider.release_exact_window_claim(
-                    self.identity, lease.token
-                )
+                self.provider.release_exact_window_claim(self.identity, lease.token)
                 claim_released = True
             except Exception as exc:
                 self._cleanup_errors.append(f"release_exact_window_claim: {exc}")

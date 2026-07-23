@@ -67,6 +67,13 @@ and then to window-local input coordinates. A calibration is bound to exact
 window/capture identity and geometry, has a maximum age, and fails closed on
 move, scale, crop, anchor, or residual drift.
 
+Normalized policy coordinates are lowered once, before simulator or live
+execution, with the deployment contract's half-open integer-pixel rule:
+`floor(normalized * extent)`, clamped to `[0, extent - 1]`. The continuous
+sample remains the PPO likelihood value; quantization is an execution
+transform, so `1.0` targets `(639, 479)` rather than the out-of-client
+`(640, 480)`.
+
 ## Soak and contract promotion
 
 The soak reporter consumes safe JSONL events whose records form a SHA-256
@@ -104,6 +111,26 @@ cursor-fairness choice, and a passing soak hash. It publishes with no replace as
 `measured_pending_review`, with live deployment still disabled. Only a separate
 human review may remove that blocker and replace the repository contract in a
 later change.
+
+R4b supersedes the aggregate-measurement input shown above for qualifying live
+work. Its authoritative finalizer takes a frozen plan plus the typed raw
+calibration journal, deterministically rebuilds every empirical statistic, and
+then invokes the same review-blocked contract transition:
+
+```bash
+mkdir -m 700 /private/r4b-final
+PYTHONPATH=python python tools/finalize-r4b-contract.py \
+  configs/rl/actions/deployment-v1.toml \
+  /private/path/r4b-calibration-plan.json \
+  /private/path/r4b-calibration.jsonl \
+  /private/path/r4a-soak-report.json \
+  /private/path/r4a-safe-events.jsonl \
+  /private/path/r4a-soak-thresholds.json \
+  /private/r4b-final
+```
+
+The older R4a command remains useful for foundation/schema regression fixtures;
+it is not the live promotion path.
 
 ## Validation and remaining gate
 

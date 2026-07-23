@@ -1,6 +1,6 @@
 contract_schema = "original-game-deployment-contract-v2"
 version = "deployment-v1"
-sha256 = "8a56771aaa174d0eca7e0ebab21f3148417aa6f40e693e50524cdc17a5a5437d"
+sha256 = "dd764fd625b2a6604128fe1605b988144cd0def9d044c43b8fa3fb260e16e677"
 measurement_status = "provisional_unmeasured"
 live_deployment_enabled = false
 live_deployment_blockers = [
@@ -18,6 +18,7 @@ conditional_distribution = "kind categorical; wait categorical; per-shot indepen
 deterministic_evaluation = "masked kind argmax; masked wait argmax; coordinate Beta mean"
 serialization = "little-endian <BIdd after canonical validation"
 coordinate_log_prob_epsilon = 0.000001
+coordinate_quantization = "floor(normalized * extent), clamped to [0, extent - 1]"
 client_width = 640.0
 client_height = 480.0
 allow_both = false

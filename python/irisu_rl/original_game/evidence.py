@@ -2,18 +2,17 @@
 
 from __future__ import annotations
 
-import errno
 import hashlib
 import json
 import math
 import os
 import re
-import tempfile
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from statistics import fmean, stdev
 from typing import Any
 
+from .private_io import PrivateArtifactError, publish_private_noreplace
 
 EVENT_SCHEMA = "r4a-safe-event-v1"
 THRESHOLD_SCHEMA = "r4a-soak-thresholds-v1"
@@ -43,6 +42,13 @@ METRIC_UNITS = {
     "effect_confirmation_failures": "count",
     "button_release_failures": "count",
     "cross_window_misroutes": "count",
+    "buffer_overflows": "count",
+    "claim_renewal_failures": "count",
+    "file_descriptor_growth": "count",
+    "thread_growth": "count",
+    "wrong_button_edges": "count",
+    "repeated_button_edges": "count",
+    "clipped_coordinates": "count",
     "crop_drift_pixels": "pixels",
     "resource_growth_bytes": "bytes",
 }
@@ -60,10 +66,30 @@ COUNT_METRICS = frozenset(
         "effect_confirmation_failures",
         "button_release_failures",
         "cross_window_misroutes",
+        "buffer_overflows",
+        "claim_renewal_failures",
+        "file_descriptor_growth",
+        "thread_growth",
+        "wrong_button_edges",
+        "repeated_button_edges",
+        "clipped_coordinates",
     }
 )
 INTRINSIC_ZERO_METRICS = frozenset(
-    {"button_release_failures", "cross_window_misroutes"}
+    {
+        "stale_frames",
+        "out_of_order_frames",
+        "deadline_misses",
+        "button_release_failures",
+        "cross_window_misroutes",
+        "buffer_overflows",
+        "claim_renewal_failures",
+        "file_descriptor_growth",
+        "thread_growth",
+        "wrong_button_edges",
+        "repeated_button_edges",
+        "clipped_coordinates",
+    }
 )
 MINIMUM_IS_WORST = frozenset({"capture_fps", "action_confirmations"})
 _EVENT_KEYS = frozenset(
@@ -196,15 +222,12 @@ def _finite_nonnegative(value: object, label: str) -> float:
 
 
 def _validate_provenance(value: object, label: str) -> dict[str, str]:
-    if not isinstance(value, Mapping) or any(
-        not isinstance(key, str) for key in value
-    ):
+    if not isinstance(value, Mapping) or any(not isinstance(key, str) for key in value):
         raise EvidenceError(f"{label} must be an object")
     result: dict[str, str] = {}
     for key, digest in value.items():
-        if (
-            PROVENANCE_KEY.fullmatch(key) is None
-            or any(term in key for term in FORBIDDEN_PROVENANCE_TERMS)
+        if PROVENANCE_KEY.fullmatch(key) is None or any(
+            term in key for term in FORBIDDEN_PROVENANCE_TERMS
         ):
             raise EvidenceError(f"{label} contains unsafe provenance key {key!r}")
         if not _is_sha256(digest):
@@ -219,9 +242,7 @@ def _validate_event(
     expected_sequence: int | None = None,
     expected_previous: str | None = None,
 ) -> dict[str, Any]:
-    if not isinstance(value, Mapping) or any(
-        not isinstance(key, str) for key in value
-    ):
+    if not isinstance(value, Mapping) or any(not isinstance(key, str) for key in value):
         raise EvidenceError("event must be an object")
     _exact_keys(value, _EVENT_KEYS, "event")
     if value["schema"] != EVENT_SCHEMA:
@@ -237,7 +258,10 @@ def _validate_event(
         )
     if isinstance(timestamp, bool) or not isinstance(timestamp, int) or timestamp < 0:
         raise EvidenceError("event monotonic_ns must be a nonnegative integer")
-    if not isinstance(experiment_id, str) or IDENTIFIER.fullmatch(experiment_id) is None:
+    if (
+        not isinstance(experiment_id, str)
+        or IDENTIFIER.fullmatch(experiment_id) is None
+    ):
         raise EvidenceError("event experiment_id is unsafe")
     previous = value["previous_sha256"]
     digest = value["sha256"]
@@ -274,7 +298,9 @@ def _validate_event(
     }
 
 
-def seal_event(value: Mapping[str, Any], previous_sha256: str = ZERO_SHA256) -> dict[str, Any]:
+def seal_event(
+    value: Mapping[str, Any], previous_sha256: str = ZERO_SHA256
+) -> dict[str, Any]:
     """Add a chain link and digest to one otherwise complete safe event."""
 
     if "previous_sha256" in value or "sha256" in value:
@@ -305,7 +331,9 @@ def load_event_chain(path: str | os.PathLike[str]) -> tuple[list[dict[str, Any]]
                 line_number += 1
                 input_digest.update(line)
                 if len(line) > MAX_JSONL_LINE_BYTES:
-                    raise EvidenceError(f"event line {line_number} exceeds the size limit")
+                    raise EvidenceError(
+                        f"event line {line_number} exceeds the size limit"
+                    )
                 if not line.endswith(b"\n"):
                     raise EvidenceError(f"event line {line_number} lacks a newline")
                 if not line.strip():
@@ -327,15 +355,12 @@ def load_event_chain(path: str | os.PathLike[str]) -> tuple[list[dict[str, Any]]
 
 
 def _bound(value: object, label: str) -> dict[str, float]:
-    if not isinstance(value, Mapping) or any(
-        not isinstance(key, str) for key in value
-    ):
+    if not isinstance(value, Mapping) or any(not isinstance(key, str) for key in value):
         raise EvidenceError(f"{label} must be an object")
     if not value or not set(value) <= _BOUND_KEYS:
         raise EvidenceError(f"{label} must contain min and/or max")
     result = {
-        key: _finite_nonnegative(item, f"{label}.{key}")
-        for key, item in value.items()
+        key: _finite_nonnegative(item, f"{label}.{key}") for key, item in value.items()
     }
     if "min" in result and "max" in result and result["min"] > result["max"]:
         raise EvidenceError(f"{label} min exceeds max")
@@ -344,9 +369,7 @@ def _bound(value: object, label: str) -> dict[str, float]:
 
 def load_thresholds(path: str | os.PathLike[str]) -> tuple[dict[str, Any], str]:
     value = load_json_document(path, "threshold config")
-    if not isinstance(value, Mapping) or any(
-        not isinstance(key, str) for key in value
-    ):
+    if not isinstance(value, Mapping) or any(not isinstance(key, str) for key in value):
         raise EvidenceError("threshold config must be an object")
     _exact_keys(value, _THRESHOLD_KEYS, "threshold config")
     if value["schema"] != THRESHOLD_SCHEMA:
@@ -469,9 +492,7 @@ def _summary(values: list[float], direction: str) -> dict[str, Any]:
         "mean": fmean(values),
         "total": math.fsum(values),
         "uncertainty_95": (
-            1.96 * stdev(values) / math.sqrt(len(values))
-            if len(values) >= 2
-            else None
+            1.96 * stdev(values) / math.sqrt(len(values)) if len(values) >= 2 else None
         ),
         "uncertainty_method": "1.96 * sample_standard_deviation / sqrt(count)",
     }
@@ -519,12 +540,14 @@ def build_report(
     observed_id_set: set[str] = set()
     provenance: dict[str, str] = {}
     samples = {name: [] for name in METRICS}
+    experiment_samples = {
+        experiment_id: {name: [] for name in METRICS} for experiment_id in expected_ids
+    }
     experiment_events: dict[str, list[int]] = {
         experiment_id: [] for experiment_id in expected_ids
     }
     sample_timestamps: dict[str, dict[str, list[int]]] = {
-        experiment_id: {name: [] for name in METRICS}
-        for experiment_id in expected_ids
+        experiment_id: {name: [] for name in METRICS} for experiment_id in expected_ids
     }
     measurement_events: list[dict[str, Any]] = []
     missing_event_provenance = 0
@@ -554,6 +577,7 @@ def build_report(
                 raise EvidenceError(f"provenance hash changed during stream: {key}")
         for name, measured in event["measurements"].items():
             samples[name].append(measured)
+            experiment_samples[experiment_id][name].append(measured)
             sample_timestamps[experiment_id][name].append(event["monotonic_ns"])
 
     metric_reports: dict[str, Any] = {}
@@ -571,19 +595,71 @@ def build_report(
                     f"R4a requires total 0.0; observed {summary['total']}",
                 ],
             }
+        per_experiment: dict[str, Any] = {}
+        per_experiment_statuses: list[str] = []
+        for experiment_id in expected_ids:
+            experiment_summary = _summary(
+                experiment_samples[experiment_id][name], spec["direction"]
+            )
+            experiment_evaluation = _evaluate_metric(experiment_summary, spec)
+            if name in INTRINSIC_ZERO_METRICS and experiment_summary["total"] != 0.0:
+                experiment_evaluation = {
+                    **experiment_evaluation,
+                    "status": "fail",
+                    "failures": [
+                        *experiment_evaluation["failures"],
+                        (
+                            "R4a requires each experiment total 0.0; "
+                            f"observed {experiment_summary['total']}"
+                        ),
+                    ],
+                }
+            per_experiment_statuses.append(experiment_evaluation["status"])
+            per_experiment[experiment_id] = {
+                **experiment_summary,
+                "evaluation": experiment_evaluation,
+            }
+        combined_statuses = [evaluation["status"], *per_experiment_statuses]
+        combined_status = (
+            "fail"
+            if "fail" in combined_statuses
+            else "not_evaluable"
+            if "not_evaluable" in combined_statuses
+            else "pass"
+        )
+        if combined_status != evaluation["status"]:
+            evaluation = {
+                **evaluation,
+                "status": combined_status,
+                "failures": [
+                    *evaluation["failures"],
+                    *(
+                        f"{experiment_id}: {failure}"
+                        for experiment_id, item in per_experiment.items()
+                        for failure in item["evaluation"]["failures"]
+                    ),
+                ],
+                "unavailable": [
+                    *evaluation["unavailable"],
+                    *(
+                        f"{experiment_id}: {reason}"
+                        for experiment_id, item in per_experiment.items()
+                        for reason in item["evaluation"]["unavailable"]
+                    ),
+                ],
+            }
         metric_statuses.append(evaluation["status"])
         metric_reports[name] = {
             "unit": METRIC_UNITS[name],
             **summary,
             "threshold": spec,
             "evaluation": evaluation,
+            "per_experiment": per_experiment,
         }
 
     missing_ids = [item for item in expected_ids if item not in observed_id_set]
     expected_provenance = thresholds["required_provenance"]
-    missing_provenance = [
-        key for key in expected_provenance if key not in provenance
-    ]
+    missing_provenance = [key for key in expected_provenance if key not in provenance]
     mismatched_provenance = [
         key
         for key, expected in expected_provenance.items()
@@ -598,10 +674,7 @@ def build_report(
     )
     experiment_status = "not_evaluable" if missing_ids else "pass"
     duration_seconds = (
-        (
-            measurement_events[-1]["monotonic_ns"]
-            - measurement_events[0]["monotonic_ns"]
-        )
+        (measurement_events[-1]["monotonic_ns"] - measurement_events[0]["monotonic_ns"])
         / 1e9
         if len(measurement_events) >= 2
         else 0.0
@@ -628,17 +701,13 @@ def build_report(
             if experiment_times and timestamps:
                 gaps_ns = [
                     timestamps[0] - experiment_times[0],
-                    *(
-                        right - left
-                        for left, right in zip(timestamps, timestamps[1:])
-                    ),
+                    *(right - left for left, right in zip(timestamps, timestamps[1:])),
                     experiment_times[-1] - timestamps[-1],
                 ]
                 maximum_gap = max(gaps_ns) / 1e9
             metric_status = (
                 "pass"
-                if maximum_gap is not None
-                and maximum_gap <= maximum_allowed_gap
+                if maximum_gap is not None and maximum_gap <= maximum_allowed_gap
                 else "not_evaluable"
             )
             metric_coverage_statuses.append(metric_status)
@@ -791,8 +860,7 @@ def _validate_rebuilt_report(report: object) -> str:
         experiments.get("status") != "pass"
         or experiments.get("missing") != []
         or not experiments.get("required")
-        or set(experiments.get("required", ()))
-        != set(experiments.get("observed", ()))
+        or set(experiments.get("required", ())) != set(experiments.get("observed", ()))
     ):
         raise EvidenceError("soak experiment coverage did not pass")
     required_experiments = experiments["required"]
@@ -800,9 +868,11 @@ def _validate_rebuilt_report(report: object) -> str:
         raise EvidenceError("soak metric coverage experiments are incomplete")
     for experiment_id in required_experiments:
         experiment_coverage = coverage_experiments[experiment_id]
-        if not isinstance(experiment_coverage, Mapping) or set(
-            experiment_coverage
-        ) != {"duration_seconds", "metrics", "status"}:
+        if not isinstance(experiment_coverage, Mapping) or set(experiment_coverage) != {
+            "duration_seconds",
+            "metrics",
+            "status",
+        }:
             raise EvidenceError("soak experiment metric coverage is malformed")
         experiment_duration = _finite_nonnegative(
             experiment_coverage.get("duration_seconds"),
@@ -872,6 +942,33 @@ def _validate_rebuilt_report(report: object) -> str:
         evaluation = metric.get("evaluation")
         if not isinstance(evaluation, Mapping) or evaluation.get("status") != "pass":
             raise EvidenceError(f"soak metric {name} did not pass")
+        per_experiment = metric.get("per_experiment")
+        if not isinstance(per_experiment, Mapping) or set(per_experiment) != set(
+            required_experiments
+        ):
+            raise EvidenceError(f"soak metric {name} lacks per-experiment evaluation")
+        for experiment_id in required_experiments:
+            item = per_experiment[experiment_id]
+            if not isinstance(item, Mapping):
+                raise EvidenceError(
+                    f"soak metric {name} experiment summary is malformed"
+                )
+            count = item.get("count")
+            experiment_evaluation = item.get("evaluation")
+            if (
+                isinstance(count, bool)
+                or not isinstance(count, int)
+                or count <= 0
+                or not isinstance(experiment_evaluation, Mapping)
+                or experiment_evaluation.get("status") != "pass"
+            ):
+                raise EvidenceError(
+                    f"soak metric {name} failed in experiment {experiment_id}"
+                )
+            if name in INTRINSIC_ZERO_METRICS and item.get("total") != 0.0:
+                raise EvidenceError(
+                    f"soak metric {name} violates its per-experiment zero gate"
+                )
         if name in INTRINSIC_ZERO_METRICS and metric.get("total") != 0.0:
             raise EvidenceError(f"soak metric {name} violates its intrinsic zero gate")
     return hashlib.sha256(canonical_json_bytes(report)).hexdigest()
@@ -908,38 +1005,20 @@ def write_report_noreplace(
     """Atomically publish a canonical report without replacing any entry."""
 
     target = Path(destination)
-    parent = target.parent
-    if not parent.is_dir():
-        raise PublicationError(f"report parent directory does not exist: {parent}")
-    data = json.dumps(
-        report,
-        allow_nan=False,
-        ensure_ascii=True,
-        indent=2,
-        sort_keys=True,
-    ).encode("ascii") + b"\n"
-    descriptor, temporary_name = tempfile.mkstemp(
-        prefix=f".{target.name}.", suffix=".tmp", dir=parent
+    data = (
+        json.dumps(
+            report,
+            allow_nan=False,
+            ensure_ascii=True,
+            indent=2,
+            sort_keys=True,
+        ).encode("ascii")
+        + b"\n"
     )
-    temporary = Path(temporary_name)
     try:
-        with os.fdopen(descriptor, "wb") as stream:
-            stream.write(data)
-            stream.flush()
-            os.fsync(stream.fileno())
-        try:
-            os.link(temporary, target, follow_symlinks=False)
-        except OSError as exc:
-            if exc.errno == errno.EEXIST:
-                raise PublicationError(f"report destination already exists: {target}") from exc
-            raise
-        directory_descriptor = os.open(parent, os.O_RDONLY | os.O_DIRECTORY)
-        try:
-            os.fsync(directory_descriptor)
-        finally:
-            os.close(directory_descriptor)
-    finally:
-        temporary.unlink(missing_ok=True)
+        publish_private_noreplace(target.parent, target.name, data)
+    except PrivateArtifactError as exc:
+        raise PublicationError(f"cannot publish private report: {exc}") from exc
 
 
 def generate_report(

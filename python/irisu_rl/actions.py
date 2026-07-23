@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-import math
 import hashlib
 import json
+import math
 import struct
 from dataclasses import dataclass
 from enum import IntEnum
@@ -12,10 +12,10 @@ from numbers import Real
 from typing import Any
 
 import numpy as np
-
 from irisu_env import Action
 
 ACTION_COORDINATE_EPSILON = 1e-6
+CLIENT_PIXEL_QUANTIZATION = "floor(normalized * extent), clamped to [0, extent - 1]"
 
 
 class SemanticActionKind(IntEnum):
@@ -55,6 +55,7 @@ class ActionSpec:
     timing_status: str = "provisional"
     allow_both: bool = False
     coordinate_log_prob_epsilon: float = ACTION_COORDINATE_EPSILON
+    coordinate_quantization: str = CLIENT_PIXEL_QUANTIZATION
 
     def __post_init__(self) -> None:
         if (
@@ -68,13 +69,16 @@ class ActionSpec:
             raise ValueError("R1 supports one-tick press and positive release")
         if self.release_ticks > 100_000:
             raise ValueError("release duration exceeds native wait limit")
-        if (
-            not math.isfinite(self.client_width)
-            or not math.isfinite(self.client_height)
-            or self.client_width <= 0
-            or self.client_height <= 0
+        client_extents = (self.client_width, self.client_height)
+        if any(
+            isinstance(extent, bool)
+            or not isinstance(extent, Real)
+            or not math.isfinite(float(extent))
+            or float(extent) <= 0
+            or not float(extent).is_integer()
+            for extent in client_extents
         ):
-            raise ValueError("client dimensions must be finite and positive")
+            raise ValueError("client dimensions must be finite positive pixel extents")
         if self.timing_status not in {"provisional", "measured"}:
             raise ValueError("invalid timing status")
         if self.allow_both:
@@ -84,6 +88,8 @@ class ActionSpec:
             or not 0 < self.coordinate_log_prob_epsilon < 0.5
         ):
             raise ValueError("coordinate likelihood epsilon must be in (0, 0.5)")
+        if self.coordinate_quantization != CLIENT_PIXEL_QUANTIZATION:
+            raise ValueError("unsupported client-pixel quantization")
 
     def manifest(self) -> dict[str, object]:
         return {
@@ -96,6 +102,7 @@ class ActionSpec:
             "timing_status": self.timing_status,
             "allow_both": self.allow_both,
             "coordinate_log_prob_epsilon": self.coordinate_log_prob_epsilon,
+            "coordinate_quantization": self.coordinate_quantization,
         }
 
     @property
@@ -135,11 +142,26 @@ class ActionSpec:
         value = self.validate(action)
         if value.kind is SemanticActionKind.WAIT:
             return Action.wait(value.wait_ticks)
-        x = value.x_norm * self.client_width
-        y = value.y_norm * self.client_height
+        x, y = self.client_point(value)
         if value.kind is SemanticActionKind.FIRE_WEAK:
             return Action.weak(x, y)
         return Action.strong(x, y)
+
+    def client_point(self, action: SemanticAction) -> tuple[int, int]:
+        """Lower a shot to the live client's half-open integer pixel grid."""
+
+        value = self.validate(action)
+        if value.kind is SemanticActionKind.WAIT:
+            raise ValueError("wait actions do not have client coordinates")
+
+        def quantize(normalized: float, extent: float) -> int:
+            pixels = int(extent)
+            return min(math.floor(normalized * pixels), pixels - 1)
+
+        return (
+            quantize(value.x_norm, self.client_width),
+            quantize(value.y_norm, self.client_height),
+        )
 
     def release(self) -> Action:
         return Action.wait(self.release_ticks)

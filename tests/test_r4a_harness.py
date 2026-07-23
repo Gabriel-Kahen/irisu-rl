@@ -1,16 +1,16 @@
 from __future__ import annotations
 
-from dataclasses import FrozenInstanceError, replace
 import sys
 import threading
 import unittest
+from dataclasses import FrozenInstanceError, replace
 from pathlib import Path
-
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "python"))
 
-from irisu_rl.original_game.harness import (  # noqa: E402
+from irisu_rl.original_game.harness import (
+    MONOTONIC_CLOCK_DOMAIN,
     ActionError,
     CapturePacket,
     ClaimLease,
@@ -26,7 +26,6 @@ from irisu_rl.original_game.harness import (  # noqa: E402
     HarnessLimits,
     InputAcknowledgement,
     InputCapabilities,
-    MONOTONIC_CLOCK_DOMAIN,
     OriginalGameHarness,
     Rect,
     SafetyError,
@@ -40,11 +39,12 @@ from irisu_rl.original_game.harness import (  # noqa: E402
     WindowIdentityError,
 )
 
-
 IDENTITY = WindowIdentity("0xabc", "capture-7")
 OTHER = WindowIdentity("0xdef", "capture-8")
 EXECUTABLE_SHA256 = "a" * 64
 RUNTIME_SHA256 = "b" * 64
+NONCE_SHA256 = "c" * 64
+WINE_SHA256 = "d" * 64
 BROKER_INSTANCE = "fixture-broker-1"
 CLAIM_GENERATION = 7
 
@@ -146,8 +146,11 @@ class FakeProvider:
         return TargetRuntimeDescriptor(
             identity or self.claim_identity,
             1234,
+            5678,
+            NONCE_SHA256,
             self.executable_sha256,
             self.runtime_sha256,
+            WINE_SHA256,
         )
 
     def _lease(
@@ -257,9 +260,7 @@ class FakeProvider:
             source_sequence=self.source_sequence,
         )
 
-    def current_cursor(
-        self, identity: WindowIdentity, token: ClaimToken
-    ):
+    def current_cursor(self, identity: WindowIdentity, token: ClaimToken):
         self._event("cursor", identity, token)
         from irisu_rl.original_game.harness import CursorSample
 
@@ -325,9 +326,7 @@ class FakeProvider:
             if self.clock() >= deadline:
                 self.held_buttons.discard(button)
                 self.release_deadlines.pop(button, None)
-                self.events.append(
-                    (f"auto_release:{button}", IDENTITY, self.token)
-                )
+                self.events.append((f"auto_release:{button}", IDENTITY, self.token))
 
 
 def limits(**changes: object) -> HarnessLimits:
@@ -381,9 +380,7 @@ class HarnessTests(unittest.TestCase):
             descriptor.process_id = 42  # type: ignore[misc]
 
         provider.runtime_sha256 = "c" * 64
-        with self.assertRaisesRegex(
-            WindowIdentityError, "target/runtime identity"
-        ):
+        with self.assertRaisesRegex(WindowIdentityError, "target/runtime identity"):
             harness.renew()
         self.assertFalse(provider.claimed)
 
@@ -424,9 +421,7 @@ class HarnessTests(unittest.TestCase):
         self.assertFalse(
             any(str(event[0]).startswith(("down", "up")) for event in provider.events)
         )
-        self.assertEqual(
-            harness.executed_actions[-1].status, ExecutionStatus.REJECTED
-        )
+        self.assertEqual(harness.executed_actions[-1].status, ExecutionStatus.REJECTED)
         self.assertFalse(provider.claimed)
 
     def test_provider_without_broker_release_guarantees_is_input_ineligible(
@@ -435,9 +430,7 @@ class HarnessTests(unittest.TestCase):
         harness, provider, _, _ = self.make()
         provider.capabilities = InputCapabilities(True, True, True)
         harness.open()
-        with self.assertRaisesRegex(
-            UnsupportedInputError, "broker release deadlines"
-        ):
+        with self.assertRaisesRegex(UnsupportedInputError, "broker release deadlines"):
             harness.fire("weak", 50, 50)
         self.assertFalse(
             any(str(event[0]).startswith("down:") for event in provider.events)
@@ -627,9 +620,7 @@ class HarnessTests(unittest.TestCase):
             frame_sequence=ambiguous_frame.sequence,
         )
         self.assertEqual(ambiguous.effect_status, EffectStatus.AMBIGUOUS)
-        self.assertEqual(
-            ambiguous.effect_frame_sequence, ambiguous_frame.sequence
-        )
+        self.assertEqual(ambiguous.effect_frame_sequence, ambiguous_frame.sequence)
         self.assertEqual(
             harness.executed_actions[-1].effect_status, EffectStatus.AMBIGUOUS
         )
@@ -756,19 +747,14 @@ class HarnessTests(unittest.TestCase):
             harness.fire("weak", 1, 1)
 
     def test_unresolved_effect_enforces_maximum_pending_depth_one(self) -> None:
-        harness, provider, _, _ = self.make(
-            config=limits(min_click_interval_ns=1)
-        )
+        harness, provider, _, _ = self.make(config=limits(min_click_interval_ns=1))
         harness.open()
         harness.fire("weak", 1, 1)
         self.assertEqual(harness.watchdog.pending_actions, 1)
         with self.assertRaisesRegex(ActionError, "pending-action depth"):
             harness.fire("strong", 2, 2)
         self.assertEqual(
-            sum(
-                str(event[0]).startswith("down:")
-                for event in provider.events
-            ),
+            sum(str(event[0]).startswith("down:") for event in provider.events),
             1,
         )
         self.assertFalse(provider.claimed)
@@ -786,7 +772,9 @@ class HarnessTests(unittest.TestCase):
             harness.fire("weak", 100, 100)
         self.assertFalse(provider.claimed)
 
-    def test_failure_matrix_always_attempts_release_all_then_claim_release(self) -> None:
+    def test_failure_matrix_always_attempts_release_all_then_claim_release(
+        self,
+    ) -> None:
         for point in ("capture", "cursor", "down", "up"):
             with self.subTest(point=point):
                 harness, provider, _, clock = self.make()
@@ -830,6 +818,7 @@ class HarnessTests(unittest.TestCase):
                     return InputAcknowledgement(clock() + 10, clock() + 20)
 
                 if edge == "down":
+
                     def down(
                         identity,
                         token,
@@ -838,9 +827,7 @@ class HarnessTests(unittest.TestCase):
                         y,
                         release_deadline_ns,
                     ):
-                        provider._event(
-                            f"down:{button}:{x}:{y}", identity, token
-                        )
+                        provider._event(f"down:{button}:{x}:{y}", identity, token)
                         provider.held_buttons.add(button)
                         return future_ack()
 
@@ -848,6 +835,7 @@ class HarnessTests(unittest.TestCase):
                     with self.assertRaisesRegex(ActionError, "future"):
                         harness.fire("weak", 10, 10)
                 elif edge == "up":
+
                     def up(identity, token, button, x, y):
                         provider._event(f"up:{button}:{x}:{y}", identity, token)
                         return future_ack()
@@ -856,6 +844,7 @@ class HarnessTests(unittest.TestCase):
                     with self.assertRaisesRegex(ActionError, "future"):
                         harness.fire("weak", 10, 10)
                 else:
+
                     def release_all(identity, token):
                         provider._event("release_all", identity, token)
                         return future_ack()
@@ -890,9 +879,7 @@ class HarnessTests(unittest.TestCase):
                     _mutation=mutation,
                     **kwargs,
                 ):
-                    return replace(
-                        _original_down(*args, **kwargs), **_mutation
-                    )
+                    return replace(_original_down(*args, **kwargs), **_mutation)
 
                 provider.targeted_button_down = mismatched_down  # type: ignore[method-assign]
                 with self.assertRaisesRegex(ActionError, "not bound"):
@@ -934,9 +921,7 @@ class HarnessTests(unittest.TestCase):
                 results.append(exc)
 
         first = threading.Thread(target=call_fire, args=("weak",))
-        second = threading.Thread(
-            target=call_fire, args=("strong", second_attempting)
-        )
+        second = threading.Thread(target=call_fire, args=("strong", second_attempting))
         first.start()
         self.assertTrue(entered_down.wait(timeout=2))
         second.start()
@@ -960,10 +945,7 @@ class HarnessTests(unittest.TestCase):
             1,
         )
         self.assertEqual(
-            sum(
-                str(event[0]).startswith("down:")
-                for event in provider.events
-            ),
+            sum(str(event[0]).startswith("down:") for event in provider.events),
             1,
         )
         self.assertLessEqual(harness.watchdog.pending_actions, 1)
@@ -1102,9 +1084,7 @@ class HarnessTests(unittest.TestCase):
         harness._lease = provider._lease(  # type: ignore[attr-defined]
             clock() + 5, identity=IDENTITY
         )
-        with self.assertRaisesRegex(
-            WindowIdentityError, "expired during capture"
-        ):
+        with self.assertRaisesRegex(WindowIdentityError, "expired during capture"):
             harness.capture()
         self.assertFalse(provider.claimed)
         self.assertTrue(harness.watchdog.buttons_neutral)
@@ -1161,9 +1141,7 @@ class HarnessTests(unittest.TestCase):
         self.assertFalse(provider.claimed)
 
     def test_long_zero_misroute_run(self) -> None:
-        harness, provider, _, clock = self.make(
-            config=limits(min_click_interval_ns=1)
-        )
+        harness, provider, _, clock = self.make(config=limits(min_click_interval_ns=1))
         harness.open()
         for index in range(2_000):
             if index:

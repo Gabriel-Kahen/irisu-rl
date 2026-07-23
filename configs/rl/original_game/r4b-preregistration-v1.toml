@@ -1,0 +1,100 @@
+schema = "r4b-calibration-preregistration-draft-v1"
+status = "draft_blocked_on_audited_broker_and_cursor_review"
+contract_version = "deployment-v1"
+note = "Engineering acceptance proposals only; no value in this file is an observed original-game measurement."
+
+[provider]
+required_capability = "targeted_edges_broker_deadline_claim_neutralization"
+required_backend = "hyprland_native_targeted_edges_v1"
+provider_build_sha256 = "blocked_until_audited_broker_exists"
+required_native_fault_tests = [
+  "caller_death_after_down",
+  "release_deadline_expiry",
+  "claim_release",
+  "claim_expiry",
+  "disconnect",
+  "broker_restart",
+]
+
+[sweep]
+client_width = 640
+client_height = 480
+x_coordinates = [32, 104, 176, 248, 320, 392, 464, 536, 608]
+y_coordinates = [30, 100, 170, 240, 310, 380, 450]
+buttons = ["weak", "strong"]
+fresh_processes = 3
+repetitions_per_process = 3
+planned_actions = 1134
+order_algorithm = "sha256-v1"
+order_seed = "must_be_frozen_before_collection"
+replay_edge_verification = true
+require_neutral_record_between_same_button_edges = true
+forbid_both_button_record = true
+
+[coordinate_acceptance]
+residual_p50_client_pixels_max = 1.0
+residual_p95_client_pixels_max = 2.0
+residual_worst_client_pixels_max = 3.0
+clipped_coordinates_total_max = 0
+wrong_button_edges_total_max = 0
+repeated_button_edges_total_max = 0
+
+[registration_acceptance]
+interval = "wilson-score-95-lower-bound"
+minimum_confirmed_actions = 1024
+minimum_registration_rate_lower_bound = 0.995
+
+[soak]
+minimum_duration_seconds_per_process = 1800
+minimum_confirmed_actions_per_process = 512
+maximum_measurement_gap_seconds = 1.0
+episode_envelope_ticks = 8192
+nominal_gameplay_hz = 50.0
+
+[soak.latency_seconds]
+ring_age_p99_max = 0.040
+ring_age_worst_max = 0.100
+request_to_ack_p99_max = 0.010
+request_to_ack_worst_max = 0.020
+request_to_visible_p99_max = 0.080
+request_to_visible_worst_max = 0.150
+gameplay_period_error_worst_max = 0.006
+
+[soak.capture]
+frame_rate_worst_min = 45.0
+crop_drift_worst_pixels_max = 1.0
+resource_growth_bytes_worst_max = 67108864
+
+[soak.intrinsic_zero_totals]
+stale_frames = 0
+out_of_order_frames = 0
+deadline_misses = 0
+button_release_failures = 0
+cross_window_misroutes = 0
+buffer_overflows = 0
+claim_renewal_failures = 0
+file_descriptor_growth = 0
+thread_growth = 0
+wrong_button_edges = 0
+repeated_button_edges = 0
+clipped_coordinates = 0
+
+[uncertainty]
+method = "run-cluster circular moving-block bootstrap"
+confidence_level = 0.95
+minimum_bootstrap_replicates = 2000
+block_length = "freeze from pilot autocorrelation before qualifying collection"
+registration_interval = "wilson-score-v1"
+instrument_resolution_is_systematic_floor = true
+
+[cursor]
+status = "human-comparison choice not frozen"
+agent_compatible_candidate = "abstract_coordinate_fixed_rate"
+human_comparable_candidate = "retained_client_space_measured_speed_acceleration"
+require_proposed_and_executed_path_log = true
+
+[promotion]
+output_status = "measured_pending_review"
+live_deployment_enabled = false
+requires_operator_overlay_review = true
+requires_reviewed_contract_hash_allowlist = true

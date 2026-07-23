@@ -510,6 +510,17 @@ surface cannot establish an independently timed press/release macro or
 broker-enforced release guarantee; R4a does
 not substitute global input or fabricate a hold duration.
 
+R4b strengthens that boundary with immutable process generation, launch nonce,
+canonical disposable-runtime and Wine hashes, broker implementation/backend
+attestation, operation-bound edge acknowledgements, locally bracketed
+monotonic timestamps, and strict renewal/deadline checks. A 2026-07-23
+capture-only preflight on a fresh canonical disposable run captured the exact
+644×484 Wine/XWayland window and released its claim without input. The current
+provider was truthfully classified `input_ineligible_atomic_only`; this is not
+click, latency, cadence, or transfer evidence. Typed calibration journals now
+derive deployment quantiles from raw safe samples, and soak thresholds are
+evaluated per process as well as in aggregate. See `docs/rl-r4b.md`.
+
 Long-horizon replay disagreement in the portable backend remains useful
 diagnostic evidence, but the exact-forward comparisons show that it is an
 engine-integration issue rather than uncertainty in score arithmetic.

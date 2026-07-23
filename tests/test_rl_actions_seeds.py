@@ -1,20 +1,20 @@
 from __future__ import annotations
 
-import unittest
 import json
 import tomllib
+import unittest
 from pathlib import Path
 
 import numpy as np
-
 from irisu_env import ActionKind
 from irisu_rl.actions import (
+    CLIENT_PIXEL_QUANTIZATION,
     ActionSpec,
     ConditionalActionDistribution,
     SemanticAction,
 )
-from irisu_rl.seeds import SEED_SPLITS_V1, SeedAllocator, validate_seed_splits
 from irisu_rl.runtime_identity import ACCEPTED_EXACT_RUNTIME_2026_07_21
+from irisu_rl.seeds import SEED_SPLITS_V1, SeedAllocator, validate_seed_splits
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -41,6 +41,43 @@ class ActionAndSeedTests(unittest.TestCase):
             SemanticAction.strong(1.0, 0.0),
         ):
             self.assertEqual(spec.deserialize(spec.serialize(action)), action)
+
+    def test_shots_lower_to_the_half_open_client_pixel_grid(self) -> None:
+        spec = ActionSpec()
+        cases = (
+            (SemanticAction.weak(0.0, 0.0), (0, 0)),
+            (SemanticAction.weak(0.5, 0.5), (320, 240)),
+            (SemanticAction.strong(0.999999, 0.999999), (639, 479)),
+            (SemanticAction.strong(1.0, 1.0), (639, 479)),
+        )
+        for semantic, expected in cases:
+            with self.subTest(semantic=semantic):
+                lowered = spec.press(semantic)
+                self.assertEqual((lowered.cursor_x, lowered.cursor_y), expected)
+                self.assertEqual(spec.client_point(semantic), expected)
+        with self.assertRaisesRegex(ValueError, "do not have client coordinates"):
+            spec.client_point(SemanticAction.wait(1))
+        self.assertEqual(
+            spec.manifest()["coordinate_quantization"],
+            CLIENT_PIXEL_QUANTIZATION,
+        )
+
+    def test_pixel_lowering_does_not_change_continuous_action_likelihood(self) -> None:
+        spec = ActionSpec()
+        distribution = ConditionalActionDistribution(
+            np.array([[0.0, 1.0, 0.0]]),
+            np.zeros((1, 100)),
+            np.full((1, 2, 2), 2.0),
+            np.full((1, 2, 2), 3.0),
+            spec=spec,
+        )
+        left = SemanticAction.weak(0.5001, 0.5001)
+        right = SemanticAction.weak(0.5014, 0.5020)
+        self.assertEqual(spec.client_point(left), spec.client_point(right))
+        self.assertNotEqual(
+            distribution.log_prob((left,))[0],
+            distribution.log_prob((right,))[0],
+        )
 
     def test_conditional_log_prob_ignores_inactive_heads(self) -> None:
         kind = np.array([[0.1, 0.2, 0.3], [0.3, -0.1, 0.2]])
