@@ -1,5 +1,7 @@
 import {BrowserGame} from "./wasm-runtime.js";
-import {activatedBlockBlurFor, colorFor} from "./colors.mjs";
+import {
+  activatedTrailAlphas, colorFor, hasActivatedTrail,
+} from "./colors.mjs?v=20260723b";
 
 const canvas = document.querySelector("#game");
 const ctx = canvas.getContext("2d");
@@ -20,6 +22,8 @@ let lastEvent = -1;
 let toastTimer;
 let fastForwardTimer;
 let game = null;
+let trailTick = -1;
+const bodyTrails = new Map();
 
 const fastForwardIdleMs = 160;
 
@@ -46,6 +50,26 @@ function showToast(text) {
 function acceptSnapshot(next, force = false) {
   if (!force && snapshot && next.seed === snapshot.seed &&
       next.observation.tick < snapshot.observation.tick) return;
+  if (force || !snapshot || next.seed !== snapshot.seed ||
+      next.observation.tick < trailTick) {
+    bodyTrails.clear();
+    trailTick = -1;
+  }
+  if (next.observation.tick !== trailTick) {
+    const active = new Set();
+    for (const body of next.observation.bodies) {
+      if (!hasActivatedTrail(body)) continue;
+      active.add(body.id);
+      const trail = bodyTrails.get(body.id) || [];
+      trail.push({x: body.x, y: body.y, angle: body.angle || 0});
+      if (trail.length > activatedTrailAlphas.length + 1) trail.shift();
+      bodyTrails.set(body.id, trail);
+    }
+    for (const id of bodyTrails.keys()) {
+      if (!active.has(id)) bodyTrails.delete(id);
+    }
+    trailTick = next.observation.tick;
+  }
   previousObservation = force ? null : snapshot?.observation || next.observation;
   snapshot = next;
   snapshotTime = performance.now();
@@ -95,25 +119,32 @@ function bodyPath(body, size) {
   } else ctx.rect(-size / 2, -size / 2, size, size);
 }
 
+function fillBody(body, size, color, pose, alpha = 1) {
+  ctx.save();
+  ctx.translate(pose.x, pose.y);
+  ctx.rotate(pose.angle || 0);
+  ctx.globalAlpha = alpha;
+  bodyPath(body, size);
+  ctx.fillStyle = color;
+  ctx.fill();
+  ctx.restore();
+}
+
 function drawBody(body, now) {
   const size = Math.max(2, body.size);
   const color = colorFor(body, now);
-  ctx.save();
-  ctx.translate(body.x, body.y);
-  ctx.rotate(body.angle || 0);
-  ctx.globalAlpha = body.lifecycle === "scripted_falling" ? .62 : 1;
-  bodyPath(body, size);
-  const blur = activatedBlockBlurFor(body);
-  if (blur) {
-    ctx.shadowColor = color;
-    ctx.shadowBlur = blur;
+  if (hasActivatedTrail(body)) {
+    const trail = bodyTrails.get(body.id) || [];
+    trail.slice(0, -1).forEach((pose, index, echoes) => {
+      const alphaOffset = activatedTrailAlphas.length - echoes.length;
+      fillBody(body, size, color, pose,
+        activatedTrailAlphas[alphaOffset + index]);
+    });
   }
-  ctx.fillStyle = color;
-  ctx.fill();
-
+  fillBody(body, size, color, body,
+    body.lifecycle === "scripted_falling" ? .62 : 1);
   // v2.03 renders rotten pieces with their normal color and shape. The small
   // gray squares in reference footage are projectiles, not dead blocks.
-  ctx.restore();
 }
 
 function drawBackdrop() {
