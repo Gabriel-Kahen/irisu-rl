@@ -214,6 +214,7 @@ class GameplayClock:
     duplicate_run: int = 0
     generation: int = 0
     failed_reason: str | None = None
+    recovery_reason: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.config, CadenceConfig):
@@ -240,6 +241,10 @@ class GameplayClock:
                 raise TimingError(f"{name} must be a non-negative integer")
         if self.failed_reason is not None and not isinstance(self.failed_reason, str):
             raise TypeError("failed_reason must be a string or None")
+        if self.recovery_reason is not None and not isinstance(
+            self.recovery_reason, str
+        ):
+            raise TypeError("recovery_reason must be a string or None")
 
     def _fit_tolerance(self, period: float) -> float:
         return min(self.config.max_period_deviation, period * 0.1)
@@ -303,6 +308,8 @@ class GameplayClock:
     def posterior(self) -> CadencePosterior:
         if self.failed_reason is not None:
             raise TimingError(f"clock is fail-closed: {self.failed_reason}")
+        if self.recovery_reason is not None:
+            raise TimingError(f"clock is recovering: {self.recovery_reason}")
         if (
             len(self.period_samples) < self.config.min_samples
             or self.last_unique_timestamp is None
@@ -406,13 +413,20 @@ class GameplayClock:
             updated = replace(
                 self, last_timestamp=at, duplicate_run=duplicate_run
             )
-            ready = len(updated.period_samples) >= self.config.min_samples
+            ready = (
+                len(updated.period_samples) >= self.config.min_samples
+                and updated.recovery_reason is None
+            )
             return updated, FrameAssessment(
                 at,
                 "duplicate",
                 ready,
                 duplicate_run=duplicate_run,
-                reason=None if ready else "insufficient cadence evidence",
+                reason=(
+                    None
+                    if ready
+                    else updated.recovery_reason or "insufficient cadence evidence"
+                ),
             )
 
         assert self.last_unique_timestamp is not None
@@ -431,13 +445,21 @@ class GameplayClock:
         dropped = multiple - 1
         delayed = abs(normalized - period) > updated._fit_tolerance(period)
         if delayed:
+            updated = replace(
+                updated,
+                recovery_reason="frame cadence outside calibrated tolerance",
+            )
             return updated, FrameAssessment(
                 at,
                 "delayed",
                 False,
-                reason="frame cadence outside calibrated tolerance",
+                reason=updated.recovery_reason,
             )
         classification = "dropped" if dropped else "unique"
+        updated = replace(
+            updated,
+            recovery_reason="dropped frame" if dropped else None,
+        )
         ready = len(samples) >= self.config.min_samples and dropped == 0
         return updated, FrameAssessment(
             at,

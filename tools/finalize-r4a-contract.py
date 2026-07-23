@@ -4,10 +4,14 @@
 from __future__ import annotations
 
 import argparse
-import json
 import os
 from pathlib import Path
+import sys
 import tempfile
+
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "python"))
 
 from irisu_rl.original_game.contracts import (
     ContractError,
@@ -15,10 +19,12 @@ from irisu_rl.original_game.contracts import (
     load_deployment_contract,
     render_toml,
 )
+from irisu_rl.original_game.evidence import EvidenceError, load_json_document
 
 
 def publish_noreplace(path: Path, payload: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
+    if not path.parent.is_dir():
+        raise ContractError(f"output parent directory does not exist: {path.parent}")
     descriptor, temporary = tempfile.mkstemp(
         prefix=f".{path.name}.", dir=path.parent, text=True
     )
@@ -31,6 +37,13 @@ def publish_noreplace(path: Path, payload: str) -> None:
             os.link(temporary, path)
         except FileExistsError as exc:
             raise ContractError(f"output already exists: {path}") from exc
+        directory_descriptor = os.open(
+            path.parent, os.O_RDONLY | os.O_DIRECTORY
+        )
+        try:
+            os.fsync(directory_descriptor)
+        finally:
+            os.close(directory_descriptor)
     finally:
         Path(temporary).unlink(missing_ok=True)
 
@@ -42,15 +55,23 @@ def main() -> None:
     parser.add_argument("base", type=Path)
     parser.add_argument("evidence", type=Path)
     parser.add_argument("soak_report", type=Path)
+    parser.add_argument("event_stream", type=Path)
+    parser.add_argument("threshold_config", type=Path)
     parser.add_argument("output", type=Path)
     args = parser.parse_args()
     try:
         base = load_deployment_contract(args.base)
-        evidence = json.loads(args.evidence.read_text(encoding="utf-8"))
-        soak_report = json.loads(args.soak_report.read_text(encoding="utf-8"))
-        measured = finalize_deployment_contract(base, evidence, soak_report)
+        evidence = load_json_document(args.evidence, "measurement evidence")
+        soak_report = load_json_document(args.soak_report, "soak report")
+        measured = finalize_deployment_contract(
+            base,
+            evidence,
+            soak_report,
+            args.event_stream,
+            args.threshold_config,
+        )
         publish_noreplace(args.output, render_toml(measured))
-    except (OSError, json.JSONDecodeError, ContractError) as exc:
+    except (OSError, ContractError, EvidenceError) as exc:
         parser.error(str(exc))
 
 

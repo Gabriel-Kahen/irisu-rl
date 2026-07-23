@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import hashlib
 import importlib.util
 import json
 from pathlib import Path
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -17,9 +19,13 @@ from irisu_rl.original_game.contracts import (
     validate_deployment_contract,
 )
 from irisu_rl.original_game.evidence import (
+    EVENT_SCHEMA,
     METRICS,
-    METRIC_UNITS,
-    REPORT_SCHEMA,
+    THRESHOLD_SCHEMA,
+    build_report,
+    canonical_json_bytes,
+    encode_event,
+    seal_event,
 )
 
 
@@ -27,58 +33,66 @@ ROOT = Path(__file__).resolve().parents[1]
 DIGEST = "a" * 64
 
 
-def soak_report() -> dict[str, object]:
-    metric_reports = {}
+def soak_artifacts(root: Path) -> tuple[dict[str, object], Path, Path]:
+    metrics = {}
     for name in METRICS:
-        metric_reports[name] = {
-            "unit": METRIC_UNITS[name],
-            "count": 100,
-            "total": 0.0 if name in {
-                "button_release_failures",
-                "cross_window_misroutes",
-            } else 100.0,
-            "evaluation": {"status": "pass"},
+        direction = "min" if name in {"capture_fps", "action_confirmations"} else "max"
+        metrics[name] = {
+            "direction": direction,
+            "minimum_samples": 3,
+            "total": {"min": 3.0}
+            if name == "action_confirmations"
+            else {"max": 0.0}
+            if name in {"button_release_failures", "cross_window_misroutes"}
+            else {"min": 50.0}
+            if name == "capture_fps"
+            else {"max": 1_000_000.0},
         }
-    return {
-        "schema": REPORT_SCHEMA,
-        "status": "pass",
-        "event_stream": {
-            "count": 10_000,
-            "sha256": DIGEST,
-            "chain_head_sha256": DIGEST,
+    config = {
+        "schema": THRESHOLD_SCHEMA,
+        "experiment_ids": ["controlled-001"],
+        "required_provenance": {
+            "game_executable_sha256": DIGEST,
+            "measurement_tool_sha256": DIGEST,
         },
-        "threshold_config_sha256": DIGEST,
-        "duration": {
-            "seconds": 600.0,
-            "minimum_seconds": 300.0,
-            "status": "pass",
-        },
-        "experiments": {
-            "required": ["controlled-001"],
-            "observed": ["controlled-001"],
-            "missing": [],
-            "status": "pass",
-        },
-        "provenance": {
-            "required": {
-                "game_executable_sha256": DIGEST,
-                "measurement_tool_sha256": DIGEST,
-            },
-            "observed": {
-                "game_executable_sha256": DIGEST,
-                "measurement_tool_sha256": DIGEST,
-            },
-            "missing": [],
-            "mismatched": [],
-            "measurement_events_missing_required": 0,
-            "status": "pass",
-        },
-        "metrics": metric_reports,
+        "minimum_duration_seconds": 0.002,
+        "maximum_measurement_gap_seconds": 0.002,
+        "metrics": metrics,
     }
+    threshold_path = root / "thresholds.json"
+    threshold_path.write_text(json.dumps(config), encoding="utf-8")
+    threshold_sha256 = hashlib.sha256(canonical_json_bytes(config)).hexdigest()
+    previous = "0" * 64
+    records = []
+    for sequence in range(1, 4):
+        values = {name: 0.0 for name in METRICS}
+        values["capture_fps"] = 60.0
+        values["action_confirmations"] = 1.0
+        record = seal_event(
+            {
+                "schema": EVENT_SCHEMA,
+                "sequence": sequence,
+                "monotonic_ns": sequence * 1_000_000,
+                "experiment_id": "controlled-001",
+                "measurements": values,
+                "provenance": config["required_provenance"],
+                "threshold_sha256": threshold_sha256,
+            },
+            previous,
+        )
+        records.append(record)
+        previous = record["sha256"]
+    event_path = root / "events.jsonl"
+    event_path.write_bytes(b"".join(encode_event(record) for record in records))
+    return build_report(event_path, threshold_path), event_path, threshold_path
 
 
-def evidence(report: dict[str, object] | None = None) -> dict[str, object]:
-    report = soak_report() if report is None else report
+def evidence(report: dict[str, object]) -> dict[str, object]:
+    artifact_hashes = [
+        report["event_stream"]["sha256"],
+        report["threshold_config_sha256"],
+        canonical_json_sha256(report),
+    ]
 
     def metric(field: str) -> dict[str, object]:
         direction = (
@@ -124,7 +138,7 @@ def evidence(report: dict[str, object] | None = None) -> dict[str, object]:
             "uncertainty_method": "bootstrap-95-percent",
             "provenance_category": "observed",
             "experiment_ids": ["controlled-001"],
-            "artifact_sha256": [DIGEST],
+            "artifact_sha256": artifact_hashes,
             "measurements": {field: metric(field) for field in fields},
         }
 
@@ -159,7 +173,9 @@ def evidence(report: dict[str, object] | None = None) -> dict[str, object]:
     )
     sections["click_macro"].update(
         {
-            "input_provider_capability": "targeted_explicit_down_up_release_all",
+            "input_provider_capability": (
+                "targeted_edges_broker_deadline_claim_neutralization"
+            ),
             "weak_button": "left",
             "strong_button": "right",
         }
@@ -172,6 +188,9 @@ def evidence(report: dict[str, object] | None = None) -> dict[str, object]:
         "contract_version": "deployment-v1",
         "status": "measured",
         "soak_experiment_ids": ["controlled-001"],
+        "soak_event_stream_sha256": report["event_stream"]["sha256"],
+        "soak_threshold_config_sha256": report["threshold_config_sha256"],
+        "soak_report_sha256": canonical_json_sha256(report),
         "provenance": {
             "game_executable_sha256": DIGEST,
             "box2d_sha256": DIGEST,
@@ -190,6 +209,21 @@ class R4AContractTests(unittest.TestCase):
         self.base = load_deployment_contract(
             ROOT / "configs/rl/actions/deployment-v1.toml"
         )
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary.name)
+        self.report, self.events, self.thresholds = soak_artifacts(self.root)
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def finalize(self, candidate, report=None):
+        return finalize_deployment_contract(
+            self.base,
+            candidate,
+            self.report if report is None else report,
+            self.events,
+            self.thresholds,
+        )
 
     def test_checked_in_contract_is_explicitly_unmeasured_and_fail_closed(self) -> None:
         self.assertEqual(validate_deployment_contract(self.base), "provisional_unmeasured")
@@ -198,20 +232,22 @@ class R4AContractTests(unittest.TestCase):
         self.assertNotIn("game_poll_latency_seconds", self.base["effect_timing"])
 
     def test_complete_evidence_finalizes_a_round_trip_measured_contract(self) -> None:
-        report = soak_report()
-        measured = finalize_deployment_contract(self.base, evidence(report), report)
-        self.assertTrue(measured["live_deployment_enabled"])
+        measured = self.finalize(evidence(self.report))
+        self.assertFalse(measured["live_deployment_enabled"])
+        self.assertEqual(measured["measurement_status"], "measured_pending_review")
         self.assertEqual(measured["click_macro"]["press_ticks"], 1)
         self.assertEqual(
             measured["measurement_bundle_sha256"],
-            canonical_json_sha256(evidence(report)),
+            canonical_json_sha256(evidence(self.report)),
         )
         rendered = render_toml(measured)
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "measured.toml"
             path.write_text(rendered, encoding="utf-8")
             loaded = load_deployment_contract(path)
-        self.assertEqual(validate_deployment_contract(loaded), "measured")
+        self.assertEqual(
+            validate_deployment_contract(loaded), "measured_pending_review"
+        )
 
     def test_missing_or_fabricated_evidence_never_enables_deployment(self) -> None:
         for mutate in (
@@ -224,16 +260,20 @@ class R4AContractTests(unittest.TestCase):
                 click_sweep_dimensions=1
             ),
         ):
-            candidate = evidence()
+            candidate = evidence(self.report)
             mutate(candidate)
             with self.subTest(candidate=candidate), self.assertRaises(ContractError):
-                finalize_deployment_contract(self.base, candidate, soak_report())
+                self.finalize(candidate)
             self.assertFalse(self.base["live_deployment_enabled"])
-        failed_report = soak_report()
+        failed_report = deepcopy(self.report)
         failed_report["status"] = "fail"
         candidate = evidence(failed_report)
         with self.assertRaises(ContractError):
-            finalize_deployment_contract(self.base, candidate, failed_report)
+            self.finalize(candidate, failed_report)
+        forged_report = deepcopy(self.report)
+        forged_report["metrics"]["capture_fps"]["p50"] = 999.0
+        with self.assertRaisesRegex(ContractError, "does not match"):
+            self.finalize(evidence(forged_report), forged_report)
 
     def test_provisional_safety_invariants_cannot_be_weakened(self) -> None:
         for key, value in (
@@ -260,36 +300,72 @@ class R4AContractTests(unittest.TestCase):
         candidate["fairness"]["fast_forward"] = True
         with self.assertRaises(ContractError):
             validate_deployment_contract(candidate)
+        for key, value in (
+            ("measurement_schema", "anything"),
+            ("soak_report_schema", "anything"),
+            ("measured_values_require_positive_sample_count", False),
+            ("measured_values_require_uncertainty", False),
+            ("measured_values_require_artifact_hashes", False),
+        ):
+            candidate = deepcopy(self.base)
+            candidate["evidence"][key] = value
+            with self.subTest(key=key), self.assertRaises(ContractError):
+                validate_deployment_contract(candidate)
 
     def test_soak_hash_and_exact_private_schema_are_enforced(self) -> None:
-        report = soak_report()
-        candidate = evidence(report)
+        candidate = evidence(self.report)
         candidate["soak_experiment_ids"] = ["other-experiment"]
         with self.assertRaisesRegex(ContractError, "experiments do not match"):
-            finalize_deployment_contract(self.base, candidate, report)
+            self.finalize(candidate)
 
         for section, key, value in (
             ("capture", "private_path", "/home/user/private/capture"),
             ("click_macro", "claim_token", "SECRET"),
         ):
-            candidate = evidence(report)
+            candidate = evidence(self.report)
             candidate["sections"][section][key] = value
             with self.subTest(key=key), self.assertRaisesRegex(
                 ContractError, "extra"
             ):
-                finalize_deployment_contract(self.base, candidate, report)
+                self.finalize(candidate)
+        candidate = evidence(self.report)
+        candidate["sections"]["capture"]["measurements"]["private_path"] = (
+            "/home/user/private/capture"
+        )
+        with self.assertRaisesRegex(ContractError, "extra"):
+            self.finalize(candidate)
+        candidate = evidence(self.report)
+        candidate["sections"]["capture"]["experiment_ids"] = ["absent"]
+        with self.assertRaisesRegex(ContractError, "absent from the soak"):
+            self.finalize(candidate)
+        candidate = evidence(self.report)
+        candidate["sections"]["capture"]["artifact_sha256"] = [DIGEST]
+        with self.assertRaisesRegex(ContractError, "not bound"):
+            self.finalize(candidate)
+        candidate = evidence(self.report)
+        candidate["sections"]["cursor"]["quantization"] = (
+            "/home/user/private/frame.png"
+        )
+        with self.assertRaisesRegex(ContractError, "private"):
+            self.finalize(candidate)
 
     def test_tampered_quantiles_and_cursor_protocol_are_rejected(self) -> None:
-        candidate = evidence()
+        candidate = evidence(self.report)
         candidate["sections"]["effect_timing"]["measurements"][
             "request_to_visible_seconds"
         ]["p99"] = 0.001
         with self.assertRaisesRegex(ContractError, "not monotone"):
-            finalize_deployment_contract(self.base, candidate, soak_report())
-        candidate = evidence()
+            self.finalize(candidate)
+        candidate = evidence(self.report)
         candidate["sections"]["cursor"]["travel_model"] = "teleport"
         with self.assertRaisesRegex(ContractError, "fairness"):
-            finalize_deployment_contract(self.base, candidate, soak_report())
+            self.finalize(candidate)
+
+    def test_measured_runtime_provenance_is_exact_schema(self) -> None:
+        measured = self.finalize(evidence(self.report))
+        measured["runtime_provenance"]["claim_token"] = "SECRET"
+        with self.assertRaisesRegex(ContractError, "extra"):
+            validate_deployment_contract(measured)
 
     def test_finalizer_publishes_no_replace(self) -> None:
         spec = importlib.util.spec_from_file_location(
@@ -305,6 +381,48 @@ class R4AContractTests(unittest.TestCase):
             with self.assertRaisesRegex(ContractError, "already exists"):
                 module.publish_noreplace(output, "second\n")
             self.assertEqual(output.read_text(encoding="utf-8"), "first\n")
+
+    def test_r4a_tools_help_works_with_stdlib_only_imports(self) -> None:
+        for name in ("report-r4a-soak.py", "finalize-r4a-contract.py"):
+            result = subprocess.run(
+                [sys.executable, "-S", str(ROOT / "tools" / name), "--help"],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            with self.subTest(name=name):
+                self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_finalizer_cli_rebuilds_sources_and_stays_review_blocked(self) -> None:
+        evidence_path = self.root / "evidence.json"
+        report_path = self.root / "report.json"
+        output = self.root / "measured.toml"
+        evidence_path.write_text(
+            json.dumps(evidence(self.report)), encoding="utf-8"
+        )
+        report_path.write_text(json.dumps(self.report), encoding="utf-8")
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-S",
+                str(ROOT / "tools/finalize-r4a-contract.py"),
+                str(ROOT / "configs/rl/actions/deployment-v1.toml"),
+                str(evidence_path),
+                str(report_path),
+                str(self.events),
+                str(self.thresholds),
+                str(output),
+            ],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        finalized = load_deployment_contract(output)
+        self.assertEqual(
+            finalized["measurement_status"], "measured_pending_review"
+        )
+        self.assertFalse(finalized["live_deployment_enabled"])
 
 
 if __name__ == "__main__":

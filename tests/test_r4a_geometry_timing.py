@@ -208,6 +208,48 @@ class GameplayClockTests(unittest.TestCase):
         self.assertEqual(classes[-1], "delayed")
         self.assertFalse(safety[-1])
 
+    def test_duplicate_after_dropped_frame_remains_unsafe_until_clean_unique(self) -> None:
+        clock, classes, safety = self.replay(
+            [
+                (0.000, "a"),
+                (0.020, "b"),
+                (0.040, "c"),
+                (0.060, "d"),
+                (0.100, "e"),
+                (0.110, "e"),
+            ]
+        )
+        self.assertEqual(classes[-2:], ["dropped", "duplicate"])
+        self.assertEqual(safety[-2:], [False, False])
+        with self.assertRaisesRegex(TimingError, "recovering"):
+            clock.posterior()
+
+        recovered, assessment = clock.observe(0.120, "f")
+        self.assertEqual(assessment.classification, "unique")
+        self.assertTrue(assessment.safe_to_act)
+        recovered.posterior()
+
+    def test_duplicate_after_delayed_frame_remains_unsafe_until_clean_unique(self) -> None:
+        clock, classes, safety = self.replay(
+            [
+                (0.000, "a"),
+                (0.020, "b"),
+                (0.040, "c"),
+                (0.060, "d"),
+                (0.085, "e"),
+                (0.090, "e"),
+            ]
+        )
+        self.assertEqual(classes[-2:], ["delayed", "duplicate"])
+        self.assertEqual(safety[-2:], [False, False])
+        with self.assertRaisesRegex(TimingError, "recovering"):
+            clock.posterior()
+
+        recovered, assessment = clock.observe(0.095, "f")
+        self.assertEqual(assessment.classification, "unique")
+        self.assertTrue(assessment.safe_to_act)
+        recovered.posterior()
+
     def test_out_of_order_stall_duplicate_limit_and_restart_fail_closed(self) -> None:
         clock, _ = GameplayClock().observe(1.000, "a")
         failed, assessment = clock.observe(0.999, "b")

@@ -33,10 +33,13 @@ fallback.
 
 The live provider port is deliberately strict. It must expose current native
 input safety, exact background capture, exact claim/renew/release, and targeted
-button down/up/release-all for the same claimed identity. An atomic-click-only
-provider is capture-capable but input-ineligible. Every provider exception
-enters cleanup; an attempted release-all and claim release are required even
-when injection or renewal fails.
+button down/up/release-all for the same claimed identity. It must also enforce
+an absolute automatic-release deadline independently of the caller and
+neutralize held buttons on claim release or expiry. An atomic-click-only
+provider—or an explicit-edge provider without those broker guarantees—is
+capture-capable but input-ineligible. Every provider exception enters cleanup;
+an attempted release-all and claim release are required even when injection or
+renewal fails.
 
 Captured pixels stay in ignored `reference/captures/<experiment-id>/frames/`.
 Committed reports may contain opaque experiment IDs, hashes, aggregate counts,
@@ -68,7 +71,9 @@ move, scale, crop, anchor, or residual drift.
 
 The soak reporter consumes safe JSONL events whose records form a SHA-256
 chain. Its thresholds are preregistered before a run, and every sealed event
-commits to the exact canonical threshold-config hash. It reports counts and
+commits to the exact canonical threshold-config hash. Metric tail directions
+are fixed by schema, and every metric in every declared experiment must span
+the soak within a declared maximum measurement gap. It reports counts and
 p50/p95/p99/worst tails for capture cadence/jitter, ring age, request-to-ack,
 inferred poll/effect, effect-to-visible, total latency, deadline misses,
 confirmation failures, crop drift, button-release failures, cross-window
@@ -86,15 +91,19 @@ PYTHONPATH=python uv run --locked --extra training \
   configs/rl/actions/deployment-v1.toml \
   /private/path/r4a-deployment-measurements.json \
   /private/path/r4a-soak-report.json \
+  /private/path/r4a-safe-events.jsonl \
+  /private/path/r4a-soak-thresholds.json \
   /private/path/deployment-v1.measured.toml
 ```
 
-The finalizer requires game/runtime/tool hashes, opaque hardware/runtime
+The finalizer rebuilds the report from the raw safe-event chain and threshold
+config, then requires game/runtime/tool hashes, opaque hardware/runtime
 provenance, experiment and artifact IDs, positive sample counts, uncertainty,
 monotone p50/p95/p99/worst values, a two-dimensional click sweep, a frozen
-cursor-fairness choice, and a passing soak hash. It publishes with no replace.
-Only reviewed evidence should replace the repository contract in a later
-change.
+cursor-fairness choice, and a passing soak hash. It publishes with no replace as
+`measured_pending_review`, with live deployment still disabled. Only a separate
+human review may remove that blocker and replace the repository contract in a
+later change.
 
 ## Validation and remaining gate
 
@@ -105,7 +114,8 @@ crop/affine round trips, buffer overflow, forced failures at each input stage,
 button/claim cleanup, rate and bounds limits, and a long zero-misroute run.
 
 R4a remains provisional until a current safe provider supports explicit
-targeted down/up, a fresh claimed-window capture/input smoke passes, the 2-D
+targeted down/up plus broker release deadlines and claim-end neutralization, a
+fresh claimed-window capture/input smoke passes, the 2-D
 projectile-birth sweep and click/cadence/latency measurements are complete, and
 a production-cadence soak longer than the evaluation episode envelope passes
 its preregistered thresholds. Full R4 additionally requires the detector,

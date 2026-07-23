@@ -65,6 +65,7 @@ COUNT_METRICS = frozenset(
 INTRINSIC_ZERO_METRICS = frozenset(
     {"button_release_failures", "cross_window_misroutes"}
 )
+MINIMUM_IS_WORST = frozenset({"capture_fps", "action_confirmations"})
 _EVENT_KEYS = frozenset(
     {
         "schema",
@@ -84,6 +85,7 @@ _THRESHOLD_KEYS = frozenset(
         "experiment_ids",
         "required_provenance",
         "minimum_duration_seconds",
+        "maximum_measurement_gap_seconds",
         "metrics",
     }
 )
@@ -157,6 +159,20 @@ def _decode_json(data: bytes, label: str) -> Any:
         raise
     except (UnicodeDecodeError, ValueError) as exc:
         raise EvidenceError(f"{label} is not valid UTF-8 JSON") from exc
+
+
+def load_json_document(
+    path: str | os.PathLike[str], label: str = "JSON document"
+) -> Any:
+    """Load one bounded UTF-8 JSON document with duplicate-key rejection."""
+
+    try:
+        raw = Path(path).read_bytes()
+    except OSError as exc:
+        raise EvidenceError(f"cannot read {label}: {exc}") from exc
+    if len(raw) > MAX_JSONL_LINE_BYTES:
+        raise EvidenceError(f"{label} exceeds the size limit")
+    return _decode_json(raw, label)
 
 
 def _exact_keys(value: Mapping[str, Any], expected: frozenset[str], label: str) -> None:
@@ -327,13 +343,7 @@ def _bound(value: object, label: str) -> dict[str, float]:
 
 
 def load_thresholds(path: str | os.PathLike[str]) -> tuple[dict[str, Any], str]:
-    try:
-        raw = Path(path).read_bytes()
-    except OSError as exc:
-        raise EvidenceError(f"cannot read threshold config: {exc}") from exc
-    if len(raw) > MAX_JSONL_LINE_BYTES:
-        raise EvidenceError("threshold config exceeds the size limit")
-    value = _decode_json(raw, "threshold config")
+    value = load_json_document(path, "threshold config")
     if not isinstance(value, Mapping) or any(
         not isinstance(key, str) for key in value
     ):
@@ -363,6 +373,15 @@ def load_thresholds(path: str | os.PathLike[str]) -> tuple[dict[str, Any], str]:
     )
     if minimum_duration <= 0:
         raise EvidenceError("minimum_duration_seconds must be positive")
+    maximum_gap = _finite_nonnegative(
+        value["maximum_measurement_gap_seconds"],
+        "maximum_measurement_gap_seconds",
+    )
+    if maximum_gap <= 0 or maximum_gap > minimum_duration:
+        raise EvidenceError(
+            "maximum_measurement_gap_seconds must be positive and no greater "
+            "than minimum_duration_seconds"
+        )
     metrics = value["metrics"]
     if not isinstance(metrics, Mapping) or set(metrics) != set(METRICS):
         raise EvidenceError("threshold config must predeclare every R4a metric")
@@ -377,8 +396,11 @@ def load_thresholds(path: str | os.PathLike[str]) -> tuple[dict[str, Any], str]:
             raise EvidenceError(f"threshold metrics.{name} contains unknown keys")
         direction = spec.get("direction")
         minimum_samples = spec.get("minimum_samples")
-        if direction not in {"min", "max"}:
-            raise EvidenceError(f"threshold metrics.{name}.direction is invalid")
+        expected_direction = "min" if name in MINIMUM_IS_WORST else "max"
+        if direction != expected_direction:
+            raise EvidenceError(
+                f"threshold metrics.{name}.direction must be {expected_direction}"
+            )
         if (
             isinstance(minimum_samples, bool)
             or not isinstance(minimum_samples, int)
@@ -404,6 +426,7 @@ def load_thresholds(path: str | os.PathLike[str]) -> tuple[dict[str, Any], str]:
         "experiment_ids": list(experiment_ids),
         "required_provenance": provenance,
         "minimum_duration_seconds": minimum_duration,
+        "maximum_measurement_gap_seconds": maximum_gap,
         "metrics": normalized_metrics,
     }
     return normalized, hashlib.sha256(canonical_json_bytes(value)).hexdigest()
@@ -496,6 +519,13 @@ def build_report(
     observed_id_set: set[str] = set()
     provenance: dict[str, str] = {}
     samples = {name: [] for name in METRICS}
+    experiment_events: dict[str, list[int]] = {
+        experiment_id: [] for experiment_id in expected_ids
+    }
+    sample_timestamps: dict[str, dict[str, list[int]]] = {
+        experiment_id: {name: [] for name in METRICS}
+        for experiment_id in expected_ids
+    }
     measurement_events: list[dict[str, Any]] = []
     missing_event_provenance = 0
     for event in events:
@@ -511,6 +541,7 @@ def build_report(
             observed_ids.append(experiment_id)
         if event["measurements"]:
             measurement_events.append(event)
+            experiment_events[experiment_id].append(event["monotonic_ns"])
         event_provenance_complete = True
         for key, expected in thresholds["required_provenance"].items():
             if event["provenance"].get(key) != expected:
@@ -523,6 +554,7 @@ def build_report(
                 raise EvidenceError(f"provenance hash changed during stream: {key}")
         for name, measured in event["measurements"].items():
             samples[name].append(measured)
+            sample_timestamps[experiment_id][name].append(event["monotonic_ns"])
 
     metric_reports: dict[str, Any] = {}
     metric_statuses: list[str] = []
@@ -578,11 +610,66 @@ def build_report(
     duration_status = (
         "pass" if duration_seconds >= minimum_duration else "not_evaluable"
     )
+    maximum_allowed_gap = thresholds["maximum_measurement_gap_seconds"]
+    coverage_experiments: dict[str, Any] = {}
+    coverage_statuses: list[str] = []
+    for experiment_id in expected_ids:
+        experiment_times = experiment_events[experiment_id]
+        experiment_duration = (
+            (experiment_times[-1] - experiment_times[0]) / 1e9
+            if len(experiment_times) >= 2
+            else 0.0
+        )
+        metric_coverage: dict[str, Any] = {}
+        metric_coverage_statuses: list[str] = []
+        for name in METRICS:
+            timestamps = sample_timestamps[experiment_id][name]
+            maximum_gap: float | None = None
+            if experiment_times and timestamps:
+                gaps_ns = [
+                    timestamps[0] - experiment_times[0],
+                    *(
+                        right - left
+                        for left, right in zip(timestamps, timestamps[1:])
+                    ),
+                    experiment_times[-1] - timestamps[-1],
+                ]
+                maximum_gap = max(gaps_ns) / 1e9
+            metric_status = (
+                "pass"
+                if maximum_gap is not None
+                and maximum_gap <= maximum_allowed_gap
+                else "not_evaluable"
+            )
+            metric_coverage_statuses.append(metric_status)
+            metric_coverage[name] = {
+                "sample_count": len(timestamps),
+                "maximum_gap_seconds": maximum_gap,
+                "status": metric_status,
+            }
+        experiment_coverage_status = (
+            "pass"
+            if experiment_duration >= minimum_duration
+            and "not_evaluable" not in metric_coverage_statuses
+            else "not_evaluable"
+        )
+        coverage_statuses.append(experiment_coverage_status)
+        coverage_experiments[experiment_id] = {
+            "duration_seconds": experiment_duration,
+            "metrics": metric_coverage,
+            "status": experiment_coverage_status,
+        }
+    coverage_status = (
+        "pass"
+        if coverage_statuses and "not_evaluable" not in coverage_statuses
+        else "not_evaluable"
+    )
     statuses = [
         *metric_statuses,
         provenance_status,
         experiment_status,
         duration_status,
+        coverage_status,
     ]
     status = (
         "fail"
@@ -605,6 +692,11 @@ def build_report(
             "minimum_seconds": minimum_duration,
             "status": duration_status,
         },
+        "coverage": {
+            "maximum_allowed_gap_seconds": maximum_allowed_gap,
+            "experiments": coverage_experiments,
+            "status": coverage_status,
+        },
         "experiments": {
             "required": expected_ids,
             "observed": observed_ids,
@@ -623,8 +715,8 @@ def build_report(
     }
 
 
-def validate_report(report: object) -> str:
-    """Validate a complete aggregate report and return its canonical SHA-256."""
+def _validate_rebuilt_report(report: object) -> str:
+    """Validate a report already rebuilt from verified source artifacts."""
 
     if not isinstance(report, Mapping):
         raise EvidenceError("soak report must be an object")
@@ -634,6 +726,7 @@ def validate_report(report: object) -> str:
         "event_stream",
         "threshold_config_sha256",
         "duration",
+        "coverage",
         "experiments",
         "provenance",
         "metrics",
@@ -672,6 +765,25 @@ def validate_report(report: object) -> str:
     if minimum <= 0 or seconds < minimum or duration.get("status") != "pass":
         raise EvidenceError("soak duration gate did not pass")
 
+    coverage = report.get("coverage")
+    if not isinstance(coverage, Mapping) or set(coverage) != {
+        "maximum_allowed_gap_seconds",
+        "experiments",
+        "status",
+    }:
+        raise EvidenceError("soak coverage summary is malformed")
+    maximum_allowed_gap = _finite_nonnegative(
+        coverage.get("maximum_allowed_gap_seconds"),
+        "maximum allowed measurement gap",
+    )
+    coverage_experiments = coverage.get("experiments")
+    if (
+        maximum_allowed_gap <= 0
+        or coverage.get("status") != "pass"
+        or not isinstance(coverage_experiments, Mapping)
+    ):
+        raise EvidenceError("soak measurement coverage gate did not pass")
+
     experiments = report.get("experiments")
     if not isinstance(experiments, Mapping):
         raise EvidenceError("soak experiment summary is malformed")
@@ -683,6 +795,48 @@ def validate_report(report: object) -> str:
         != set(experiments.get("observed", ()))
     ):
         raise EvidenceError("soak experiment coverage did not pass")
+    required_experiments = experiments["required"]
+    if set(coverage_experiments) != set(required_experiments):
+        raise EvidenceError("soak metric coverage experiments are incomplete")
+    for experiment_id in required_experiments:
+        experiment_coverage = coverage_experiments[experiment_id]
+        if not isinstance(experiment_coverage, Mapping) or set(
+            experiment_coverage
+        ) != {"duration_seconds", "metrics", "status"}:
+            raise EvidenceError("soak experiment metric coverage is malformed")
+        experiment_duration = _finite_nonnegative(
+            experiment_coverage.get("duration_seconds"),
+            "experiment coverage duration",
+        )
+        covered_metrics = experiment_coverage.get("metrics")
+        if (
+            experiment_duration < minimum
+            or experiment_coverage.get("status") != "pass"
+            or not isinstance(covered_metrics, Mapping)
+            or set(covered_metrics) != set(METRICS)
+        ):
+            raise EvidenceError("soak experiment metric coverage did not pass")
+        for name in METRICS:
+            item = covered_metrics[name]
+            if not isinstance(item, Mapping) or set(item) != {
+                "sample_count",
+                "maximum_gap_seconds",
+                "status",
+            }:
+                raise EvidenceError(f"soak metric coverage {name} is malformed")
+            sample_count = item.get("sample_count")
+            gap = _finite_nonnegative(
+                item.get("maximum_gap_seconds"),
+                f"soak metric coverage {name} gap",
+            )
+            if (
+                isinstance(sample_count, bool)
+                or not isinstance(sample_count, int)
+                or sample_count <= 0
+                or gap > maximum_allowed_gap
+                or item.get("status") != "pass"
+            ):
+                raise EvidenceError(f"soak metric coverage {name} did not pass")
 
     provenance = report.get("provenance")
     if not isinstance(provenance, Mapping):
@@ -721,6 +875,31 @@ def validate_report(report: object) -> str:
         if name in INTRINSIC_ZERO_METRICS and metric.get("total") != 0.0:
             raise EvidenceError(f"soak metric {name} violates its intrinsic zero gate")
     return hashlib.sha256(canonical_json_bytes(report)).hexdigest()
+
+
+def verify_report(
+    report: object,
+    event_path: str | os.PathLike[str],
+    threshold_path: str | os.PathLike[str],
+) -> str:
+    """Rebuild a report from source artifacts and return its verified hash."""
+
+    rebuilt = build_report(event_path, threshold_path)
+    if canonical_json_bytes(report) != canonical_json_bytes(rebuilt):
+        raise EvidenceError(
+            "soak report does not match the raw event stream and threshold config"
+        )
+    return _validate_rebuilt_report(rebuilt)
+
+
+def validate_report(
+    report: object,
+    event_path: str | os.PathLike[str],
+    threshold_path: str | os.PathLike[str],
+) -> str:
+    """Validate a report against its event stream and threshold config."""
+
+    return verify_report(report, event_path, threshold_path)
 
 
 def write_report_noreplace(

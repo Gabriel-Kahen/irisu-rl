@@ -24,6 +24,7 @@ from irisu_rl.original_game.evidence import (  # noqa: E402
     encode_event,
     generate_report,
     seal_event,
+    verify_report,
     write_report_noreplace,
 )
 
@@ -75,6 +76,7 @@ def thresholds(*, minimum_samples: int = 5) -> dict[str, object]:
         "experiment_ids": ["synthetic-soak-001"],
         "required_provenance": PROVENANCE,
         "minimum_duration_seconds": 0.004,
+        "maximum_measurement_gap_seconds": 0.002,
         "metrics": metrics,
     }
 
@@ -325,6 +327,74 @@ class R4AEvidenceTests(unittest.TestCase):
         self.write_config(changed)
         with self.assertRaisesRegex(EvidenceError, "not bound"):
             build_report(self.events, self.config)
+
+    def test_metric_direction_is_fixed_by_the_r4a_schema(self) -> None:
+        inverted = thresholds()
+        inverted["metrics"]["capture_fps"]["direction"] = "max"
+        self.write_events(threshold_value=inverted)
+        self.write_config(inverted)
+        with self.assertRaisesRegex(EvidenceError, "direction must be min"):
+            build_report(self.events, self.config)
+
+    def test_measurement_gap_coverage_is_required(self) -> None:
+        config = thresholds()
+        previous = "0" * 64
+        records = []
+        for sequence, timestamp in enumerate(
+            (1_000_000, 2_000_000, 20_000_000, 21_000_000, 22_000_000),
+            start=1,
+        ):
+            record = event(
+                sequence,
+                previous,
+                threshold_value=config,
+                monotonic_ns=timestamp,
+            )
+            records.append(record)
+            previous = record["sha256"]
+        self.events.write_bytes(b"".join(encode_event(item) for item in records))
+        self.write_config(config)
+        report = build_report(self.events, self.config)
+        self.assertEqual(report["status"], "not_evaluable")
+        self.assertEqual(report["coverage"]["status"], "not_evaluable")
+
+    def test_each_metric_must_cover_each_experiment(self) -> None:
+        config = thresholds()
+        previous = "0" * 64
+        records = []
+        for sequence in range(1, 11):
+            values = (
+                measurements(sequence)
+                if sequence <= 5
+                else {"capture_fps": 60.0}
+            )
+            record = event(
+                sequence,
+                previous,
+                values=values,
+                threshold_value=config,
+            )
+            records.append(record)
+            previous = record["sha256"]
+        self.events.write_bytes(b"".join(encode_event(item) for item in records))
+        self.write_config(config)
+        report = build_report(self.events, self.config)
+        self.assertEqual(report["status"], "not_evaluable")
+        coverage = report["coverage"]["experiments"]["synthetic-soak-001"]
+        self.assertEqual(
+            coverage["metrics"]["cross_window_misroutes"]["status"],
+            "not_evaluable",
+        )
+        self.assertEqual(coverage["metrics"]["capture_fps"]["status"], "pass")
+
+    def test_verified_report_must_match_its_source_artifacts(self) -> None:
+        self.write_events()
+        self.write_config()
+        report = build_report(self.events, self.config)
+        verify_report(report, self.events, self.config)
+        report["metrics"]["capture_fps"]["p50"] = 999.0
+        with self.assertRaisesRegex(EvidenceError, "does not match"):
+            verify_report(report, self.events, self.config)
 
     def test_tampering_broken_links_and_unsafe_payloads_are_rejected(self) -> None:
         records = self.write_events()

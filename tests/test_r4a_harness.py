@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import threading
 import unittest
 from pathlib import Path
 
@@ -95,7 +96,13 @@ class FakeProvider:
     def __init__(self, clock: Clock) -> None:
         self.clock = clock
         self.safety = SessionSafety(True, True, True)
-        self.capabilities = InputCapabilities(True, True, True)
+        self.capabilities = InputCapabilities(
+            True,
+            True,
+            True,
+            automatic_release_deadline=True,
+            neutralizes_on_claim_end_or_expiry=True,
+        )
         self.claim_identity = IDENTITY
         self.capture_identity = IDENTITY
         self.source_sequence = 0
@@ -105,6 +112,9 @@ class FakeProvider:
         self.claimed = False
         self.token = ClaimToken("top-secret-fencing-token")
         self.cursor = (10.0, 10.0)
+        self.window_bounds = Rect(0, 0, 644, 484)
+        self.held_buttons: set[str] = set()
+        self.release_deadlines: dict[str, int] = {}
         self.renew_headroom_ns: int | None = None
 
     def _event(
@@ -167,6 +177,8 @@ class FakeProvider:
         if token != self.token:
             raise AssertionError("wrong fencing token")
         self.events.append(("release_claim", identity, token))
+        self.held_buttons.clear()
+        self.release_deadlines.clear()
         self.claimed = False
 
     def capture_exact_window(
@@ -181,7 +193,7 @@ class FakeProvider:
         return CapturePacket(
             self.frame_payload,
             self.capture_identity,
-            Rect(0, 0, 644, 484),
+            self.window_bounds,
             644,
             484,
             request,
@@ -205,10 +217,15 @@ class FakeProvider:
         button: str,
         x: float,
         y: float,
+        release_deadline_ns: int,
     ) -> InputAcknowledgement:
         self._event(f"down:{button}:{x}:{y}", identity, token)
         if "down" in self.fail:
             raise RuntimeError("forced down failure")
+        if type(release_deadline_ns) is not int or release_deadline_ns <= self.clock():
+            raise RuntimeError("invalid broker release deadline")
+        self.held_buttons.add(button)
+        self.release_deadlines[button] = release_deadline_ns
         return self._ack()
 
     def targeted_button_up(
@@ -219,16 +236,30 @@ class FakeProvider:
         x: float,
         y: float,
     ) -> InputAcknowledgement:
+        self.enforce_release_deadlines()
         self._event(f"up:{button}:{x}:{y}", identity, token)
         if "up" in self.fail:
             raise RuntimeError("forced up failure")
+        self.held_buttons.discard(button)
+        self.release_deadlines.pop(button, None)
         return self._ack()
 
     def release_all_buttons(
         self, identity: WindowIdentity, token: ClaimToken
     ) -> InputAcknowledgement:
         self._event("release_all", identity, token)
+        self.held_buttons.clear()
+        self.release_deadlines.clear()
         return self._ack()
+
+    def enforce_release_deadlines(self) -> None:
+        for button, deadline in tuple(self.release_deadlines.items()):
+            if self.clock() >= deadline:
+                self.held_buttons.discard(button)
+                self.release_deadlines.pop(button, None)
+                self.events.append(
+                    (f"auto_release:{button}", IDENTITY, self.token)
+                )
 
 
 def limits(**changes: object) -> HarnessLimits:
@@ -311,6 +342,21 @@ class HarnessTests(unittest.TestCase):
         )
         self.assertEqual(
             harness.executed_actions[-1].status, ExecutionStatus.REJECTED
+        )
+        self.assertFalse(provider.claimed)
+
+    def test_provider_without_broker_release_guarantees_is_input_ineligible(
+        self,
+    ) -> None:
+        harness, provider, _, _ = self.make()
+        provider.capabilities = InputCapabilities(True, True, True)
+        harness.open()
+        with self.assertRaisesRegex(
+            UnsupportedInputError, "broker release deadlines"
+        ):
+            harness.fire("weak", 50, 50)
+        self.assertFalse(
+            any(str(event[0]).startswith("down:") for event in provider.events)
         )
         self.assertFalse(provider.claimed)
 
@@ -398,6 +444,24 @@ class HarnessTests(unittest.TestCase):
         provider.source_sequence = 1
         provider.frame_payload = b"moved"
         clock.advance(50)
+        with self.assertRaisesRegex(GeometryError, "drifted"):
+            harness.capture()
+        self.assertFalse(provider.claimed)
+
+    def test_nonzero_absolute_origin_uses_window_local_bounds_and_drift_aborts(
+        self,
+    ) -> None:
+        clock = Clock()
+        provider = FakeProvider(clock)
+        provider.window_bounds = Rect(-1_920, 100, 644, 484)
+        harness, _, _, _ = self.make(provider=provider)
+        harness.open()
+        result = harness.fire("weak", 10, 10)
+        self.assertEqual((result.window_x, result.window_y), (12.0, 12.0))
+        provider.source_sequence = 1
+        provider.frame_payload = b"window-moved"
+        provider.window_bounds = Rect(-1_900, 100, 644, 484)
+        clock.advance(100)
         with self.assertRaisesRegex(GeometryError, "drifted"):
             harness.capture()
         self.assertFalse(provider.claimed)
@@ -643,7 +707,161 @@ class HarnessTests(unittest.TestCase):
         with self.assertRaises(CleanupError):
             harness.close()
         self.assertEqual(provider.events[-1][0], "release_claim")
-        self.assertFalse(harness.watchdog.buttons_neutral)
+        self.assertTrue(harness.watchdog.buttons_neutral)
+        self.assertFalse(provider.held_buttons)
+
+    def test_future_edge_and_cleanup_acknowledgments_fail_closed(self) -> None:
+        for edge in ("down", "up", "release_all"):
+            with self.subTest(edge=edge):
+                harness, provider, _, clock = self.make()
+                harness.open()
+
+                def future_ack() -> InputAcknowledgement:
+                    return InputAcknowledgement(clock() + 10, clock() + 20)
+
+                if edge == "down":
+                    def down(
+                        identity,
+                        token,
+                        button,
+                        x,
+                        y,
+                        release_deadline_ns,
+                    ):
+                        provider._event(
+                            f"down:{button}:{x}:{y}", identity, token
+                        )
+                        provider.held_buttons.add(button)
+                        return future_ack()
+
+                    provider.targeted_button_down = down  # type: ignore[method-assign]
+                    with self.assertRaisesRegex(ActionError, "future"):
+                        harness.fire("weak", 10, 10)
+                elif edge == "up":
+                    def up(identity, token, button, x, y):
+                        provider._event(f"up:{button}:{x}:{y}", identity, token)
+                        return future_ack()
+
+                    provider.targeted_button_up = up  # type: ignore[method-assign]
+                    with self.assertRaisesRegex(ActionError, "future"):
+                        harness.fire("weak", 10, 10)
+                else:
+                    def release_all(identity, token):
+                        provider._event("release_all", identity, token)
+                        return future_ack()
+
+                    provider.release_all_buttons = release_all  # type: ignore[method-assign]
+                    with self.assertRaises(CleanupError):
+                        harness.close()
+
+                self.assertFalse(provider.claimed)
+                self.assertFalse(provider.held_buttons)
+                self.assertTrue(harness.watchdog.buttons_neutral)
+
+    def test_concurrent_fire_is_serialized_at_pending_depth_one(self) -> None:
+        harness, provider, _, _ = self.make(config=limits(min_click_interval_ns=1))
+        harness.open()
+        entered_down = threading.Event()
+        continue_down = threading.Event()
+        original_down = provider.targeted_button_down
+
+        def blocked_down(*args, **kwargs):
+            entered_down.set()
+            self.assertTrue(continue_down.wait(timeout=2))
+            return original_down(*args, **kwargs)
+
+        provider.targeted_button_down = blocked_down  # type: ignore[method-assign]
+        results: list[object] = []
+        second_attempting = threading.Event()
+
+        def call_fire(kind: str, attempting: threading.Event | None = None) -> None:
+            if attempting is not None:
+                attempting.set()
+            try:
+                results.append(harness.fire(kind, 10, 10))
+            except Exception as exc:
+                results.append(exc)
+
+        first = threading.Thread(target=call_fire, args=("weak",))
+        second = threading.Thread(
+            target=call_fire, args=("strong", second_attempting)
+        )
+        first.start()
+        self.assertTrue(entered_down.wait(timeout=2))
+        second.start()
+        self.assertTrue(second_attempting.wait(timeout=2))
+        self.assertTrue(second.is_alive())
+        continue_down.set()
+        first.join(timeout=2)
+        second.join(timeout=2)
+        self.assertFalse(first.is_alive())
+        self.assertFalse(second.is_alive())
+        self.assertEqual(
+            sum(not isinstance(result, Exception) for result in results),
+            1,
+        )
+        self.assertEqual(
+            sum(
+                isinstance(result, ActionError)
+                and "pending-action depth" in str(result)
+                for result in results
+            ),
+            1,
+        )
+        self.assertEqual(
+            sum(
+                str(event[0]).startswith("down:")
+                for event in provider.events
+            ),
+            1,
+        )
+        self.assertLessEqual(harness.watchdog.pending_actions, 1)
+        self.assertFalse(provider.held_buttons)
+
+    def test_broker_deadline_neutralizes_oversleep_and_down_stall(self) -> None:
+        harness, provider, _, clock = self.make(
+            config=limits(lease_cleanup_margin_ns=100)
+        )
+        harness.open()
+
+        def oversleep(duration: int) -> None:
+            clock.advance(duration + 101)
+            provider.enforce_release_deadlines()
+
+        harness._sleep_ns = oversleep  # type: ignore[attr-defined]
+        with self.assertRaisesRegex(ActionError, "deadline elapsed"):
+            harness.fire("weak", 10, 10)
+        self.assertFalse(provider.held_buttons)
+        self.assertTrue(
+            any(str(event[0]).startswith("auto_release:") for event in provider.events)
+        )
+
+        harness, provider, _, clock = self.make(
+            config=limits(lease_cleanup_margin_ns=100)
+        )
+        harness.open()
+
+        def stalled_down(
+            identity,
+            token,
+            button,
+            x,
+            y,
+            release_deadline_ns,
+        ):
+            provider._event(f"down:{button}:{x}:{y}", identity, token)
+            injected = clock()
+            provider.held_buttons.add(button)
+            provider.release_deadlines[button] = release_deadline_ns
+            clock.advance(release_deadline_ns - clock() + 1)
+            provider.enforce_release_deadlines()
+            return InputAcknowledgement(injected, injected + 1)
+
+        provider.targeted_button_down = stalled_down  # type: ignore[method-assign]
+        with self.assertRaisesRegex(ActionError, "returned after"):
+            harness.fire("strong", 10, 10)
+        self.assertFalse(provider.held_buttons)
+        self.assertTrue(harness.watchdog.buttons_neutral)
 
     def test_renewal_must_preserve_identity_and_token(self) -> None:
         harness, provider, _, _ = self.make()

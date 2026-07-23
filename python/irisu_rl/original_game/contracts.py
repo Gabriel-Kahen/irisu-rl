@@ -7,15 +7,19 @@ import hashlib
 import json
 import math
 from pathlib import Path
+import re
 import tomllib
 from typing import Any, Mapping
 
-from .evidence import EvidenceError, validate_report
+from .evidence import EvidenceError, verify_report
 
 
 CONTRACT_SCHEMA = "original-game-deployment-contract-v2"
 EVIDENCE_SCHEMA = "r4a-deployment-measurements-v1"
 SEMANTIC_SHA256 = "8a56771aaa174d0eca7e0ebab21f3148417aa6f40e693e50524cdc17a5a5437d"
+PROVISIONAL_BASE_SHA256 = (
+    "16e8609045b7597796b3daf03aa131d9fa84af2823b2ffb25dcb11fd39800843"
+)
 EMPIRICAL_SECTIONS = (
     "wait_duration",
     "click_macro",
@@ -74,6 +78,7 @@ MINIMUM_IS_WORST = frozenset(
 )
 QUANTILES = ("p50", "p95", "p99", "worst")
 SHA256_LENGTH = 64
+TOML_KEY = re.compile(r"[A-Za-z0-9_-]+")
 TOP_LEVEL_FIELDS = {
     "contract_schema",
     "version",
@@ -182,7 +187,7 @@ def _string(value: object, where: str) -> str:
 
 
 def _sha256(value: object, where: str) -> str:
-    text = _string(value, where).lower()
+    text = _string(value, where)
     if len(text) != SHA256_LENGTH or any(c not in "0123456789abcdef" for c in text):
         raise ContractError(f"{where} must be a lowercase SHA-256")
     if text == "0" * SHA256_LENGTH:
@@ -275,7 +280,11 @@ def _validate_metric(metric: object, field: str, where: str) -> None:
 
 def canonical_json_sha256(value: object) -> str:
     payload = json.dumps(
-        value, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
     ).encode("ascii")
     return hashlib.sha256(payload).hexdigest()
 
@@ -288,7 +297,10 @@ def load_deployment_contract(path: Path) -> dict[str, Any]:
 
 
 def _validate_common(contract: Mapping[str, Any]) -> None:
-    measured = contract.get("measurement_status") == "measured"
+    measured = contract.get("measurement_status") in {
+        "measured",
+        "measured_pending_review",
+    }
     expected_top = set(TOP_LEVEL_FIELDS)
     if measured:
         expected_top.update(
@@ -336,6 +348,8 @@ def _validate_common(contract: Mapping[str, Any]) -> None:
             "exact_window_identity_required",
             "explicit_button_release_required",
             "atomic_click_provider_supported",
+            "broker_release_deadline_required",
+            "neutralize_on_claim_end_or_expiry_required",
             "fail_closed_on_crop_or_claim_drift",
         },
         "safety",
@@ -350,6 +364,10 @@ def _validate_common(contract: Mapping[str, Any]) -> None:
         raise ContractError("exact window identity must be required")
     if safety.get("atomic_click_provider_supported") is not False:
         raise ContractError("atomic-click-only providers must remain unsupported")
+    if safety.get("broker_release_deadline_required") is not True:
+        raise ContractError("broker-enforced release deadlines must be required")
+    if safety.get("neutralize_on_claim_end_or_expiry_required") is not True:
+        raise ContractError("claim end or expiry must neutralize held buttons")
     if safety.get("fail_closed_on_crop_or_claim_drift") is not True:
         raise ContractError("crop and claim drift must fail closed")
     click = _mapping(contract.get("click_macro"), "click_macro")
@@ -380,6 +398,17 @@ def _validate_common(contract: Mapping[str, Any]) -> None:
     )
     if evidence.get("raw_frames_allowed_in_git") is not False:
         raise ContractError("raw original-game frames must remain outside git")
+    expected_evidence = {
+        "measurement_schema": EVIDENCE_SCHEMA,
+        "soak_report_schema": "r4a-soak-report-v1",
+        "raw_frames_allowed_in_git": False,
+        "measured_values_require_positive_sample_count": True,
+        "measured_values_require_uncertainty": True,
+        "measured_values_require_artifact_hashes": True,
+    }
+    for key, expected in expected_evidence.items():
+        if evidence.get(key) != expected:
+            raise ContractError(f"evidence.{key} changed")
 
 
 def _validate_provisional(contract: Mapping[str, Any]) -> None:
@@ -408,11 +437,33 @@ def _validate_provisional(contract: Mapping[str, Any]) -> None:
 
 
 def _validate_measured(contract: Mapping[str, Any]) -> None:
-    if contract.get("live_deployment_enabled") is not True:
-        raise ContractError("measured contract must explicitly enable live deployment")
+    status = contract.get("measurement_status")
+    if status == "measured_pending_review":
+        if contract.get("live_deployment_enabled") is not False:
+            raise ContractError("unreviewed measurements must not enable deployment")
+        blockers = contract.get("live_deployment_blockers")
+        if blockers != ["measurement_bundle_requires_human_review"]:
+            raise ContractError("pending measurements require the review blocker")
+    elif contract.get("live_deployment_enabled") is not True:
+        raise ContractError("reviewed measured contract must enable live deployment")
+    elif contract.get("live_deployment_blockers") != []:
+        raise ContractError("reviewed measured contract must have no blockers")
     _sha256(contract.get("measurement_bundle_sha256"), "measurement_bundle_sha256")
     _sha256(contract.get("soak_report_sha256"), "soak_report_sha256")
     provenance = _mapping(contract.get("runtime_provenance"), "runtime_provenance")
+    _exact_keys(
+        provenance,
+        {
+            "game_executable_sha256",
+            "box2d_sha256",
+            "dxlib_sha256",
+            "game_config_sha256",
+            "measurement_tool_sha256",
+            "runtime",
+            "hardware_id",
+        },
+        "runtime_provenance",
+    )
     for key in (
         "game_executable_sha256",
         "box2d_sha256",
@@ -421,8 +472,8 @@ def _validate_measured(contract: Mapping[str, Any]) -> None:
         "measurement_tool_sha256",
     ):
         _sha256(provenance.get(key), f"runtime_provenance.{key}")
-    _string(provenance.get("runtime"), "runtime_provenance.runtime")
-    _string(provenance.get("hardware_id"), "runtime_provenance.hardware_id")
+    _safe_label(provenance.get("runtime"), "runtime_provenance.runtime")
+    _safe_label(provenance.get("hardware_id"), "runtime_provenance.hardware_id")
     for name in EMPIRICAL_SECTIONS:
         section = _mapping(contract.get(name), name)
         allowed = (
@@ -458,6 +509,11 @@ def _validate_measured(contract: Mapping[str, Any]) -> None:
     for section_name, fields in MEASUREMENT_FIELDS.items():
         section = _mapping(contract[section_name], section_name)
         measurements = _mapping(section.get("measurements"), f"{section_name}.measurements")
+        _exact_keys(
+            measurements,
+            set(fields),
+            f"{section_name}.measurements",
+        )
         for field in fields:
             _validate_metric(
                 measurements.get(field),
@@ -473,7 +529,7 @@ def _validate_measured(contract: Mapping[str, Any]) -> None:
         "preregistered_immaterial",
     }:
         raise ContractError("cursor.travel_model does not satisfy the fairness contract")
-    _string(cursor.get("quantization"), "cursor.quantization")
+    _safe_label(cursor.get("quantization"), "cursor.quantization")
     if cursor.get("path_logging") is not True:
         raise ContractError("cursor proposed/executed path logging must be enabled")
     if cursor.get("cursor_retention") not in {"retained", "measured_episode_reset"}:
@@ -487,6 +543,7 @@ def _validate_measured(contract: Mapping[str, Any]) -> None:
         "abstract_coordinate_fixed_rate": ("fixed_action_rate_hz",),
         "preregistered_immaterial": (),
     }[travel_model]
+    _exact_keys(cursor_measurements, set(cursor_fields), "cursor.measurements")
     for field in cursor_fields:
         _validate_metric(
             cursor_measurements.get(field),
@@ -501,8 +558,11 @@ def _validate_measured(contract: Mapping[str, Any]) -> None:
     if calibration.get("continuous_drift_check") is not True:
         raise ContractError("continuous coordinate drift checks must be enabled")
     click = _mapping(contract["click_macro"], "click_macro")
-    if click.get("input_provider_capability") != "targeted_explicit_down_up_release_all":
-        raise ContractError("measured click macro lacks explicit targeted down/up capability")
+    if (
+        click.get("input_provider_capability")
+        != "targeted_edges_broker_deadline_claim_neutralization"
+    ):
+        raise ContractError("measured click macro lacks broker-enforced release safety")
     if click.get("weak_button") != "left" or click.get("strong_button") != "right":
         raise ContractError("measured weak/strong button mapping is invalid")
 
@@ -512,15 +572,21 @@ def validate_deployment_contract(contract: Mapping[str, Any]) -> str:
     status = contract.get("measurement_status")
     if status == "provisional_unmeasured":
         _validate_provisional(contract)
-    elif status == "measured":
+    elif status in {"measured", "measured_pending_review"}:
         _validate_measured(contract)
     else:
-        raise ContractError("measurement_status must be provisional_unmeasured or measured")
+        raise ContractError(
+            "measurement_status must be provisional_unmeasured, "
+            "measured_pending_review, or measured"
+        )
     return str(status)
 
 
 def _validate_evidence(
-    evidence: Mapping[str, Any], soak_report: Mapping[str, Any]
+    evidence: Mapping[str, Any],
+    soak_report: Mapping[str, Any],
+    event_path: Path,
+    threshold_path: Path,
 ) -> str:
     _exact_keys(
         evidence,
@@ -529,6 +595,9 @@ def _validate_evidence(
             "contract_version",
             "status",
             "soak_experiment_ids",
+            "soak_event_stream_sha256",
+            "soak_threshold_config_sha256",
+            "soak_report_sha256",
             "provenance",
             "sections",
         },
@@ -541,14 +610,25 @@ def _validate_evidence(
     if evidence.get("status") != "measured":
         raise ContractError("evidence status must be measured")
     try:
-        soak_sha256 = validate_report(soak_report)
+        soak_sha256 = verify_report(soak_report, event_path, threshold_path)
     except EvidenceError as exc:
         raise ContractError(f"invalid soak report: {exc}") from exc
+    stream = _mapping(soak_report.get("event_stream"), "soak event_stream")
+    if evidence.get("soak_event_stream_sha256") != stream.get("sha256"):
+        raise ContractError("evidence does not bind the soak event stream")
+    if (
+        evidence.get("soak_threshold_config_sha256")
+        != soak_report.get("threshold_config_sha256")
+    ):
+        raise ContractError("evidence does not bind the soak threshold config")
+    if evidence.get("soak_report_sha256") != soak_sha256:
+        raise ContractError("evidence does not bind the verified soak report")
     soak_experiment_ids = _string_list(
         evidence.get("soak_experiment_ids"), "soak_experiment_ids"
     )
     if list(soak_experiment_ids) != soak_report["experiments"]["observed"]:
         raise ContractError("evidence soak experiments do not match the report")
+    soak_experiment_set = set(soak_experiment_ids)
     provenance = _mapping(evidence.get("provenance"), "provenance")
     _exact_keys(
         provenance,
@@ -609,17 +689,39 @@ def _validate_evidence(
             _safe_label(
                 experiment_id, f"sections.{name}.experiment_ids[{index}]"
             )
+            if experiment_id not in soak_experiment_set:
+                raise ContractError(
+                    f"sections.{name} cites an experiment absent from the soak"
+                )
         hashes = _string_list(section.get("artifact_sha256"), f"sections.{name}.artifact_sha256")
         for index, digest in enumerate(hashes):
             _sha256(digest, f"sections.{name}.artifact_sha256[{index}]")
+        required_artifacts = {
+            str(stream["sha256"]),
+            str(soak_report["threshold_config_sha256"]),
+            soak_sha256,
+        }
+        if not required_artifacts.issubset(hashes):
+            raise ContractError(
+                f"sections.{name}.artifact_sha256 is not bound to verified soak artifacts"
+            )
         if name in MEASUREMENT_FIELDS:
             measurements = _mapping(section.get("measurements"), f"sections.{name}.measurements")
+            _exact_keys(
+                measurements,
+                set(MEASUREMENT_FIELDS[name]),
+                f"sections.{name}.measurements",
+            )
             for field in MEASUREMENT_FIELDS[name]:
                 _validate_metric(
                     measurements.get(field),
                     field,
                     f"sections.{name}.measurements.{field}",
                 )
+                if measurements[field]["sample_count"] != section["sample_count"]:
+                    raise ContractError(
+                        f"sections.{name}.{field} sample count disagrees"
+                    )
 
     cursor = sections["cursor"]
     travel_model = cursor.get("travel_model")
@@ -629,7 +731,7 @@ def _validate_evidence(
         "preregistered_immaterial",
     }:
         raise ContractError("evidence cursor travel_model is not a legal fairness choice")
-    _string(cursor.get("quantization"), "sections.cursor.quantization")
+    _safe_label(cursor.get("quantization"), "sections.cursor.quantization")
     if cursor.get("path_logging") is not True:
         raise ContractError("evidence must enable proposed/executed cursor path logging")
     if cursor.get("cursor_retention") not in {"retained", "measured_episode_reset"}:
@@ -645,20 +747,26 @@ def _validate_evidence(
         "abstract_coordinate_fixed_rate": ("fixed_action_rate_hz",),
         "preregistered_immaterial": (),
     }[travel_model]
+    _exact_keys(cursor_measurements, set(cursor_fields), "sections.cursor.measurements")
     for field in cursor_fields:
         _validate_metric(
             cursor_measurements.get(field),
             field,
             f"sections.cursor.measurements.{field}",
         )
+        if cursor_measurements[field]["sample_count"] != cursor["sample_count"]:
+            raise ContractError(f"sections.cursor.{field} sample count disagrees")
     if travel_model == "preregistered_immaterial":
         _sha256(
             cursor.get("preregistration_sha256"),
             "sections.cursor.preregistration_sha256",
         )
     click = sections["click_macro"]
-    if click.get("input_provider_capability") != "targeted_explicit_down_up_release_all":
-        raise ContractError("evidence lacks explicit targeted down/up capability")
+    if (
+        click.get("input_provider_capability")
+        != "targeted_edges_broker_deadline_claim_neutralization"
+    ):
+        raise ContractError("evidence lacks broker-enforced release safety")
     if click.get("weak_button") != "left" or click.get("strong_button") != "right":
         raise ContractError("evidence weak/strong button mapping is invalid")
     coordinate = sections["coordinate_calibration"]
@@ -673,17 +781,25 @@ def finalize_deployment_contract(
     base: Mapping[str, Any],
     evidence: Mapping[str, Any],
     soak_report: Mapping[str, Any],
+    event_path: Path,
+    threshold_path: Path,
 ) -> dict[str, Any]:
     """Return a measured contract only after complete evidence validation."""
 
     validate_deployment_contract(base)
     if base.get("measurement_status") != "provisional_unmeasured":
         raise ContractError("only the provisional checked-in contract may be finalized")
-    soak_sha256 = _validate_evidence(evidence, soak_report)
+    if canonical_json_sha256(base) != PROVISIONAL_BASE_SHA256:
+        raise ContractError("base contract is not the checked provisional contract")
+    soak_sha256 = _validate_evidence(
+        evidence, soak_report, event_path, threshold_path
+    )
     result = deepcopy(dict(base))
-    result["measurement_status"] = "measured"
-    result["live_deployment_enabled"] = True
-    result["live_deployment_blockers"] = []
+    result["measurement_status"] = "measured_pending_review"
+    result["live_deployment_enabled"] = False
+    result["live_deployment_blockers"] = [
+        "measurement_bundle_requires_human_review"
+    ]
     result["measurement_bundle_sha256"] = canonical_json_sha256(evidence)
     result["soak_report_sha256"] = soak_sha256
     result["runtime_provenance"] = deepcopy(dict(evidence["provenance"]))
@@ -721,6 +837,9 @@ def render_toml(document: Mapping[str, Any]) -> str:
     lines: list[str] = []
 
     def emit(table: Mapping[str, Any], path: tuple[str, ...]) -> None:
+        for key in table:
+            if not isinstance(key, str) or TOML_KEY.fullmatch(key) is None:
+                raise ContractError(f"unsafe TOML key: {key!r}")
         scalars = [(key, value) for key, value in table.items() if not isinstance(value, Mapping)]
         children = [(key, value) for key, value in table.items() if isinstance(value, Mapping)]
         if path:

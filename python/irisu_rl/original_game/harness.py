@@ -15,6 +15,7 @@ from enum import Enum
 import hashlib
 import math
 from numbers import Real
+import threading
 import time
 from typing import Protocol, runtime_checkable
 
@@ -146,6 +147,8 @@ class InputCapabilities:
     explicit_button_up: bool
     release_all_buttons: bool
     atomic_click_only: bool = False
+    automatic_release_deadline: bool = False
+    neutralizes_on_claim_end_or_expiry: bool = False
 
     def __post_init__(self) -> None:
         if any(
@@ -155,6 +158,8 @@ class InputCapabilities:
                 self.explicit_button_up,
                 self.release_all_buttons,
                 self.atomic_click_only,
+                self.automatic_release_deadline,
+                self.neutralizes_on_claim_end_or_expiry,
             )
         ):
             raise TypeError("input capability flags must be booleans")
@@ -166,6 +171,8 @@ class InputCapabilities:
             and self.explicit_button_up
             and self.release_all_buttons
             and not self.atomic_click_only
+            and self.automatic_release_deadline
+            and self.neutralizes_on_claim_end_or_expiry
         )
 
 
@@ -371,7 +378,13 @@ class InputAcknowledgement:
 
 @runtime_checkable
 class HarnessProvider(Protocol):
-    """Strict live-I/O boundary. Tokens must be enforced on every operation."""
+    """Strict live-I/O boundary.
+
+    Tokens must be enforced on every operation.  A provider advertising safe
+    shots must neutralize a held button no later than ``release_deadline_ns``
+    even if the caller stalls, and must neutralize every button when the claim
+    is released or expires.
+    """
 
     def current_session_safety(self) -> SessionSafety: ...
 
@@ -404,6 +417,7 @@ class HarnessProvider(Protocol):
         button: str,
         x: float,
         y: float,
+        release_deadline_ns: int,
     ) -> InputAcknowledgement: ...
 
     def targeted_button_up(
@@ -523,6 +537,7 @@ class ExecutedAction:
     first_visible_ns: int | None = None
     effect_frame_sequence: int | None = None
     effect_detail: str = ""
+    release_deadline_ns: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -646,6 +661,7 @@ class OriginalGameHarness:
         self._last_click_ns: int | None = None
         self._proposed: list[ProposedAction] = []
         self._executed: list[ExecutedAction] = []
+        self._state_lock = threading.RLock()
 
     @property
     def proposed_actions(self) -> tuple[ProposedAction, ...]:
@@ -701,6 +717,10 @@ class OriginalGameHarness:
             self._reasons.append(text)
 
     def open(self) -> OriginalGameHarness:
+        with self._state_lock:
+            return self._open()
+
+    def _open(self) -> OriginalGameHarness:
         if self._lease is not None or self._stopped:
             raise HarnessError("harness cannot be opened in its current state")
         safety = self.provider.current_session_safety()
@@ -745,6 +765,10 @@ class OriginalGameHarness:
             raise
 
     def renew(self) -> None:
+        with self._state_lock:
+            self._renew()
+
+    def _renew(self) -> None:
         lease = self._require_active()
         try:
             if self._clock_ns() >= lease.expires_ns:
@@ -789,6 +813,11 @@ class OriginalGameHarness:
                     flags.add(FrameFlag.DROPPED)
             if geometry.crop.edge_drift(previous.geometry.crop) > self.limits.max_crop_drift_px:
                 flags.add(FrameFlag.GEOMETRY_DRIFT)
+            if (
+                packet.window_bounds.edge_drift(prior.window_bounds)
+                > self.limits.max_crop_drift_px
+            ):
+                flags.add(FrameFlag.GEOMETRY_DRIFT)
         if geometry.drifted:
             flags.add(FrameFlag.GEOMETRY_DRIFT)
         if (
@@ -819,6 +848,10 @@ class OriginalGameHarness:
             raise GeometryError("puzzle crop is outside captured pixels")
 
     def capture(self) -> FrameRecord:
+        with self._state_lock:
+            return self._capture()
+
+    def _capture(self) -> FrameRecord:
         lease = self._require_active()
         try:
             if self._clock_ns() >= lease.expires_ns:
@@ -871,7 +904,9 @@ class OriginalGameHarness:
         y_value = _finite(y, "window y")
         latest = self.buffer.latest
         bounds = latest.capture.window_bounds if latest is not None else None
-        if bounds is not None and not bounds.contains(x_value, y_value):
+        if bounds is not None and not (
+            0 <= x_value < bounds.width and 0 <= y_value < bounds.height
+        ):
             raise ActionError("window-local coordinate is out of bounds")
         return x_value, y_value
 
@@ -906,12 +941,19 @@ class OriginalGameHarness:
             raise ActionError("click-rate limit exceeded")
         return parsed, client_x, client_y
 
-    @staticmethod
-    def _validate_ack(request_ns: int, ack: InputAcknowledgement, edge: str) -> None:
+    def _validate_ack(
+        self, request_ns: int, ack: InputAcknowledgement, edge: str
+    ) -> int:
+        if not isinstance(ack, InputAcknowledgement):
+            raise ActionError(f"{edge} returned an invalid acknowledgment")
         if not ack.acknowledged:
             raise ActionError(f"{edge} was not acknowledged")
         if ack.injected_ns < request_ns:
             raise ActionError(f"{edge} acknowledgment predates its request")
+        post_return_ns = self._clock_ns()
+        if ack.acknowledged_ns > post_return_ns:
+            raise ActionError(f"{edge} acknowledgment is in the future")
+        return post_return_ns
 
     def _validate_cursor_travel(self, x: float, y: float, now_ns: int) -> None:
         if self.limits.cursor_mode != "bounded_speed":
@@ -950,6 +992,10 @@ class OriginalGameHarness:
         return renewed
 
     def fire(self, kind: ShotKind | str, x: object, y: object) -> ExecutedAction:
+        with self._state_lock:
+            return self._fire(kind, x, y)
+
+    def _fire(self, kind: ShotKind | str, x: object, y: object) -> ExecutedAction:
         lease = self._require_active()
         now_ns = self._clock_ns()
         self._action_sequence += 1
@@ -979,7 +1025,8 @@ class OriginalGameHarness:
         capabilities = self._capabilities
         if capabilities is None or not capabilities.supports_safe_shots:
             exc = UnsupportedInputError(
-                "provider lacks explicit down/up/release-all; atomic click is unsupported"
+                "provider lacks explicit down/up/release-all, broker release deadlines, "
+                "or claim-end neutralization; atomic click is unsupported"
             )
             self._executed.append(
                 ExecutedAction(proposed, ExecutionStatus.REJECTED, detail=str(exc))
@@ -1028,18 +1075,34 @@ class OriginalGameHarness:
                 )
             lease = self._lease_for_button_down(lease)
 
+            press_duration = self.limits.press_duration_ns
+            assert press_duration is not None
             down_request = self._clock_ns()
+            release_deadline_ns = (
+                down_request
+                + press_duration
+                + self.limits.lease_cleanup_margin_ns
+            )
+            if release_deadline_ns >= lease.expires_ns:
+                raise WindowIdentityError(
+                    "claim lacks broker release-deadline headroom"
+                )
             down = self.provider.targeted_button_down(
                 self.identity,
                 lease.token,
                 parsed.button,
                 window_x,
                 window_y,
+                release_deadline_ns,
             )
-            self._validate_ack(down_request, down, "button-down")
+            down_return_ns = self._validate_ack(
+                down_request, down, "button-down"
+            )
             self._buttons_neutral = False
-            press_duration = self.limits.press_duration_ns
-            assert press_duration is not None
+            if down_return_ns >= release_deadline_ns:
+                raise ActionError(
+                    "button-down returned after its automatic release deadline"
+                )
             if (
                 lease.expires_ns - down.acknowledged_ns
                 <= press_duration + self.limits.lease_cleanup_margin_ns
@@ -1049,6 +1112,10 @@ class OriginalGameHarness:
                 )
             self._sleep_ns(press_duration)
             up_request = self._clock_ns()
+            if up_request >= release_deadline_ns:
+                raise ActionError(
+                    "automatic release deadline elapsed before button-up"
+                )
             up = self.provider.targeted_button_up(
                 self.identity,
                 lease.token,
@@ -1059,14 +1126,17 @@ class OriginalGameHarness:
             self._validate_ack(up_request, up, "button-up")
             self._buttons_neutral = True
             completed = self._clock_ns()
+            if completed < up.acknowledged_ns:
+                raise ActionError("action completion predates button-up acknowledgment")
             result = ExecutedAction(
-                proposed,
-                ExecutionStatus.EXECUTED,
-                window_x,
-                window_y,
-                down,
-                up,
-                completed,
+                proposed=proposed,
+                status=ExecutionStatus.EXECUTED,
+                window_x=window_x,
+                window_y=window_y,
+                down=down,
+                up=up,
+                completed_ns=completed,
+                release_deadline_ns=release_deadline_ns,
             )
             self._executed.append(result)
             self._last_click_ns = up.acknowledged_ns
@@ -1083,6 +1153,11 @@ class OriginalGameHarness:
                     up=up,
                     completed_ns=self._clock_ns(),
                     detail=str(exc),
+                    release_deadline_ns=(
+                        release_deadline_ns
+                        if "release_deadline_ns" in locals()
+                        else None
+                    ),
                 )
             )
             self._abort(exc)
@@ -1100,6 +1175,24 @@ class OriginalGameHarness:
     ) -> ExecutedAction:
         """Resolve one executed shot from a later causal captured frame."""
 
+        with self._state_lock:
+            return self._record_action_effect(
+                action_sequence,
+                status,
+                frame_sequence=frame_sequence,
+                first_visible_ns=first_visible_ns,
+                detail=detail,
+            )
+
+    def _record_action_effect(
+        self,
+        action_sequence: int,
+        status: EffectStatus | str,
+        *,
+        frame_sequence: int | None = None,
+        first_visible_ns: int | None = None,
+        detail: str = "",
+    ) -> ExecutedAction:
         self._require_active()
         try:
             if type(action_sequence) is not int or action_sequence < 1:
@@ -1214,16 +1307,28 @@ class OriginalGameHarness:
             self._buttons_neutral = False
             self._cleanup_errors.append(f"release_all_buttons: {exc}")
         finally:
+            claim_released = False
             try:
                 self.provider.release_exact_window_claim(
                     self.identity, lease.token
                 )
+                claim_released = True
             except Exception as exc:
                 self._cleanup_errors.append(f"release_exact_window_claim: {exc}")
             finally:
+                if (
+                    claim_released
+                    and self._capabilities is not None
+                    and self._capabilities.neutralizes_on_claim_end_or_expiry
+                ):
+                    self._buttons_neutral = True
                 self._lease = None
 
     def close(self) -> None:
+        with self._state_lock:
+            self._close()
+
+    def _close(self) -> None:
         if not self._stopped:
             self._cleanup()
         if self._cleanup_errors:
