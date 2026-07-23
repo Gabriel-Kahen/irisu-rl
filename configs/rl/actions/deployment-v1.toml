@@ -1,5 +1,15 @@
+contract_schema = "original-game-deployment-contract-v2"
 version = "deployment-v1"
 sha256 = "8a56771aaa174d0eca7e0ebab21f3148417aa6f40e693e50524cdc17a5a5437d"
+measurement_status = "provisional_unmeasured"
+live_deployment_enabled = false
+live_deployment_blockers = [
+  "explicit_targeted_button_down_up_unavailable",
+  "broker_release_guarantees_unavailable",
+  "production_cadence_soak_not_run",
+  "2d_click_sweep_not_run",
+  "cursor_fairness_protocol_not_frozen",
+]
 semantic_kinds = ["WAIT", "FIRE_WEAK", "FIRE_STRONG"]
 wait_min_ticks = 1
 wait_max_ticks = 100
@@ -13,7 +23,9 @@ client_height = 480.0
 allow_both = false
 
 [wait_duration]
-status = "provisional"
+status = "unmeasured"
+simulator_default_min_ticks = 1
+simulator_default_max_ticks = 100
 owner = "R4 input-rate and polling calibration"
 evidence = "development hypothesis from RL.md; not measured in the original game"
 decision_deadline = "before bulk transfer-oriented training"
@@ -21,36 +33,55 @@ decision_deadline = "before bulk transfer-oriented training"
 [click_macro]
 press_ticks = 1
 release_ticks = 1
-status = "provisional"
+status = "unmeasured"
 owner = "R4 original-game input calibration"
 evidence = "none; smoke-only simulator default"
 decision_deadline = "before bulk transfer-oriented training"
 
 [cursor]
-travel_model = "teleport"
-quantization = "none"
-status = "provisional"
+status = "unmeasured"
+simulator_default_travel_model = "teleport"
 owner = "R4 coordinate/input bridge calibration"
 evidence = "none; smoke-only simulator default"
 decision_deadline = "before scripted-policy transfer gate"
 
 [capture]
-frame_rate = 0.0
-latency_seconds = 0.0
-status = "provisional placeholder; zero is not a measured training value"
+status = "unmeasured"
 owner = "R4 capture/perception calibration"
 evidence = "none"
 decision_deadline = "before actor-vision sim oracle training"
 
 [effect_timing]
-game_poll_latency_seconds = 0.0
-uncertainty_seconds = 0.0
-status = "provisional placeholder; zero is not a measured training value"
+status = "unmeasured"
 owner = "R4 input bridge calibration"
 evidence = "none"
 decision_deadline = "before scripted-policy transfer gate"
+
+[coordinate_calibration]
+status = "unmeasured"
+owner = "R4 crop and coordinate calibration"
+evidence = "none"
+decision_deadline = "before any live gameplay input"
 
 [fairness]
 fast_forward = false
 simultaneous_buttons = false
 status = "fixed for smoke; must match locked human protocol"
+
+[safety]
+maximum_pending_actions = 1
+claim_required = true
+exact_window_identity_required = true
+explicit_button_release_required = true
+atomic_click_provider_supported = false
+broker_release_deadline_required = true
+neutralize_on_claim_end_or_expiry_required = true
+fail_closed_on_crop_or_claim_drift = true
+
+[evidence]
+measurement_schema = "r4a-deployment-measurements-v1"
+soak_report_schema = "r4a-soak-report-v1"
+raw_frames_allowed_in_git = false
+measured_values_require_positive_sample_count = true
+measured_values_require_uncertainty = true
+measured_values_require_artifact_hashes = true
