@@ -467,6 +467,7 @@ class BrokerHarnessProvider:
                 "executable_sha256",
                 "runtime_sha256",
                 "wine_executable_sha256",
+                "wine_prefix_sha256",
             },
             "target runtime descriptor",
         )
@@ -503,6 +504,11 @@ class BrokerHarnessProvider:
                     _text(
                         target["wine_executable_sha256"],
                         "target Wine SHA-256",
+                        maximum=64,
+                    ),
+                    _text(
+                        target["wine_prefix_sha256"],
+                        "target Wine-prefix SHA-256",
                         maximum=64,
                     ),
                 ),
@@ -586,12 +592,17 @@ class BrokerHarnessProvider:
         launch_nonce: str,
         executable_sha256: str,
         runtime_sha256: str,
+        wine_prefix_sha256: str,
     ) -> TargetRuntimeDescriptor:
         """Resolve exactly one broker-observed process launched with a secret nonce."""
 
         nonce = _text(launch_nonce, "launch nonce", maximum=128)
         if len(nonce) < 32:
             raise BrokerError("launch nonce is too short")
+        expected_prefix = _sha256(
+            wine_prefix_sha256,
+            "Wine-prefix SHA-256",
+        )
         result = _exact(
             self._transport.call(
                 "discover_target",
@@ -599,6 +610,7 @@ class BrokerHarnessProvider:
                     "launch_nonce": nonce,
                     "executable_sha256": executable_sha256,
                     "runtime_sha256": runtime_sha256,
+                    "wine_prefix_sha256": expected_prefix,
                 },
             ),
             {"match_count", "target", "broker_instance"},
@@ -618,6 +630,7 @@ class BrokerHarnessProvider:
                 "executable_sha256",
                 "runtime_sha256",
                 "wine_executable_sha256",
+                "wine_prefix_sha256",
             },
             "discovered target",
         )
@@ -635,10 +648,16 @@ class BrokerHarnessProvider:
             _text(target["executable_sha256"], "target executable SHA-256", maximum=64),
             _text(target["runtime_sha256"], "target runtime SHA-256", maximum=64),
             _text(target["wine_executable_sha256"], "target Wine SHA-256", maximum=64),
+            _text(
+                target["wine_prefix_sha256"],
+                "target Wine-prefix SHA-256",
+                maximum=64,
+            ),
         )
         if (
             descriptor.executable_sha256 != executable_sha256
             or descriptor.runtime_sha256 != runtime_sha256
+            or descriptor.wine_prefix_sha256 != expected_prefix
             or descriptor.launch_nonce_sha256
             != hashlib.sha256(nonce.encode("utf-8")).hexdigest()
         ):
@@ -680,6 +699,10 @@ class BrokerHarnessProvider:
     def renew_exact_window_claim(
         self, identity: WindowIdentity, token: ClaimToken, lease_seconds: int
     ) -> ClaimLease:
+        try:
+            previous = self._bindings[token]
+        except KeyError as exc:
+            raise BrokerError("claim binding is unavailable") from exc
         result = self._transport.call(
             "renew",
             {
@@ -689,10 +712,18 @@ class BrokerHarnessProvider:
             },
         )
         lease, raw_token = self._lease(result, token)
-        if raw_token != self._token(token):
-            raise BrokerError("claim renewal changed its fencing token")
-        if lease.broker_instance != self.broker_instance_id:
-            raise BrokerError("claim renewal changed broker instance")
+        if (
+            raw_token != self._token(token)
+            or identity != previous.identity
+            or lease.identity != previous.identity
+            or lease.token != previous.token
+            or lease.generation != previous.generation
+            or lease.broker_instance != previous.broker_instance
+            or lease.broker_instance != self.broker_instance_id
+            or lease.target != previous.target
+            or lease.expires_ns <= previous.expires_ns
+        ):
+            raise BrokerError("claim renewal changed an immutable binding")
         self._bindings[token] = lease
         return lease
 
@@ -753,6 +784,19 @@ class BrokerHarnessProvider:
             raise BrokerError("capture pixels are not canonical base64") from exc
         if not pixels or len(pixels) > MAX_FRAME_BYTES:
             raise BrokerError("capture payload size is invalid")
+        pixel_width = _integer(result["pixel_width"], "pixel width", minimum=1)
+        pixel_height = _integer(result["pixel_height"], "pixel height", minimum=1)
+        color_format = _text(result["color_format"], "color format", maximum=32)
+        if color_format != "bgra8":
+            raise BrokerError("capture must use tightly packed bgra8 pixels")
+        expected_size = pixel_width * pixel_height * 4
+        if expected_size > MAX_FRAME_BYTES or len(pixels) != expected_size:
+            raise BrokerError("capture byte length disagrees with its dimensions")
+        expected_pixel_sha256 = _sha256(
+            result["canonical_pixel_sha256"], "canonical pixel SHA-256"
+        )
+        if hashlib.sha256(pixels).hexdigest() != expected_pixel_sha256:
+            raise BrokerError("capture pixel SHA-256 does not match its payload")
         bounds = _exact(
             result["window_bounds"], {"x", "y", "width", "height"}, "bounds"
         )
@@ -767,15 +811,15 @@ class BrokerHarnessProvider:
                     for key in ("x", "y", "width", "height")
                 )
             ),
-            _integer(result["pixel_width"], "pixel width", minimum=1),
-            _integer(result["pixel_height"], "pixel height", minimum=1),
+            pixel_width,
+            pixel_height,
             _integer(result["request_ns"], "request_ns"),
             _integer(result["start_ns"], "start_ns"),
             _integer(result["completion_ns"], "completion_ns"),
             None if presentation is None else _integer(presentation, "presentation_ns"),
             None if sequence is None else _integer(sequence, "source_sequence"),
-            _text(result["color_format"], "color format", maximum=32),
-            _sha256(result["canonical_pixel_sha256"], "canonical pixel SHA-256"),
+            color_format,
+            expected_pixel_sha256,
         )
 
     def current_cursor(
@@ -807,9 +851,16 @@ class BrokerHarnessProvider:
         x: float,
         y: float,
         release_deadline_ns: int | None = None,
+        latest_injection_ns: int | None = None,
     ) -> InputAcknowledgement:
         if button not in BUTTONS:
             raise BrokerError("only left/right buttons are legal")
+        if method == "button_down" and (
+            release_deadline_ns is None or latest_injection_ns is None
+        ):
+            raise BrokerError(
+                "button-down requires release and latest-injection deadlines"
+            )
         self._operation_id += 1
         operation_id = self._operation_id
         generation = self._claim_generation(token)
@@ -824,6 +875,10 @@ class BrokerHarnessProvider:
         if release_deadline_ns is not None:
             params["release_deadline_ns"] = _integer(
                 release_deadline_ns, "release deadline", minimum=1
+            )
+        if latest_injection_ns is not None:
+            params["latest_injection_ns"] = _integer(
+                latest_injection_ns, "latest injection time", minimum=1
             )
         state = "down" if method == "button_down" else "up"
         deadline = release_deadline_ns
@@ -845,6 +900,11 @@ class BrokerHarnessProvider:
         )
         if method == "button_down":
             assert release_deadline_ns is not None
+            assert latest_injection_ns is not None
+            if ack.injected_ns > latest_injection_ns:
+                raise BrokerError(
+                    "broker injected button-down after its freshness deadline"
+                )
             self._release_deadlines[(token, button)] = release_deadline_ns
         else:
             del self._release_deadlines[(token, button)]
@@ -869,9 +929,17 @@ class BrokerHarnessProvider:
         x: float,
         y: float,
         release_deadline_ns: int,
+        latest_injection_ns: int,
     ) -> InputAcknowledgement:
         return self._edge(
-            "button_down", identity, token, button, x, y, release_deadline_ns
+            "button_down",
+            identity,
+            token,
+            button,
+            x,
+            y,
+            release_deadline_ns,
+            latest_injection_ns,
         )
 
     def targeted_button_up(

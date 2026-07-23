@@ -115,6 +115,7 @@ class TargetRuntimeDescriptor:
     executable_sha256: str
     runtime_sha256: str
     wine_executable_sha256: str
+    wine_prefix_sha256: str
 
     def __post_init__(self) -> None:
         if not isinstance(self.identity, WindowIdentity):
@@ -127,6 +128,7 @@ class TargetRuntimeDescriptor:
         _sha256(self.executable_sha256, "target executable SHA-256")
         _sha256(self.runtime_sha256, "target runtime SHA-256")
         _sha256(self.wine_executable_sha256, "target Wine SHA-256")
+        _sha256(self.wine_prefix_sha256, "target Wine-prefix SHA-256")
 
 
 class ClaimToken:
@@ -264,6 +266,7 @@ class Rect:
             for value, name in zip(
                 (self.x, self.y, self.width, self.height),
                 ("rect.x", "rect.y", "rect.width", "rect.height"),
+                strict=True,
             )
         )
         if values[2] <= 0 or values[3] <= 0:
@@ -380,6 +383,19 @@ class TimingObserver(Protocol):
     """Optional boundary for a causal estimator in ``timing.py``."""
 
     def observe_frame(self, frame: FrameRecord) -> None: ...
+
+
+@runtime_checkable
+class RuntimeGuard(Protocol):
+    """Launcher-owned runtime and exact process-generation guard."""
+
+    def verify_runtime_unchanged(self) -> None: ...
+
+    def verify_input_environment_unchanged(self) -> None: ...
+
+    def verify_target_binding(
+        self, process_id: int, process_start_ticks: int
+    ) -> None: ...
 
 
 class ScreenState(str, Enum):
@@ -531,6 +547,7 @@ class HarnessProvider(Protocol):
         x: float,
         y: float,
         release_deadline_ns: int,
+        latest_injection_ns: int,
     ) -> InputAcknowledgement: ...
 
     def targeted_button_up(
@@ -668,6 +685,7 @@ class HarnessLimits:
     min_screen_confidence: float = 0.95
     max_crop_drift_px: float = 1.0
     press_duration_ns: int | None = None
+    max_press_duration_error_ns: int = 5_000_000
     min_click_interval_ns: int | None = None
     lease_cleanup_margin_ns: int = 100_000_000
     cursor_mode: str = "unsupported"
@@ -681,6 +699,7 @@ class HarnessLimits:
             "stale_after_ns",
             "max_transform_age_ns",
             "lease_cleanup_margin_ns",
+            "max_press_duration_error_ns",
         ):
             if type(getattr(self, name)) is not int or getattr(self, name) < 1:
                 raise ValueError(f"{name} must be a positive integer")
@@ -750,15 +769,19 @@ class OriginalGameHarness:
         clock_ns: Callable[[], int] = time.monotonic_ns,
         sleep_ns: Callable[[int], None] | None = None,
         timing_observer: TimingObserver | None = None,
+        runtime_guard: RuntimeGuard | None = None,
     ) -> None:
         self.provider = provider
         self.identity = identity
         self.geometry = geometry
         self.screen_classifier = screen_classifier
         self.limits = limits or HarnessLimits()
+        if runtime_guard is not None and not isinstance(runtime_guard, RuntimeGuard):
+            raise TypeError("runtime guard does not implement the required protocol")
         self._clock_ns = clock_ns
         self._sleep_ns = sleep_ns or (lambda duration: time.sleep(duration / 1e9))
         self._timing_observer = timing_observer
+        self._runtime_guard = runtime_guard
         self.buffer = BoundedFrameBuffer(self.limits.frame_buffer_capacity)
         self._lease: ClaimLease | None = None
         self._target: TargetRuntimeDescriptor | None = None
@@ -790,6 +813,34 @@ class OriginalGameHarness:
     @property
     def target_descriptor(self) -> TargetRuntimeDescriptor | None:
         return self._target
+
+    def verify_runtime_unchanged(self) -> None:
+        """Re-attest the disposable runtime or fail if no guard was installed."""
+
+        if self._runtime_guard is None:
+            raise SafetyError("live runtime re-attestation is not configured")
+        self._runtime_guard.verify_runtime_unchanged()
+        if self._target is not None:
+            self._runtime_guard.verify_target_binding(
+                self._target.process_id,
+                self._target.process_start_ticks,
+            )
+
+    def _verify_runtime_if_configured(self) -> None:
+        if self._runtime_guard is not None:
+            self.verify_runtime_unchanged()
+
+    def verify_input_environment_unchanged(self) -> None:
+        """Re-attest Wine-prefix state used to interpret the next input."""
+
+        if self._runtime_guard is None:
+            raise SafetyError("live input-environment attestation is not configured")
+        self._runtime_guard.verify_input_environment_unchanged()
+        if self._target is not None:
+            self._runtime_guard.verify_target_binding(
+                self._target.process_id,
+                self._target.process_start_ticks,
+            )
 
     @property
     def _pending_effects(self) -> int:
@@ -905,6 +956,10 @@ class OriginalGameHarness:
         if not safety.ready:
             raise SafetyError(safety.detail or "current session is unsafe")
         self._capabilities = self.provider.input_capabilities()
+        if self._capabilities.supports_safe_shots and self._runtime_guard is None:
+            raise SafetyError(
+                "safe live input requires runtime and Wine-prefix re-attestation"
+            )
         try:
             lease = self.provider.claim_exact_window(
                 self.identity, self.limits.lease_seconds
@@ -981,15 +1036,25 @@ class OriginalGameHarness:
         flags: set[FrameFlag] = set()
         dropped = 0
         previous = self.buffer.latest
-        if now_ns - packet.completion_ns > self.limits.stale_after_ns:
+        observed_ns = (
+            packet.presentation_ns
+            if packet.presentation_ns is not None
+            else packet.completion_ns
+        )
+        if now_ns - observed_ns > self.limits.stale_after_ns:
             flags.add(FrameFlag.STALE)
-        if packet.completion_ns > now_ns:
+        if observed_ns > now_ns:
             flags.add(FrameFlag.OUT_OF_ORDER)
         if previous is not None:
             prior = previous.capture
+            prior_observed_ns = (
+                prior.presentation_ns
+                if prior.presentation_ns is not None
+                else prior.completion_ns
+            )
             if packet.sha256 == prior.sha256:
                 flags.add(FrameFlag.DUPLICATE)
-            if packet.completion_ns <= prior.completion_ns:
+            if observed_ns <= prior_observed_ns:
                 flags.add(FrameFlag.OUT_OF_ORDER)
             if packet.source_sequence is not None and prior.source_sequence is not None:
                 if packet.source_sequence <= prior.source_sequence:
@@ -1043,6 +1108,7 @@ class OriginalGameHarness:
     def _capture(self) -> FrameRecord:
         lease = self._require_active()
         try:
+            self._verify_runtime_if_configured()
             if self._clock_ns() >= lease.expires_ns:
                 raise WindowIdentityError("window claim expired before capture")
             safety = self.provider.current_session_safety()
@@ -1051,6 +1117,7 @@ class OriginalGameHarness:
             capture_request_ns = self._clock_ns()
             self._ensure_lease_live(lease, capture_request_ns, "capture")
             packet = self.provider.capture_exact_window(self.identity, lease.token)
+            self._verify_runtime_if_configured()
             if packet.identity != self.identity:
                 raise WindowIdentityError("capture identity changed")
             now_ns = self._clock_ns()
@@ -1062,6 +1129,19 @@ class OriginalGameHarness:
                 "capture",
             )
             self._ensure_lease_live(lease, now_ns, "capture")
+            if (
+                self._capabilities is not None
+                and self._capabilities.supports_safe_shots
+                and (
+                    packet.presentation_ns is None
+                    or packet.source_sequence is None
+                    or packet.canonical_pixel_sha256 is None
+                )
+            ):
+                raise FrameError(
+                    "live-qualified capture lacks presentation, source sequence, "
+                    "or canonical pixel identity"
+                )
             assessment = self.geometry.assess(packet, now_ns)
             self._validate_geometry(assessment, packet)
             screen = self.screen_classifier.classify(packet, assessment)
@@ -1150,6 +1230,7 @@ class OriginalGameHarness:
         button: str,
         button_state: str,
         release_deadline_ns: int | None,
+        latest_injection_ns: int | None = None,
     ) -> int:
         if not isinstance(ack, InputAcknowledgement):
             raise ActionError(f"{edge} returned an invalid acknowledgment")
@@ -1170,6 +1251,10 @@ class OriginalGameHarness:
             and ack.button_state == button_state
             and ack.accepted_release_deadline_ns == release_deadline_ns
             and ack.clock_domain == MONOTONIC_CLOCK_DOMAIN
+            and (
+                latest_injection_ns is None
+                or ack.injected_ns <= latest_injection_ns
+            )
         )
         if not expected:
             raise ActionError(
@@ -1196,7 +1281,7 @@ class OriginalGameHarness:
         press_duration = self.limits.press_duration_ns
         if press_duration is None:
             raise UnsupportedInputError("measured press duration is not configured")
-        required = press_duration + self.limits.lease_cleanup_margin_ns
+        required = press_duration + 2 * self.limits.lease_cleanup_margin_ns
         if lease.expires_ns - self._clock_ns() > required:
             return lease
         renewed = self.provider.renew_exact_window_claim(
@@ -1245,8 +1330,8 @@ class OriginalGameHarness:
         capabilities = self._capabilities
         if capabilities is None or not capabilities.supports_safe_shots:
             exc = UnsupportedInputError(
-                "provider lacks explicit down/up/release-all, broker release deadlines, "
-                "or claim-end neutralization; atomic click is unsupported"
+                "provider lacks explicit down/up/release-all, broker release "
+                "deadlines, or claim-end neutralization; atomic click is unsupported"
             )
             self._executed.append(
                 ExecutedAction(proposed, ExecutionStatus.REJECTED, detail=str(exc))
@@ -1271,7 +1356,12 @@ class OriginalGameHarness:
                 raise FrameError("no current usable capture")
             if now_ns >= lease.expires_ns:
                 raise WindowIdentityError("window claim expired")
-            if now_ns - frame.capture.completion_ns > self.limits.stale_after_ns:
+            observed_ns = (
+                frame.capture.presentation_ns
+                if frame.capture.presentation_ns is not None
+                else frame.capture.completion_ns
+            )
+            if now_ns - observed_ns > self.limits.stale_after_ns:
                 raise FrameError("latest capture became stale before input")
             self._validate_geometry(frame.geometry, frame.capture)
             window_x, window_y = self.geometry.client_to_window(
@@ -1279,21 +1369,29 @@ class OriginalGameHarness:
             )
             window_x, window_y = self._validate_window_point(window_x, window_y)
             self._validate_cursor_travel(window_x, window_y, now_ns)
-            pre_down_ns = self._clock_ns()
-            if pre_down_ns - frame.capture.completion_ns > self.limits.stale_after_ns:
-                raise FrameError("latest capture became stale before button-down")
+            lease = self._lease_for_button_down(lease)
+            press_duration = self.limits.press_duration_ns
+            assert press_duration is not None
+            self._verify_runtime_if_configured()
+            if self._runtime_guard is not None:
+                self.verify_input_environment_unchanged()
             safety = self.provider.current_session_safety()
             if not safety.ready:
                 raise SafetyError(
                     safety.detail or "current session became unsafe before button-down"
                 )
-            lease = self._lease_for_button_down(lease)
-
-            press_duration = self.limits.press_duration_ns
-            assert press_duration is not None
             down_request = self._clock_ns()
+            latest_injection_ns = min(
+                observed_ns + self.limits.stale_after_ns,
+                down_request + self.limits.lease_cleanup_margin_ns,
+            )
+            if down_request >= latest_injection_ns:
+                raise FrameError("latest capture became stale before button-down")
+            self._ensure_lease_live(lease, down_request, "button-down request")
             release_deadline_ns = (
-                down_request + press_duration + self.limits.lease_cleanup_margin_ns
+                latest_injection_ns
+                + press_duration
+                + self.limits.lease_cleanup_margin_ns
             )
             if release_deadline_ns >= lease.expires_ns:
                 raise WindowIdentityError(
@@ -1306,6 +1404,7 @@ class OriginalGameHarness:
                 window_x,
                 window_y,
                 release_deadline_ns,
+                latest_injection_ns,
             )
             down_return_ns = self._validate_ack(
                 down_request,
@@ -1315,6 +1414,7 @@ class OriginalGameHarness:
                 button=parsed.button,
                 button_state="down",
                 release_deadline_ns=release_deadline_ns,
+                latest_injection_ns=latest_injection_ns,
             )
             self._buttons_neutral = False
             if down_return_ns >= release_deadline_ns:
@@ -1329,7 +1429,10 @@ class OriginalGameHarness:
                 raise WindowIdentityError(
                     "button-down acknowledgment consumed lease cleanup headroom"
                 )
-            self._sleep_ns(press_duration)
+            target_up_ns = down.injected_ns + press_duration
+            remaining_ns = target_up_ns - self._clock_ns()
+            if remaining_ns > 0:
+                self._sleep_ns(remaining_ns)
             up_request = self._clock_ns()
             if up_request >= release_deadline_ns:
                 raise ActionError("automatic release deadline elapsed before button-up")
@@ -1349,6 +1452,9 @@ class OriginalGameHarness:
                 button_state="up",
                 release_deadline_ns=release_deadline_ns,
             )
+            self._verify_runtime_if_configured()
+            if self._runtime_guard is not None:
+                self.verify_input_environment_unchanged()
             if (
                 up.acknowledged_ns >= release_deadline_ns
                 or up_return_ns >= release_deadline_ns
@@ -1357,6 +1463,14 @@ class OriginalGameHarness:
                     "button-up returned after its automatic release deadline"
                 )
             self._ensure_lease_live(lease, up_return_ns, "button-up")
+            actual_press_ns = up.injected_ns - down.injected_ns
+            if (
+                abs(actual_press_ns - press_duration)
+                > self.limits.max_press_duration_error_ns
+            ):
+                raise ActionError(
+                    "observed press duration exceeds the configured timing error"
+                )
             self._buttons_neutral = True
             completed = up_return_ns
             if completed < up.acknowledged_ns:

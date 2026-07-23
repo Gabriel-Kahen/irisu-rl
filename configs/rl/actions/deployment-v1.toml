@@ -80,8 +80,8 @@ neutralize_on_claim_end_or_expiry_required = true
 fail_closed_on_crop_or_claim_drift = true
 
 [evidence]
-measurement_schema = "r4a-deployment-measurements-v1"
-soak_report_schema = "r4a-soak-report-v1"
+measurement_schema = "r4b-deployment-measurements-v2"
+soak_report_schema = "r4a-soak-report-v2"
 raw_frames_allowed_in_git = false
 measured_values_require_positive_sample_count = true
 measured_values_require_uncertainty = true

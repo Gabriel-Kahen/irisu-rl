@@ -22,8 +22,9 @@ from .runtime import (
     verify_attestation_unchanged,
 )
 
-PREFLIGHT_SCHEMA = "r4b-provider-preflight-v1"
+PREFLIGHT_SCHEMA = "r4b-provider-preflight-v2"
 CAPABILITY_NAME = "targeted_edges_broker_deadline_claim_neutralization"
+MAX_PREFLIGHT_PRESENTATION_AGE_NS = 100_000_000
 
 
 class OperationalError(RuntimeError):
@@ -81,6 +82,7 @@ def run_capture_preflight(
     clock_ns: Callable[[], int] = time.monotonic_ns,
     lease_seconds: int = 30,
     launch_nonce_sha256: str,
+    wine_prefix_sha256: str,
 ) -> dict[str, Any]:
     """Capture once under an exact claim and report input eligibility.
 
@@ -119,6 +121,7 @@ def run_capture_preflight(
             != attestation.runtime_sha256["game_executable_sha256"]
             or lease.target.runtime_sha256 != attestation.runtime_identity_sha256
             or lease.target.wine_executable_sha256 != CANONICAL_WINE_SHA256
+            or lease.target.wine_prefix_sha256 != wine_prefix_sha256
             or lease.target.launch_nonce_sha256 != launch_nonce_sha256
             or lease.target.process_start_ticks
             != _process_start_ticks(lease.target.process_id)
@@ -159,7 +162,18 @@ def run_capture_preflight(
         ):
             raise OperationalError("cursor is outside the claimed window")
         verify_attestation_unchanged(attestation, repo_root, run_dir)
-        eligible = safety.ready and capabilities.supports_safe_shots
+        continuous_capture_ready = (
+            packet.presentation_ns is not None
+            and packet.source_sequence is not None
+            and packet.canonical_pixel_sha256 is not None
+            and capture_after - packet.presentation_ns
+            <= MAX_PREFLIGHT_PRESENTATION_AGE_NS
+        )
+        eligible = (
+            safety.ready
+            and capabilities.supports_safe_shots
+            and continuous_capture_ready
+        )
         blockers: list[str] = []
         if not safety.targeted_input_safe:
             blockers.append("targeted_input_not_safe")
@@ -175,6 +189,14 @@ def run_capture_preflight(
             blockers.append("broker_release_deadline_unavailable")
         if not capabilities.neutralizes_on_claim_end_or_expiry:
             blockers.append("claim_neutralization_unavailable")
+        if (
+            packet.presentation_ns is None
+            or packet.source_sequence is None
+            or packet.canonical_pixel_sha256 is None
+        ):
+            blockers.append("continuous_capture_identity_unavailable")
+        elif capture_after - packet.presentation_ns > MAX_PREFLIGHT_PRESENTATION_AGE_NS:
+            blockers.append("capture_presentation_stale")
         return {
             "schema": PREFLIGHT_SCHEMA,
             "status": "input_eligible" if eligible else "input_ineligible",
@@ -186,6 +208,7 @@ def run_capture_preflight(
                 "experiment_id": attestation.experiment_id,
                 "marker_sha256": attestation.marker_sha256,
                 "runtime_sha256": dict(attestation.runtime_sha256),
+                "wine_prefix_sha256": wine_prefix_sha256,
             },
             "capture": {
                 "sha256": packet.sha256,

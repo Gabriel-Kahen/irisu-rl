@@ -14,9 +14,9 @@ from typing import Any
 
 from .private_io import PrivateArtifactError, publish_private_noreplace
 
-EVENT_SCHEMA = "r4a-safe-event-v1"
+EVENT_SCHEMA = "r4a-safe-event-v2"
 THRESHOLD_SCHEMA = "r4a-soak-thresholds-v1"
-REPORT_SCHEMA = "r4a-soak-report-v1"
+REPORT_SCHEMA = "r4a-soak-report-v2"
 ZERO_SHA256 = "0" * 64
 IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
 PROVENANCE_KEY = re.compile(r"[a-z][a-z0-9_]{0,62}_sha256")
@@ -98,11 +98,21 @@ _EVENT_KEYS = frozenset(
         "sequence",
         "monotonic_ns",
         "experiment_id",
+        "process_binding",
         "measurements",
         "provenance",
         "threshold_sha256",
         "previous_sha256",
         "sha256",
+    }
+)
+_PROCESS_BINDING_KEYS = frozenset(
+    {
+        "process_id",
+        "process_start_ticks",
+        "launch_nonce_sha256",
+        "runtime_identity_sha256",
+        "wine_prefix_sha256",
     }
 )
 _THRESHOLD_KEYS = frozenset(
@@ -236,6 +246,42 @@ def _validate_provenance(value: object, label: str) -> dict[str, str]:
     return result
 
 
+def _validate_process_binding(value: object, label: str) -> dict[str, int | str]:
+    if not isinstance(value, Mapping) or any(not isinstance(key, str) for key in value):
+        raise EvidenceError(f"{label} must be an object")
+    _exact_keys(value, _PROCESS_BINDING_KEYS, label)
+    process_id = value["process_id"]
+    process_start_ticks = value["process_start_ticks"]
+    if (
+        isinstance(process_id, bool)
+        or not isinstance(process_id, int)
+        or process_id <= 0
+    ):
+        raise EvidenceError(f"{label}.process_id must be a positive integer")
+    if (
+        isinstance(process_start_ticks, bool)
+        or not isinstance(process_start_ticks, int)
+        or process_start_ticks <= 0
+    ):
+        raise EvidenceError(f"{label}.process_start_ticks must be a positive integer")
+    launch_nonce_sha256 = value["launch_nonce_sha256"]
+    runtime_identity_sha256 = value["runtime_identity_sha256"]
+    wine_prefix_sha256 = value["wine_prefix_sha256"]
+    if not _is_sha256(launch_nonce_sha256):
+        raise EvidenceError(f"{label}.launch_nonce_sha256 is invalid")
+    if not _is_sha256(runtime_identity_sha256):
+        raise EvidenceError(f"{label}.runtime_identity_sha256 is invalid")
+    if not _is_sha256(wine_prefix_sha256):
+        raise EvidenceError(f"{label}.wine_prefix_sha256 is invalid")
+    return {
+        "process_id": process_id,
+        "process_start_ticks": process_start_ticks,
+        "launch_nonce_sha256": launch_nonce_sha256,
+        "runtime_identity_sha256": runtime_identity_sha256,
+        "wine_prefix_sha256": wine_prefix_sha256,
+    }
+
+
 def _validate_event(
     value: object,
     *,
@@ -263,6 +309,9 @@ def _validate_event(
         or IDENTIFIER.fullmatch(experiment_id) is None
     ):
         raise EvidenceError("event experiment_id is unsafe")
+    process_binding = _validate_process_binding(
+        value["process_binding"], "event process_binding"
+    )
     previous = value["previous_sha256"]
     digest = value["sha256"]
     if not _is_sha256(previous, allow_zero=True):
@@ -293,6 +342,7 @@ def _validate_event(
         raise EvidenceError("event SHA-256 does not match its canonical contents")
     return {
         **dict(value),
+        "process_binding": process_binding,
         "measurements": dict(measurements),
         "provenance": provenance,
     }
@@ -538,6 +588,7 @@ def build_report(
     expected_id_set = set(expected_ids)
     observed_ids: list[str] = []
     observed_id_set: set[str] = set()
+    process_bindings: dict[str, dict[str, int | str]] = {}
     provenance: dict[str, str] = {}
     samples = {name: [] for name in METRICS}
     experiment_samples = {
@@ -562,6 +613,22 @@ def build_report(
         if experiment_id not in observed_id_set:
             observed_id_set.add(experiment_id)
             observed_ids.append(experiment_id)
+        binding = event["process_binding"]
+        prior_binding = process_bindings.setdefault(experiment_id, binding)
+        if prior_binding != binding:
+            raise EvidenceError(
+                f"process binding changed during experiment {experiment_id!r}"
+            )
+        required_prefix = thresholds["required_provenance"].get(
+            "wine_prefix_sha256"
+        )
+        if (
+            required_prefix is not None
+            and binding["wine_prefix_sha256"] != required_prefix
+        ):
+            raise EvidenceError(
+                "process binding uses a different Wine-prefix identity"
+            )
         if event["measurements"]:
             measurement_events.append(event)
             experiment_events[experiment_id].append(event["monotonic_ns"])
@@ -579,6 +646,34 @@ def build_report(
             samples[name].append(measured)
             experiment_samples[experiment_id][name].append(measured)
             sample_timestamps[experiment_id][name].append(event["monotonic_ns"])
+
+    process_generations: dict[tuple[int, int], str] = {}
+    launch_nonces: dict[str, str] = {}
+    runtime_identities: dict[str, str] = {}
+    for experiment_id, binding in process_bindings.items():
+        generation = (
+            int(binding["process_id"]),
+            int(binding["process_start_ticks"]),
+        )
+        for seen, key, label in (
+            (process_generations, generation, "process generation"),
+            (
+                launch_nonces,
+                str(binding["launch_nonce_sha256"]),
+                "launch nonce",
+            ),
+            (
+                runtime_identities,
+                str(binding["runtime_identity_sha256"]),
+                "runtime identity",
+            ),
+        ):
+            prior_experiment = seen.setdefault(key, experiment_id)
+            if prior_experiment != experiment_id:
+                raise EvidenceError(
+                    f"experiments {prior_experiment!r} and {experiment_id!r} "
+                    f"reuse the same {label}"
+                )
 
     metric_reports: dict[str, Any] = {}
     metric_statuses: list[str] = []
@@ -701,7 +796,14 @@ def build_report(
             if experiment_times and timestamps:
                 gaps_ns = [
                     timestamps[0] - experiment_times[0],
-                    *(right - left for left, right in zip(timestamps, timestamps[1:])),
+                    *(
+                        right - left
+                        for left, right in zip(
+                            timestamps,
+                            timestamps[1:],
+                            strict=False,
+                        )
+                    ),
                     experiment_times[-1] - timestamps[-1],
                 ]
                 maximum_gap = max(gaps_ns) / 1e9
@@ -772,6 +874,7 @@ def build_report(
             "missing": missing_ids,
             "status": experiment_status,
         },
+        "process_bindings": process_bindings,
         "provenance": {
             "required": expected_provenance,
             "observed": provenance,
@@ -797,6 +900,7 @@ def _validate_rebuilt_report(report: object) -> str:
         "duration",
         "coverage",
         "experiments",
+        "process_bindings",
         "provenance",
         "metrics",
     }
@@ -864,6 +968,34 @@ def _validate_rebuilt_report(report: object) -> str:
     ):
         raise EvidenceError("soak experiment coverage did not pass")
     required_experiments = experiments["required"]
+    process_bindings = report.get("process_bindings")
+    if not isinstance(process_bindings, Mapping) or set(process_bindings) != set(
+        required_experiments
+    ):
+        raise EvidenceError("soak report process bindings are incomplete")
+    process_generations: set[tuple[int, int]] = set()
+    launch_nonces: set[str] = set()
+    runtime_identities: set[str] = set()
+    for experiment_id in required_experiments:
+        binding = _validate_process_binding(
+            process_bindings[experiment_id],
+            f"soak process binding {experiment_id}",
+        )
+        generation = (
+            int(binding["process_id"]),
+            int(binding["process_start_ticks"]),
+        )
+        nonce = str(binding["launch_nonce_sha256"])
+        runtime_identity = str(binding["runtime_identity_sha256"])
+        if (
+            generation in process_generations
+            or nonce in launch_nonces
+            or runtime_identity in runtime_identities
+        ):
+            raise EvidenceError("soak experiments do not use unique processes")
+        process_generations.add(generation)
+        launch_nonces.add(nonce)
+        runtime_identities.add(runtime_identity)
     if set(coverage_experiments) != set(required_experiments):
         raise EvidenceError("soak metric coverage experiments are incomplete")
     for experiment_id in required_experiments:

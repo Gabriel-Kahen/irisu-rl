@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import sys
 import threading
 import unittest
@@ -151,6 +152,7 @@ class FakeProvider:
             self.executable_sha256,
             self.runtime_sha256,
             WINE_SHA256,
+            "f" * 64,
         )
 
     def _lease(
@@ -257,7 +259,9 @@ class FakeProvider:
             request,
             start,
             completion,
+            presentation_ns=completion,
             source_sequence=self.source_sequence,
+            canonical_pixel_sha256=hashlib.sha256(self.frame_payload).hexdigest(),
         )
 
     def current_cursor(self, identity: WindowIdentity, token: ClaimToken):
@@ -274,12 +278,15 @@ class FakeProvider:
         x: float,
         y: float,
         release_deadline_ns: int,
+        latest_injection_ns: int,
     ) -> InputAcknowledgement:
         self._event(f"down:{button}:{x}:{y}", identity, token)
         if "down" in self.fail:
             raise RuntimeError("forced down failure")
         if type(release_deadline_ns) is not int or release_deadline_ns <= self.clock():
             raise RuntimeError("invalid broker release deadline")
+        if self.clock() > latest_injection_ns:
+            raise RuntimeError("stale broker injection")
         self.held_buttons.add(button)
         self.release_deadlines[button] = release_deadline_ns
         return self._ack(
@@ -341,6 +348,26 @@ def limits(**changes: object) -> HarnessLimits:
     return HarnessLimits(**values)
 
 
+class RuntimeGuard:
+    def __init__(self) -> None:
+        self.runtime_checks = 0
+        self.input_checks = 0
+        self.target_checks: list[tuple[int, int]] = []
+
+    def verify_runtime_unchanged(self) -> None:
+        self.runtime_checks += 1
+
+    def verify_input_environment_unchanged(self) -> None:
+        self.input_checks += 1
+
+    def verify_target_binding(
+        self,
+        process_id: int,
+        process_start_ticks: int,
+    ) -> None:
+        self.target_checks.append((process_id, process_start_ticks))
+
+
 class HarnessTests(unittest.TestCase):
     def make(
         self,
@@ -362,6 +389,7 @@ class HarnessTests(unittest.TestCase):
             limits=config or limits(),
             clock_ns=clock,
             sleep_ns=clock.advance,
+            runtime_guard=RuntimeGuard(),
         )
         return harness, provider, geometry, clock
 
@@ -369,6 +397,26 @@ class HarnessTests(unittest.TestCase):
         token = ClaimToken("do-not-print-me")
         self.assertNotIn("do-not-print-me", repr(token))
         self.assertNotIn("do-not-print-me", str(token))
+
+    def test_safe_live_provider_requires_and_uses_runtime_guard(self) -> None:
+        harness, provider, _, clock = self.make()
+        guard = harness._runtime_guard
+        assert isinstance(guard, RuntimeGuard)
+        harness.open()
+        clock.advance(100)
+        harness.fire(ShotKind.WEAK, 10, 10)
+        self.assertGreaterEqual(guard.runtime_checks, 4)
+        self.assertEqual(guard.input_checks, 2)
+        self.assertTrue(
+            all(binding == (1234, 5678) for binding in guard.target_checks)
+        )
+        harness.close()
+
+        unguarded, provider, _, _ = self.make()
+        unguarded._runtime_guard = None
+        with self.assertRaisesRegex(SafetyError, "re-attestation"):
+            unguarded.open()
+        self.assertNotIn("claim", [event[0] for event in provider.events])
 
     def test_claim_binds_an_immutable_target_and_runtime_descriptor(self) -> None:
         harness, provider, _, _ = self.make()
@@ -692,6 +740,59 @@ class HarnessTests(unittest.TestCase):
             harness.open()
         self.assertFalse(provider.claimed)
 
+    def test_live_input_requires_source_timing_and_uses_presentation_age(self) -> None:
+        harness, provider, _, _ = self.make()
+        original_capture = provider.capture_exact_window
+
+        def missing_timing(identity, token):
+            return replace(
+                original_capture(identity, token),
+                presentation_ns=None,
+                source_sequence=None,
+            )
+
+        provider.capture_exact_window = missing_timing  # type: ignore[method-assign]
+        with self.assertRaisesRegex(FrameError, "presentation"):
+            harness.open()
+        self.assertFalse(provider.claimed)
+
+        harness, provider, _, _ = self.make()
+        original_capture = provider.capture_exact_window
+
+        def old_presentation(identity, token):
+            packet = original_capture(identity, token)
+            return replace(
+                packet,
+                presentation_ns=packet.completion_ns
+                - harness.limits.stale_after_ns
+                - 1,
+            )
+
+        provider.capture_exact_window = old_presentation  # type: ignore[method-assign]
+        with self.assertRaisesRegex(FrameError, "stale"):
+            harness.open()
+        self.assertFalse(provider.claimed)
+
+    def test_slow_renewal_cannot_inject_from_a_now_stale_frame(self) -> None:
+        harness, provider, _, clock = self.make(
+            config=limits(lease_cleanup_margin_ns=100)
+        )
+        harness.open()
+        harness._lease = provider._lease(clock() + 120, identity=IDENTITY)  # type: ignore[attr-defined]
+        original_renew = provider.renew_exact_window_claim
+
+        def slow_renew(identity, token, lease_seconds):
+            renewed = original_renew(identity, token, lease_seconds)
+            clock.advance(harness.limits.stale_after_ns + 1)
+            return replace(renewed, expires_ns=clock() + lease_seconds * 1_000_000_000)
+
+        provider.renew_exact_window_claim = slow_renew  # type: ignore[method-assign]
+        with self.assertRaisesRegex(FrameError, "stale before button-down"):
+            harness.fire("weak", 10, 10)
+        self.assertFalse(
+            any(str(event[0]).startswith("down:") for event in provider.events)
+        )
+
         harness, provider, _, clock = self.make()
 
         def early_cursor(identity, token):
@@ -826,6 +927,7 @@ class HarnessTests(unittest.TestCase):
                         x,
                         y,
                         release_deadline_ns,
+                        latest_injection_ns,
                     ):
                         provider._event(f"down:{button}:{x}:{y}", identity, token)
                         provider.held_buttons.add(button)
@@ -958,7 +1060,7 @@ class HarnessTests(unittest.TestCase):
         harness.open()
 
         def oversleep(duration: int) -> None:
-            clock.advance(duration + 101)
+            clock.advance(duration + 201)
             provider.enforce_release_deadlines()
 
         harness._sleep_ns = oversleep  # type: ignore[attr-defined]
@@ -981,6 +1083,7 @@ class HarnessTests(unittest.TestCase):
             x,
             y,
             release_deadline_ns,
+            latest_injection_ns,
         ):
             provider._event(f"down:{button}:{x}:{y}", identity, token)
             injected = clock()
@@ -1040,6 +1143,61 @@ class HarnessTests(unittest.TestCase):
             harness.fire("weak", 10, 10)
         self.assertFalse(provider.claimed)
         self.assertFalse(provider.held_buttons)
+
+    def test_press_duration_is_measured_from_injected_down_not_ack_return(self) -> None:
+        harness, provider, _, clock = self.make(
+            config=limits(max_press_duration_error_ns=2)
+        )
+        harness.open()
+        original_down = provider.targeted_button_down
+
+        def delayed_ack(*args, **kwargs):
+            ack = original_down(*args, **kwargs)
+            clock.advance(25)
+            return ack
+
+        provider.targeted_button_down = delayed_ack  # type: ignore[method-assign]
+        with self.assertRaisesRegex(ActionError, "press duration"):
+            harness.fire("weak", 10, 10)
+        self.assertFalse(provider.claimed)
+        self.assertFalse(provider.held_buttons)
+
+    def test_release_deadline_preserves_cleanup_after_latest_injection(self) -> None:
+        config = limits(press_duration_ns=20, lease_cleanup_margin_ns=100)
+        harness, provider, _, _ = self.make(config=config)
+        harness.open()
+        original_down = provider.targeted_button_down
+        observed: dict[str, int] = {}
+
+        def inspect_deadlines(
+            identity,
+            token,
+            button,
+            x,
+            y,
+            release_deadline_ns,
+            latest_injection_ns,
+        ):
+            observed["release"] = release_deadline_ns
+            observed["latest"] = latest_injection_ns
+            return original_down(
+                identity,
+                token,
+                button,
+                x,
+                y,
+                release_deadline_ns,
+                latest_injection_ns,
+            )
+
+        provider.targeted_button_down = inspect_deadlines  # type: ignore[method-assign]
+        harness.fire("weak", 10, 10)
+        assert config.press_duration_ns is not None
+        self.assertEqual(
+            observed["release"] - observed["latest"],
+            config.press_duration_ns + config.lease_cleanup_margin_ns,
+        )
+        harness.close()
 
     def test_renewal_must_preserve_identity_and_token(self) -> None:
         harness, provider, _, _ = self.make()

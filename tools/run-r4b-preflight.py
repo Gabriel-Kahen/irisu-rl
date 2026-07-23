@@ -22,7 +22,11 @@ from irisu_rl.original_game.operations import (
 from irisu_rl.original_game.private_io import (
     publish_private_noreplace,
 )
-from irisu_rl.original_game.runtime import attest_disposable_run
+from irisu_rl.original_game.runtime import (
+    attest_disposable_run,
+    attest_wine_prefix,
+    verify_wine_prefix_unchanged,
+)
 
 
 def main() -> None:
@@ -37,6 +41,7 @@ def main() -> None:
     parser.add_argument("window_address")
     parser.add_argument("capture_id")
     parser.add_argument("launch_nonce_sha256")
+    parser.add_argument("wine_prefix", type=Path)
     parser.add_argument("broker", type=Path)
     parser.add_argument("broker_sha256")
     parser.add_argument("output_directory", type=Path)
@@ -52,6 +57,7 @@ def main() -> None:
             args.run_dir,
             expected_experiment_id=args.experiment_id,
         )
+        prefix_attestation = attest_wine_prefix(args.wine_prefix)
         report = run_capture_preflight(
             provider,
             WindowIdentity(args.window_address, args.capture_id),
@@ -59,7 +65,9 @@ def main() -> None:
             repo_root=ROOT,
             run_dir=args.run_dir,
             launch_nonce_sha256=args.launch_nonce_sha256,
+            wine_prefix_sha256=prefix_attestation.sha256,
         )
+        verify_wine_prefix_unchanged(prefix_attestation, args.wine_prefix)
         publish_private_noreplace(
             args.output_directory,
             args.output_name,

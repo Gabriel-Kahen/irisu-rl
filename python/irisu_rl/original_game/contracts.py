@@ -7,17 +7,18 @@ import json
 import math
 import re
 import tomllib
+from collections.abc import Mapping
 from copy import deepcopy
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
 
-from .evidence import EvidenceError, verify_report
+from .evidence import REPORT_SCHEMA, EvidenceError, verify_report
 
 CONTRACT_SCHEMA = "original-game-deployment-contract-v2"
-EVIDENCE_SCHEMA = "r4a-deployment-measurements-v1"
+EVIDENCE_SCHEMA = "r4b-deployment-measurements-v2"
 SEMANTIC_SHA256 = "dd764fd625b2a6604128fe1605b988144cd0def9d044c43b8fa3fb260e16e677"
 PROVISIONAL_BASE_SHA256 = (
-    "102d531c256218c8d9829630988e307eebd696d20fed6fa7abada5e39b63436c"
+    "aa20ada39669d283cd2a2081ecdc5b769f5d7b2270e739e225790aeb8ef9258c"
 )
 EMPIRICAL_SECTIONS = (
     "wait_duration",
@@ -399,7 +400,7 @@ def _validate_common(contract: Mapping[str, Any]) -> None:
         raise ContractError("raw original-game frames must remain outside git")
     expected_evidence = {
         "measurement_schema": EVIDENCE_SCHEMA,
-        "soak_report_schema": "r4a-soak-report-v1",
+        "soak_report_schema": REPORT_SCHEMA,
         "raw_frames_allowed_in_git": False,
         "measured_values_require_positive_sample_count": True,
         "measured_values_require_uncertainty": True,
@@ -460,6 +461,7 @@ def _validate_measured(contract: Mapping[str, Any]) -> None:
             "dxlib_sha256",
             "game_config_sha256",
             "measurement_tool_sha256",
+            "wine_prefix_sha256",
             "runtime",
             "hardware_id",
         },
@@ -471,6 +473,7 @@ def _validate_measured(contract: Mapping[str, Any]) -> None:
         "dxlib_sha256",
         "game_config_sha256",
         "measurement_tool_sha256",
+        "wine_prefix_sha256",
     ):
         _sha256(provenance.get(key), f"runtime_provenance.{key}")
     _safe_label(provenance.get("runtime"), "runtime_provenance.runtime")
@@ -642,6 +645,7 @@ def _validate_evidence(
             "dxlib_sha256",
             "game_config_sha256",
             "measurement_tool_sha256",
+            "wine_prefix_sha256",
             "runtime",
             "hardware_id",
         },
@@ -653,12 +657,17 @@ def _validate_evidence(
         "dxlib_sha256",
         "game_config_sha256",
         "measurement_tool_sha256",
+        "wine_prefix_sha256",
     ):
         _sha256(provenance.get(key), f"provenance.{key}")
     _safe_label(provenance.get("runtime"), "provenance.runtime")
     _safe_label(provenance.get("hardware_id"), "provenance.hardware_id")
     report_provenance = soak_report["provenance"]["observed"]
-    for key in ("game_executable_sha256", "measurement_tool_sha256"):
+    for key in (
+        "game_executable_sha256",
+        "measurement_tool_sha256",
+        "wine_prefix_sha256",
+    ):
         if report_provenance.get(key) != provenance[key]:
             raise ContractError(f"soak report provenance does not bind {key}")
 
@@ -707,7 +716,8 @@ def _validate_evidence(
         }
         if not required_artifacts.issubset(hashes):
             raise ContractError(
-                f"sections.{name}.artifact_sha256 is not bound to verified soak artifacts"
+                f"sections.{name}.artifact_sha256 is not bound to "
+                "verified soak artifacts"
             )
         if name in MEASUREMENT_FIELDS:
             measurements = _mapping(

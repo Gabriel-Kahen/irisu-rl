@@ -62,9 +62,9 @@ lost native support must set `targeted_input_safe:false`.
 
 ## Target discovery and identity
 
-`discover_target` receives a secret launch nonce plus expected executable and
-complete runtime hashes. It must inspect process lineage/environment and return
-exactly one matching disposable process:
+`discover_target` receives a secret launch nonce plus expected executable,
+complete runtime, and Wine-prefix hashes. It must inspect process
+lineage/environment and return exactly one matching disposable process:
 
 ```json
 {
@@ -77,7 +77,8 @@ exactly one matching disposable process:
     "process_id": 1234,
     "process_start_ticks": 5678,
     "runtime_sha256": "<complete disposable-run identity>",
-    "wine_executable_sha256": "<preregistered Wine executable>"
+    "wine_executable_sha256": "<preregistered Wine executable>",
+    "wine_prefix_sha256": "<complete attested Wine prefix>"
   }
 }
 ```
@@ -85,7 +86,7 @@ exactly one matching disposable process:
 Title/class matching is insufficient. PID start ticks prevent reuse; capture ID
 prevents a recreated window at the same address; the nonce prevents selecting a
 different IriSu process; hashes reject the preserved tree, trace proxy, and
-mutated data.
+mutated data or prefix state.
 
 ## Claims
 
@@ -117,12 +118,12 @@ completion.
 ```json
 {
   "canonical_pixel_sha256":"<SHA-256 of decoded tightly packed client pixels>",
-  "color_format":"png",
+  "color_format":"bgra8",
   "completion_ns":130,
   "identity":{"address":"0x...","capture_id":"..."},
   "pixel_height":484,
   "pixel_width":644,
-  "pixels_base64":"...",
+  "pixels_base64":"<base64 of tightly packed BGRA bytes>",
   "presentation_ns":120,
   "request_ns":100,
   "source_sequence":42,
@@ -135,17 +136,23 @@ All timestamps use Linux `CLOCK_MONOTONIC` and must fit inside the client's
 local call bracket. Production qualification requires a real presentation
 timestamp and monotonically increasing source sequence from a continuous
 capture route; one-shot `grim` timestamps cannot establish gameplay cadence.
-`canonical_pixel_sha256` is computed over the broker's decoded, tightly packed
-client pixels in its declared stable channel order, so PNG encoder choices
-cannot change duplicate-frame classification.
+`color_format` is exactly `bgra8`; the decoded byte length must equal
+`pixel_width × pixel_height × 4`. The client recomputes
+`canonical_pixel_sha256` over those tightly packed bytes and rejects any
+mismatch, so neither an encoder choice nor unbound broker metadata can change
+duplicate-frame classification. Compressed image formats are not accepted at
+this safety boundary.
 `cursor` returns `{"observed_ns":123,"x":10.0,"y":20.0}` in window-local
 coordinates under the same claim.
 
 ## Explicit edges
 
 `button_down` receives identity/token, `operation_id`, left/right button,
-window-local x/y, and an absolute `release_deadline_ns`. The authoritative
-injector must schedule neutralization before acknowledging. `button_up`
+window-local x/y, an absolute `latest_injection_ns` freshness deadline, and an
+absolute `release_deadline_ns`. The authoritative injector must atomically
+revalidate session safety and reject the operation if injection would occur
+after the freshness deadline; it must schedule neutralization before
+acknowledging. `button_up`
 receives the same fields except the deadline; it remains bound to the accepted
 deadline from the matching down. `release_all` receives identity/token and
 operation ID.

@@ -32,6 +32,10 @@ class Transport:
         self.extra_handshake = False
         self.release_deadline = None
         self.wrong_claim_identity = False
+        self.renew_generation = 1
+        self.renew_target_pid = 123
+        self.capture_pixels = b"\x00\x01\x02\x03\x04\x05\x06\x07"
+        self.capture_sha256 = hashlib.sha256(self.capture_pixels).hexdigest()
 
     def call(self, method, params):
         self.calls.append((method, params))
@@ -81,6 +85,7 @@ class Transport:
                     "executable_sha256": params["executable_sha256"],
                     "runtime_sha256": params["runtime_sha256"],
                     "wine_executable_sha256": "e" * 64,
+                    "wine_prefix_sha256": params["wine_prefix_sha256"],
                 },
             }
         if method in {"claim", "renew"}:
@@ -92,33 +97,34 @@ class Transport:
             return {
                 "identity": identity,
                 "fencing_token": "never-log-this",
-                "expires_ns": 10_000,
-                "generation": 1,
+                "expires_ns": 20_000 if method == "renew" else 10_000,
+                "generation": self.renew_generation if method == "renew" else 1,
                 "broker_instance": "broker-test-1",
                 "target": {
                     "identity": identity,
-                    "process_id": 123,
+                    "process_id": self.renew_target_pid if method == "renew" else 123,
                     "process_start_ticks": 456,
                     "launch_nonce_sha256": "d" * 64,
                     "executable_sha256": "b" * 64,
                     "runtime_sha256": "c" * 64,
                     "wine_executable_sha256": "e" * 64,
+                    "wine_prefix_sha256": "f" * 64,
                 },
             }
         if method == "capture":
             return {
-                "pixels_base64": base64.b64encode(b"png").decode(),
+                "pixels_base64": base64.b64encode(self.capture_pixels).decode(),
                 "identity": {"address": "0xabc", "capture_id": "capture-1"},
-                "window_bounds": {"x": 0, "y": 0, "width": 644, "height": 484},
-                "pixel_width": 644,
-                "pixel_height": 484,
+                "window_bounds": {"x": 0, "y": 0, "width": 2, "height": 1},
+                "pixel_width": 2,
+                "pixel_height": 1,
                 "request_ns": 1100,
                 "start_ns": 1110,
                 "completion_ns": 1120,
                 "presentation_ns": None,
                 "source_sequence": 7,
-                "color_format": "png",
-                "canonical_pixel_sha256": hashlib.sha256(b"raw pixels").hexdigest(),
+                "color_format": "bgra8",
+                "canonical_pixel_sha256": self.capture_sha256,
             }
         if method == "cursor":
             return {"x": 10, "y": 20, "observed_ns": 1130}
@@ -172,9 +178,9 @@ class R4BLiveProviderTests(unittest.TestCase):
         self.assertEqual(repr(lease.token), "ClaimToken(<redacted>)")
         self.assertNotIn("never-log-this", repr(provider))
         packet = provider.capture_exact_window(IDENTITY, lease.token)
-        self.assertEqual(packet.pixels, b"png")
+        self.assertEqual(packet.pixels, transport.capture_pixels)
         self.assertEqual(packet.source_sequence, 7)
-        self.assertEqual(packet.sha256, hashlib.sha256(b"raw pixels").hexdigest())
+        self.assertEqual(packet.sha256, transport.capture_sha256)
         cursor = provider.current_cursor(IDENTITY, lease.token)
         self.assertEqual((cursor.x, cursor.y), (10, 20))
         provider.release_exact_window_claim(IDENTITY, lease.token)
@@ -188,6 +194,7 @@ class R4BLiveProviderTests(unittest.TestCase):
             launch_nonce=nonce,
             executable_sha256="b" * 64,
             runtime_sha256="c" * 64,
+            wine_prefix_sha256="f" * 64,
         )
         self.assertEqual(target.identity, IDENTITY)
         self.assertEqual(
@@ -201,6 +208,30 @@ class R4BLiveProviderTests(unittest.TestCase):
         with self.assertRaisesRegex(BrokerError, "binding mismatch"):
             provider.claim_exact_window(IDENTITY, 30)
         self.assertEqual(transport.calls[-1][0], "release_claim")
+
+    def test_renewal_validates_all_bindings_before_mutating_local_state(self) -> None:
+        transport = Transport()
+        provider = self.provider(transport)
+        lease = provider.claim_exact_window(IDENTITY, 30)
+        transport.renew_target_pid = 999
+        with self.assertRaisesRegex(BrokerError, "immutable binding"):
+            provider.renew_exact_window_claim(IDENTITY, lease.token, 30)
+        transport.renew_target_pid = 123
+        renewed = provider.renew_exact_window_claim(IDENTITY, lease.token, 30)
+        self.assertEqual(renewed.expires_ns, 20_000)
+
+    def test_capture_rejects_unverified_or_missized_pixel_payload(self) -> None:
+        transport = Transport()
+        provider = self.provider(transport)
+        lease = provider.claim_exact_window(IDENTITY, 30)
+        transport.capture_sha256 = "f" * 64
+        with self.assertRaisesRegex(BrokerError, "does not match"):
+            provider.capture_exact_window(IDENTITY, lease.token)
+        transport.capture_sha256 = hashlib.sha256(transport.capture_pixels).hexdigest()
+        transport.capture_pixels = transport.capture_pixels[:-1]
+        transport.capture_sha256 = hashlib.sha256(transport.capture_pixels).hexdigest()
+        with self.assertRaisesRegex(BrokerError, "byte length"):
+            provider.capture_exact_window(IDENTITY, lease.token)
 
     def test_malformed_handshake_and_clock_are_rejected(self) -> None:
         transport = Transport()
@@ -216,7 +247,9 @@ class R4BLiveProviderTests(unittest.TestCase):
         provider = self.provider(transport)
         lease = provider.claim_exact_window(IDENTITY, 30)
         with self.assertRaisesRegex(BrokerError, "left/right"):
-            provider.targeted_button_down(IDENTITY, lease.token, "middle", 1, 2, 9000)
+            provider.targeted_button_down(
+                IDENTITY, lease.token, "middle", 1, 2, 9000, 8000
+            )
         self.assertNotIn("button_down", [method for method, _ in transport.calls])
 
     def test_edges_are_bound_to_operation_claim_deadline_and_broker(self) -> None:
@@ -224,7 +257,7 @@ class R4BLiveProviderTests(unittest.TestCase):
         provider = self.provider(transport)
         lease = provider.claim_exact_window(IDENTITY, 30)
         down = provider.targeted_button_down(
-            IDENTITY, lease.token, "left", 10, 20, 9000
+            IDENTITY, lease.token, "left", 10, 20, 9000, 8000
         )
         up = provider.targeted_button_up(IDENTITY, lease.token, "left", 10, 20)
         neutral = provider.release_all_buttons(IDENTITY, lease.token)

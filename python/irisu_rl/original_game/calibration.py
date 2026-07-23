@@ -8,6 +8,7 @@ caller cannot supply precomputed quantiles or sample counts.
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 import math
@@ -32,8 +33,8 @@ from .evidence import (
 )
 
 PLAN_SCHEMA = "r4b-calibration-plan-v1"
-RECORD_SCHEMA = "r4b-calibration-record-v1"
-DEPLOYMENT_EVIDENCE_SCHEMA = "r4a-deployment-measurements-v1"
+RECORD_SCHEMA = "r4b-calibration-record-v2"
+DEPLOYMENT_EVIDENCE_SCHEMA = "r4b-deployment-measurements-v2"
 SAFE_PROVIDER_CAPABILITY = "targeted_edges_broker_deadline_claim_neutralization"
 CLIENT_PIXEL_QUANTIZATION = "floor(normalized * extent), clamped to [0, extent - 1]"
 ZERO_SHA256 = "0" * 64
@@ -67,6 +68,17 @@ METRIC_SPECS: Mapping[str, tuple[str, str, str]] = {
     "fixed_action_rate_hz": ("cursor", "actions/second", "min"),
 }
 METRIC_FIELDS = tuple(METRIC_SPECS)
+ACCEPTANCE_STATISTICS = frozenset({"p50", "p95", "p99", "worst"})
+TERMINAL_FAILURE_STATUSES = frozenset(
+    {
+        "capture_failed",
+        "fire_failed",
+        "observer_failed",
+        "effect_record_failed",
+        "sample_validation_failed",
+        "runtime_revalidation_failed",
+    }
+)
 SECTION_FIELDS: Mapping[str, tuple[str, ...]] = {
     section: tuple(
         field for field, (owner, _, _) in METRIC_SPECS.items() if owner == section
@@ -87,6 +99,7 @@ PROVENANCE_FIELDS = frozenset(
         "dxlib_sha256",
         "game_config_sha256",
         "measurement_tool_sha256",
+        "wine_prefix_sha256",
         "runtime",
         "hardware_id",
     }
@@ -185,6 +198,128 @@ def _unique_numbers(
     return result
 
 
+def measurement_tool_bundle_sha256(runner_sha256: str, observer_sha256: str) -> str:
+    """Bind the exact runner and observer builds into one provenance digest."""
+
+    payload = {
+        "schema": "r4b-measurement-tool-bundle-v1",
+        "runner_sha256": _sha256(runner_sha256, "measurement runner SHA-256"),
+        "observer_sha256": _sha256(observer_sha256, "measurement observer SHA-256"),
+    }
+    return hashlib.sha256(canonical_json_bytes(payload)).hexdigest()
+
+
+def _metric_acceptance_bounds(
+    value: object,
+) -> Mapping[str, Mapping[str, Mapping[str, float]]]:
+    root = _mapping(value, "acceptance.metric_bounds")
+    _exact_keys(root, set(METRIC_FIELDS), "acceptance.metric_bounds")
+    normalized: dict[str, Mapping[str, Mapping[str, float]]] = {}
+    for field in METRIC_FIELDS:
+        raw_statistics = _mapping(root[field], f"acceptance.metric_bounds.{field}")
+        if not raw_statistics or not set(raw_statistics) <= ACCEPTANCE_STATISTICS:
+            raise CalibrationError(
+                f"acceptance.metric_bounds.{field} must bound one or more "
+                "of p50/p95/p99/worst"
+            )
+        statistics: dict[str, Mapping[str, float]] = {}
+        for statistic, raw_bound in raw_statistics.items():
+            bound = _mapping(raw_bound, f"acceptance.metric_bounds.{field}.{statistic}")
+            if not bound or not set(bound) <= {"min", "max"}:
+                raise CalibrationError(
+                    f"acceptance.metric_bounds.{field}.{statistic} "
+                    "must contain min and/or max"
+                )
+            parsed = {
+                direction: _finite(
+                    threshold,
+                    (f"acceptance.metric_bounds.{field}.{statistic}.{direction}"),
+                    nonnegative=True,
+                )
+                for direction, threshold in bound.items()
+            }
+            if "min" in parsed and "max" in parsed and parsed["min"] > parsed["max"]:
+                raise CalibrationError(
+                    f"acceptance.metric_bounds.{field}.{statistic} min exceeds max"
+                )
+            statistics[statistic] = MappingProxyType(parsed)
+        normalized[field] = MappingProxyType(statistics)
+    return MappingProxyType(normalized)
+
+
+@dataclass(frozen=True, slots=True)
+class CalibrationRunAttestation:
+    """Observed process and measurement-tool identity for one fresh run."""
+
+    experiment_id: str
+    process_id: int
+    process_start_ticks: int
+    launch_nonce_sha256: str
+    runtime_identity_sha256: str
+    wine_prefix_sha256: str
+    measurement_runner_sha256: str
+    observer_sha256: str
+    measurement_tool_sha256: str
+
+    @classmethod
+    def from_mapping(cls, value: object) -> CalibrationRunAttestation:
+        run = _mapping(value, "calibration run attestation")
+        _exact_keys(
+            run,
+            {
+                "experiment_id",
+                "process_id",
+                "process_start_ticks",
+                "launch_nonce_sha256",
+                "runtime_identity_sha256",
+                "wine_prefix_sha256",
+                "measurement_runner_sha256",
+                "observer_sha256",
+                "measurement_tool_sha256",
+            },
+            "calibration run attestation",
+        )
+        process_id = _positive_int(run.get("process_id"), "run process_id")
+        process_start = _positive_int(
+            run.get("process_start_ticks"), "run process_start_ticks"
+        )
+        runner = _sha256(
+            run.get("measurement_runner_sha256"), "run measurement runner SHA-256"
+        )
+        observer = _sha256(run.get("observer_sha256"), "run observer SHA-256")
+        bundle = _sha256(
+            run.get("measurement_tool_sha256"), "run measurement tool SHA-256"
+        )
+        if bundle != measurement_tool_bundle_sha256(runner, observer):
+            raise CalibrationError(
+                "run measurement-tool bundle does not match its components"
+            )
+        return cls(
+            _identifier(run.get("experiment_id"), "run experiment_id"),
+            process_id,
+            process_start,
+            _sha256(run.get("launch_nonce_sha256"), "run launch nonce SHA-256"),
+            _sha256(run.get("runtime_identity_sha256"), "run runtime identity SHA-256"),
+            _sha256(run.get("wine_prefix_sha256"), "run Wine-prefix SHA-256"),
+            runner,
+            observer,
+            bundle,
+        )
+
+    def manifest(self) -> dict[str, object]:
+        return {
+            "experiment_id": self.experiment_id,
+            "process_id": self.process_id,
+            "process_start_ticks": self.process_start_ticks,
+            "launch_nonce_sha256": self.launch_nonce_sha256,
+            "runtime_identity_sha256": self.runtime_identity_sha256,
+            "wine_prefix_sha256": self.wine_prefix_sha256,
+            "measurement_runner_sha256": self.measurement_runner_sha256,
+            "observer_sha256": self.observer_sha256,
+            "measurement_tool_sha256": self.measurement_tool_sha256,
+        }
+
+
 @dataclass(frozen=True, slots=True)
 class SweepCell:
     experiment_id: str
@@ -255,6 +390,9 @@ class CalibrationPlan:
     block_length: int
     minimum_confirmed_actions: int
     minimum_registration_rate: float
+    metric_acceptance: Mapping[str, Mapping[str, Mapping[str, float]]]
+    measurement_runner_sha256: str
+    observer_sha256: str
     provenance: Mapping[str, str]
 
     @classmethod
@@ -274,6 +412,7 @@ class CalibrationPlan:
                 "instrument_resolution",
                 "uncertainty",
                 "acceptance",
+                "measurement_tools",
                 "provenance",
             },
             "calibration plan",
@@ -501,6 +640,7 @@ class CalibrationPlan:
                 "minimum_confirmed_actions",
                 "minimum_registration_rate",
                 "registration_interval_method",
+                "metric_bounds",
             },
             "acceptance",
         )
@@ -523,6 +663,22 @@ class CalibrationPlan:
             raise CalibrationError(
                 "registration interval method must be wilson-score-v1"
             )
+        metric_acceptance = _metric_acceptance_bounds(acceptance.get("metric_bounds"))
+
+        measurement_tools = _mapping(root.get("measurement_tools"), "measurement_tools")
+        _exact_keys(
+            measurement_tools,
+            {"runner_sha256", "observer_sha256"},
+            "measurement_tools",
+        )
+        measurement_runner = _sha256(
+            measurement_tools.get("runner_sha256"),
+            "measurement_tools.runner_sha256",
+        )
+        observer = _sha256(
+            measurement_tools.get("observer_sha256"),
+            "measurement_tools.observer_sha256",
+        )
 
         provenance = _mapping(root.get("provenance"), "provenance")
         _exact_keys(provenance, PROVENANCE_FIELDS, "provenance")
@@ -532,6 +688,13 @@ class CalibrationPlan:
                 _safe_label(provenance[key], f"provenance.{key}")
                 if key in {"runtime", "hardware_id"}
                 else _sha256(provenance[key], f"provenance.{key}")
+            )
+        if normalized_provenance["measurement_tool_sha256"] != (
+            measurement_tool_bundle_sha256(measurement_runner, observer)
+        ):
+            raise CalibrationError(
+                "provenance measurement-tool SHA-256 does not bind the "
+                "declared runner and observer"
             )
 
         return cls(
@@ -560,6 +723,9 @@ class CalibrationPlan:
             block_length,
             confirmed,
             registration_rate,
+            metric_acceptance,
+            measurement_runner,
+            observer,
             MappingProxyType(normalized_provenance),
         )
 
@@ -612,6 +778,17 @@ class CalibrationPlan:
                 "minimum_confirmed_actions": self.minimum_confirmed_actions,
                 "minimum_registration_rate": self.minimum_registration_rate,
                 "registration_interval_method": "wilson-score-v1",
+                "metric_bounds": {
+                    field: {
+                        statistic: dict(bound)
+                        for statistic, bound in statistics.items()
+                    }
+                    for field, statistics in self.metric_acceptance.items()
+                },
+            },
+            "measurement_tools": {
+                "runner_sha256": self.measurement_runner_sha256,
+                "observer_sha256": self.observer_sha256,
             },
             "provenance": dict(self.provenance),
         }
@@ -763,29 +940,44 @@ class CalibrationSample:
         )
 
 
-def seal_calibration_record(
+def _seal_calibration_record(
     plan: CalibrationPlan,
-    sample: CalibrationSample | Mapping[str, Any],
     *,
+    record_type: str,
     sequence: int,
+    attempt_sequence: int,
     monotonic_ns: int,
+    cell: SweepCell,
+    run_attestation: CalibrationRunAttestation,
+    terminal_status: str,
+    sample: CalibrationSample | None,
     previous_sha256: str = ZERO_SHA256,
 ) -> dict[str, object]:
     if not isinstance(plan, CalibrationPlan):
         raise TypeError("plan must be a CalibrationPlan")
-    parsed = (
-        sample
-        if isinstance(sample, CalibrationSample)
-        else CalibrationSample.from_mapping(sample)
-    )
-    if isinstance(sequence, bool) or not isinstance(sequence, int) or sequence <= 0:
+    if record_type not in {"attempt_intent", "attempt_outcome"}:
+        raise CalibrationError("journal record type is invalid")
+    if type(sequence) is not int or sequence <= 0:
         raise CalibrationError("journal sequence must be a positive integer")
-    if (
-        isinstance(monotonic_ns, bool)
-        or not isinstance(monotonic_ns, int)
-        or monotonic_ns < 0
-    ):
+    if type(attempt_sequence) is not int or attempt_sequence <= 0:
+        raise CalibrationError("attempt sequence must be a positive integer")
+    if type(monotonic_ns) is not int or monotonic_ns < 0:
         raise CalibrationError("journal monotonic_ns must be nonnegative")
+    if not isinstance(cell, SweepCell):
+        raise TypeError("journal cell must be a SweepCell")
+    if not isinstance(run_attestation, CalibrationRunAttestation):
+        raise TypeError("journal run attestation has the wrong type")
+    if record_type == "attempt_intent":
+        if terminal_status != "pending" or sample is not None:
+            raise CalibrationError("attempt intent cannot contain an outcome")
+    elif terminal_status == "completed":
+        if not isinstance(sample, CalibrationSample):
+            raise CalibrationError("completed attempt requires a sample")
+    elif terminal_status in TERMINAL_FAILURE_STATUSES:
+        if sample is not None:
+            raise CalibrationError("failed attempt cannot contain a sample")
+    else:
+        raise CalibrationError("attempt outcome status is invalid")
     previous = (
         ZERO_SHA256
         if previous_sha256 == ZERO_SHA256
@@ -794,13 +986,91 @@ def seal_calibration_record(
     unsigned: dict[str, object] = {
         "schema": RECORD_SCHEMA,
         "sequence": sequence,
+        "attempt_sequence": attempt_sequence,
         "monotonic_ns": monotonic_ns,
         "plan_sha256": plan.sha256,
-        "sample": parsed.manifest(),
+        "record_type": record_type,
+        "cell": cell.manifest(),
+        "run_attestation": run_attestation.manifest(),
+        "terminal_status": terminal_status,
+        "sample": sample.manifest() if sample is not None else None,
         "previous_sha256": previous,
     }
     unsigned["sha256"] = hashlib.sha256(canonical_json_bytes(unsigned)).hexdigest()
     return unsigned
+
+
+def seal_calibration_intent(
+    plan: CalibrationPlan,
+    cell: SweepCell,
+    run_attestation: CalibrationRunAttestation,
+    *,
+    sequence: int,
+    attempt_sequence: int,
+    monotonic_ns: int,
+    previous_sha256: str = ZERO_SHA256,
+) -> dict[str, object]:
+    return _seal_calibration_record(
+        plan,
+        record_type="attempt_intent",
+        sequence=sequence,
+        attempt_sequence=attempt_sequence,
+        monotonic_ns=monotonic_ns,
+        cell=cell,
+        run_attestation=run_attestation,
+        terminal_status="pending",
+        sample=None,
+        previous_sha256=previous_sha256,
+    )
+
+
+def seal_calibration_record(
+    plan: CalibrationPlan,
+    sample: CalibrationSample | Mapping[str, Any] | None,
+    run_attestation: CalibrationRunAttestation | Mapping[str, Any],
+    *,
+    sequence: int,
+    attempt_sequence: int,
+    monotonic_ns: int,
+    terminal_status: str = "completed",
+    previous_sha256: str = ZERO_SHA256,
+) -> dict[str, object]:
+    """Seal one terminal attempt outcome.
+
+    The matching durable intent must immediately precede this record in a
+    verifiable journal.
+    """
+
+    parsed_run = (
+        run_attestation
+        if isinstance(run_attestation, CalibrationRunAttestation)
+        else CalibrationRunAttestation.from_mapping(run_attestation)
+    )
+    parsed_sample = (
+        sample
+        if isinstance(sample, CalibrationSample)
+        else CalibrationSample.from_mapping(sample)
+        if sample is not None
+        else None
+    )
+    if parsed_sample is not None:
+        cell = parsed_sample.cell
+    elif attempt_sequence <= len(plan.expected_cells):
+        cell = plan.expected_cells[attempt_sequence - 1]
+    else:
+        raise CalibrationError("attempt sequence exceeds the calibration plan")
+    return _seal_calibration_record(
+        plan,
+        record_type="attempt_outcome",
+        sequence=sequence,
+        attempt_sequence=attempt_sequence,
+        monotonic_ns=monotonic_ns,
+        cell=cell,
+        run_attestation=parsed_run,
+        terminal_status=terminal_status,
+        sample=parsed_sample,
+        previous_sha256=previous_sha256,
+    )
 
 
 def encode_calibration_record(record: Mapping[str, Any]) -> bytes:
@@ -837,15 +1107,25 @@ def _validate_record(
     *,
     expected_sequence: int,
     expected_previous: str,
-) -> tuple[dict[str, Any], CalibrationSample]:
+) -> tuple[
+    dict[str, Any],
+    SweepCell,
+    CalibrationRunAttestation,
+    CalibrationSample | None,
+]:
     record = _mapping(value, "calibration record")
     _exact_keys(
         record,
         {
             "schema",
             "sequence",
+            "attempt_sequence",
             "monotonic_ns",
             "plan_sha256",
+            "record_type",
+            "cell",
+            "run_attestation",
+            "terminal_status",
             "sample",
             "previous_sha256",
             "sha256",
@@ -871,24 +1151,81 @@ def _validate_record(
     expected_digest = hashlib.sha256(canonical_json_bytes(unsigned)).hexdigest()
     if digest != expected_digest:
         raise CalibrationError("journal record SHA-256 does not match its contents")
-    sample = CalibrationSample.from_mapping(record.get("sample"))
-    if expected_sequence > len(plan.expected_cells):
-        raise CalibrationError("journal contains more actions than the plan")
-    expected_cell = plan.expected_cells[expected_sequence - 1]
-    if sample.cell != expected_cell:
-        raise CalibrationError("journal action disagrees with randomized sweep order")
+    attempt_sequence = record.get("attempt_sequence")
     if (
-        sample.provider_capability != SAFE_PROVIDER_CAPABILITY
-        or sample.provider_build_sha256 != plan.provider_build_sha256
+        isinstance(attempt_sequence, bool)
+        or not isinstance(attempt_sequence, int)
+        or attempt_sequence <= 0
+        or attempt_sequence > len(plan.expected_cells)
     ):
-        raise CalibrationError("journal sample lacks the required safe provider")
-    return dict(record), sample
+        raise CalibrationError("journal attempt sequence is outside the plan")
+    expected_cell = plan.expected_cells[attempt_sequence - 1]
+    cell_value = _mapping(record.get("cell"), "journal cell")
+    _exact_keys(
+        cell_value,
+        {"experiment_id", "client_x", "client_y", "button", "repetition"},
+        "journal cell",
+    )
+    cell = SweepCell(
+        _identifier(cell_value.get("experiment_id"), "journal cell experiment"),
+        _finite(cell_value.get("client_x"), "journal cell x"),
+        _finite(cell_value.get("client_y"), "journal cell y"),
+        str(cell_value.get("button")),
+        _positive_int(cell_value.get("repetition"), "journal cell repetition"),
+    )
+    if cell != expected_cell:
+        raise CalibrationError("journal action disagrees with randomized sweep order")
+    run = CalibrationRunAttestation.from_mapping(record.get("run_attestation"))
+    if run.experiment_id != cell.experiment_id:
+        raise CalibrationError("run attestation names a different experiment")
+    if (
+        run.measurement_runner_sha256 != plan.measurement_runner_sha256
+        or run.observer_sha256 != plan.observer_sha256
+        or run.measurement_tool_sha256 != plan.provenance["measurement_tool_sha256"]
+        or run.wine_prefix_sha256 != plan.provenance["wine_prefix_sha256"]
+    ):
+        raise CalibrationError("journal run uses an unapproved measurement environment")
+
+    record_type = record.get("record_type")
+    terminal_status = record.get("terminal_status")
+    raw_sample = record.get("sample")
+    sample: CalibrationSample | None = None
+    if record_type == "attempt_intent":
+        if terminal_status != "pending" or raw_sample is not None:
+            raise CalibrationError("attempt intent contains terminal data")
+    elif record_type == "attempt_outcome":
+        if terminal_status == "completed":
+            sample = CalibrationSample.from_mapping(raw_sample)
+            if sample.cell != cell:
+                raise CalibrationError("outcome sample differs from its intended cell")
+            if (
+                sample.provider_capability != SAFE_PROVIDER_CAPABILITY
+                or sample.provider_build_sha256 != plan.provider_build_sha256
+            ):
+                raise CalibrationError(
+                    "journal sample lacks the required safe provider"
+                )
+        elif terminal_status in TERMINAL_FAILURE_STATUSES:
+            if raw_sample is not None:
+                raise CalibrationError("failed attempt contains a fabricated sample")
+        else:
+            raise CalibrationError("journal terminal status is invalid")
+    else:
+        raise CalibrationError("journal record type is invalid")
+    if expected_sequence > len(plan.expected_cells) * 2:
+        raise CalibrationError("journal contains more actions than the plan")
+    return dict(record), cell, run, sample
 
 
 @dataclass(frozen=True, slots=True)
 class VerifiedCalibrationJournal:
     samples: tuple[CalibrationSample, ...]
     monotonic_ns: tuple[int, ...]
+    run_attestations: tuple[CalibrationRunAttestation, ...]
+    attempt_count: int
+    terminal_count: int
+    terminal_failures: tuple[str, ...]
+    tainted: bool
     input_sha256: str
     chain_head_sha256: str
     registration_lower_bound: float
@@ -917,6 +1254,14 @@ def verify_calibration_journal(
         raise TypeError("plan must be a CalibrationPlan")
     samples: list[CalibrationSample] = []
     timestamps: list[int] = []
+    run_by_experiment: dict[str, CalibrationRunAttestation] = {}
+    nonce_owner: dict[str, str] = {}
+    process_owner: dict[tuple[int, int], str] = {}
+    runtime_owner: dict[str, str] = {}
+    terminal_failures: list[str] = []
+    pending: tuple[int, SweepCell, CalibrationRunAttestation] | None = None
+    attempt_count = 0
+    terminal_count = 0
     input_digest = hashlib.sha256()
     previous = ZERO_SHA256
     journal_path = Path(path)
@@ -942,11 +1287,19 @@ def verify_calibration_journal(
             not stat.S_ISREG(opened.st_mode)
             or opened.st_uid != os.getuid()
             or stat.S_IMODE(opened.st_mode) != 0o600
+            or opened.st_nlink != 1
         ):
             os.close(descriptor)
             raise CalibrationError(
                 "calibration journal must be an owned regular file with mode 0600"
             )
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            os.close(descriptor)
+            raise CalibrationError(
+                "calibration journal is still open for writing"
+            ) from exc
         with os.fdopen(descriptor, "rb") as stream:
             line_number = 0
             while line := stream.readline(MAX_LINE_BYTES + 1):
@@ -960,7 +1313,7 @@ def verify_calibration_journal(
                     raise CalibrationError(
                         f"journal line {line_number} is incomplete or blank"
                     )
-                record, sample = _validate_record(
+                record, cell, run, sample = _validate_record(
                     _decode_record(line, f"journal line {line_number}"),
                     plan,
                     expected_sequence=line_number,
@@ -971,21 +1324,88 @@ def verify_calibration_journal(
                     raise CalibrationError(
                         "journal monotonic timestamps must increase strictly"
                     )
-                samples.append(sample)
+                prior_run = run_by_experiment.setdefault(run.experiment_id, run)
+                if prior_run != run:
+                    raise CalibrationError(
+                        "process or measurement-tool identity changed within "
+                        "an experiment"
+                    )
+                nonce_prior = nonce_owner.setdefault(
+                    run.launch_nonce_sha256, run.experiment_id
+                )
+                process_key = (run.process_id, run.process_start_ticks)
+                process_prior = process_owner.setdefault(process_key, run.experiment_id)
+                runtime_prior = runtime_owner.setdefault(
+                    run.runtime_identity_sha256, run.experiment_id
+                )
+                if (
+                    nonce_prior != run.experiment_id
+                    or process_prior != run.experiment_id
+                    or runtime_prior != run.experiment_id
+                ):
+                    raise CalibrationError(
+                        "fresh-process identity was reused across experiments"
+                    )
+                attempt_sequence = int(record["attempt_sequence"])
+                if record["record_type"] == "attempt_intent":
+                    if pending is not None or attempt_sequence != attempt_count + 1:
+                        raise CalibrationError(
+                            "attempt intent is missing an earlier terminal outcome"
+                        )
+                    pending = (attempt_sequence, cell, run)
+                    attempt_count += 1
+                else:
+                    if pending != (attempt_sequence, cell, run):
+                        raise CalibrationError(
+                            "attempt outcome lacks its immediately preceding intent"
+                        )
+                    terminal_count += 1
+                    pending = None
+                    if record["terminal_status"] == "completed":
+                        assert sample is not None
+                        samples.append(sample)
+                    else:
+                        terminal_failures.append(str(record["terminal_status"]))
                 timestamps.append(timestamp)
                 previous = str(record["sha256"])
+            after = os.fstat(stream.fileno())
+            if (
+                opened.st_dev,
+                opened.st_ino,
+                opened.st_size,
+                opened.st_mtime_ns,
+                opened.st_ctime_ns,
+            ) != (
+                after.st_dev,
+                after.st_ino,
+                after.st_size,
+                after.st_mtime_ns,
+                after.st_ctime_ns,
+            ):
+                raise CalibrationError(
+                    "calibration journal changed while it was verified"
+                )
     except OSError as exc:
         raise CalibrationError(f"cannot read calibration journal: {exc}") from exc
     finally:
         os.close(directory_descriptor)
 
-    if require_complete and len(samples) != plan.maximum_actions:
+    tainted = pending is not None or bool(terminal_failures)
+    if require_complete and (
+        attempt_count != plan.maximum_actions
+        or terminal_count != plan.maximum_actions
+        or len(samples) != plan.maximum_actions
+    ):
         raise CalibrationError(
-            f"journal is incomplete: expected {plan.maximum_actions}, "
-            f"observed {len(samples)}"
+            f"journal is incomplete: expected {plan.maximum_actions} terminal "
+            f"attempts, observed {terminal_count}"
         )
-    if len(samples) > plan.maximum_actions:
+    if attempt_count > plan.maximum_actions or terminal_count > plan.maximum_actions:
         raise CalibrationError("journal exceeds the maximum action count")
+    if require_complete and tainted:
+        raise CalibrationError(
+            "journal is tainted by an unterminated or failed action attempt"
+        )
     if (
         timestamps
         and (timestamps[-1] - timestamps[0]) / 1e9 > plan.maximum_runtime_seconds
@@ -1020,6 +1440,11 @@ def verify_calibration_journal(
     return VerifiedCalibrationJournal(
         tuple(samples),
         tuple(timestamps),
+        tuple(run_by_experiment.values()),
+        attempt_count,
+        terminal_count,
+        tuple(terminal_failures),
+        tainted,
         input_digest.hexdigest(),
         previous,
         registration_lower,
@@ -1039,6 +1464,10 @@ def _open_private_directory(path: Path) -> int:
     if not path.is_absolute():
         raise JournalPublicationError("private journal directory must be absolute")
     try:
+        if path.resolve(strict=True) != path:
+            raise JournalPublicationError(
+                "private journal directory ancestry contains a symlink"
+            )
         metadata = path.lstat()
     except OSError as exc:
         raise JournalPublicationError(
@@ -1110,10 +1539,12 @@ class CalibrationJournalWriter:
                 not stat.S_ISREG(opened.st_mode)
                 or opened.st_uid != os.getuid()
                 or stat.S_IMODE(opened.st_mode) != 0o600
+                or opened.st_nlink != 1
             ):
                 raise JournalPublicationError(
                     "journal file ownership or mode is unsafe"
                 )
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
             os.fsync(self._directory_descriptor)
         except FileExistsError as exc:
             os.close(self._directory_descriptor)
@@ -1127,10 +1558,17 @@ class CalibrationJournalWriter:
             raise
         assert descriptor is not None
         self._descriptor = descriptor
-        self._sequence = 0
+        self._record_sequence = 0
+        self._attempt_sequence = 0
         self._previous = ZERO_SHA256
         self._first_timestamp: int | None = None
         self._last_timestamp: int | None = None
+        self._pending: tuple[SweepCell, CalibrationRunAttestation] | None = None
+        self._run_by_experiment: dict[str, CalibrationRunAttestation] = {}
+        self._nonce_owner: dict[str, str] = {}
+        self._process_owner: dict[tuple[int, int], str] = {}
+        self._runtime_owner: dict[str, str] = {}
+        self._tainted = False
         self._closed = False
 
     def __enter__(self) -> Self:
@@ -1138,59 +1576,175 @@ class CalibrationJournalWriter:
 
     @property
     def sequence(self) -> int:
-        return self._sequence
+        return self._attempt_sequence
 
     @property
     def next_cell(self) -> SweepCell | None:
-        if self._sequence >= len(self.plan.expected_cells):
+        if self._pending is not None:
+            return self._pending[0]
+        if self._attempt_sequence >= len(self.plan.expected_cells):
             return None
-        return self.plan.expected_cells[self._sequence]
+        return self.plan.expected_cells[self._attempt_sequence]
 
     def __exit__(self, exc_type: object, exc: object, traceback: object) -> bool:
         self.close()
         return False
 
-    def append(
-        self,
-        sample: CalibrationSample | Mapping[str, Any],
-        *,
-        monotonic_ns: int,
-    ) -> dict[str, object]:
+    def _validate_timestamp(self, monotonic_ns: int) -> int:
         if self._closed:
             raise CalibrationError("journal writer is closed")
-        if self._sequence >= self.plan.maximum_actions:
-            raise CalibrationError("journal reached its maximum action count")
-        if (
-            isinstance(monotonic_ns, bool)
-            or not isinstance(monotonic_ns, int)
-            or monotonic_ns < 0
-        ):
+        if type(monotonic_ns) is not int or monotonic_ns < 0:
             raise CalibrationError("journal monotonic_ns must be nonnegative")
         if self._last_timestamp is not None and monotonic_ns <= self._last_timestamp:
             raise CalibrationError("journal timestamps must increase strictly")
         first = monotonic_ns if self._first_timestamp is None else self._first_timestamp
         if (monotonic_ns - first) / 1e9 > self.plan.maximum_runtime_seconds:
             raise CalibrationError("journal exceeded its maximum run time")
-        record = seal_calibration_record(
+        return first
+
+    def _write_record(self, record: Mapping[str, Any], monotonic_ns: int) -> None:
+        _write_all(self._descriptor, encode_calibration_record(record))
+        os.fsync(self._descriptor)
+        self._record_sequence += 1
+        self._previous = str(record["sha256"])
+        self._first_timestamp = (
+            monotonic_ns if self._first_timestamp is None else self._first_timestamp
+        )
+        self._last_timestamp = monotonic_ns
+
+    def begin_attempt(
+        self,
+        run_attestation: CalibrationRunAttestation | Mapping[str, Any],
+        *,
+        monotonic_ns: int,
+    ) -> dict[str, object]:
+        first = self._validate_timestamp(monotonic_ns)
+        del first
+        if self._pending is not None:
+            raise CalibrationError("previous attempt lacks a terminal outcome")
+        if self._attempt_sequence >= self.plan.maximum_actions:
+            raise CalibrationError("journal reached its maximum action count")
+        run = (
+            run_attestation
+            if isinstance(run_attestation, CalibrationRunAttestation)
+            else CalibrationRunAttestation.from_mapping(run_attestation)
+        )
+        cell = self.plan.expected_cells[self._attempt_sequence]
+        if run.experiment_id != cell.experiment_id:
+            raise CalibrationError("run attestation differs from the next planned cell")
+        if (
+            run.measurement_runner_sha256 != self.plan.measurement_runner_sha256
+            or run.observer_sha256 != self.plan.observer_sha256
+            or run.measurement_tool_sha256
+            != self.plan.provenance["measurement_tool_sha256"]
+            or run.wine_prefix_sha256
+            != self.plan.provenance["wine_prefix_sha256"]
+        ):
+            raise CalibrationError("run uses an unapproved measurement environment")
+        prior_run = self._run_by_experiment.get(run.experiment_id)
+        if prior_run is not None and prior_run != run:
+            raise CalibrationError("run identity changed within an experiment")
+        nonce_owner = self._nonce_owner.get(run.launch_nonce_sha256)
+        process_key = (run.process_id, run.process_start_ticks)
+        process_owner = self._process_owner.get(process_key)
+        runtime_owner = self._runtime_owner.get(run.runtime_identity_sha256)
+        if (
+            nonce_owner is not None
+            and nonce_owner != run.experiment_id
+            or process_owner is not None
+            and process_owner != run.experiment_id
+            or runtime_owner is not None
+            and runtime_owner != run.experiment_id
+        ):
+            raise CalibrationError("fresh-process identity was reused")
+        record = seal_calibration_intent(
             self.plan,
-            sample,
-            sequence=self._sequence + 1,
+            cell,
+            run,
+            sequence=self._record_sequence + 1,
+            attempt_sequence=self._attempt_sequence + 1,
             monotonic_ns=monotonic_ns,
             previous_sha256=self._previous,
         )
         _validate_record(
             record,
             self.plan,
-            expected_sequence=self._sequence + 1,
+            expected_sequence=self._record_sequence + 1,
             expected_previous=self._previous,
         )
-        _write_all(self._descriptor, encode_calibration_record(record))
-        os.fsync(self._descriptor)
-        self._sequence += 1
-        self._previous = str(record["sha256"])
-        self._first_timestamp = first
-        self._last_timestamp = monotonic_ns
+        self._write_record(record, monotonic_ns)
+        self._pending = (cell, run)
+        self._run_by_experiment.setdefault(run.experiment_id, run)
+        self._nonce_owner.setdefault(run.launch_nonce_sha256, run.experiment_id)
+        self._process_owner.setdefault(process_key, run.experiment_id)
+        self._runtime_owner.setdefault(
+            run.runtime_identity_sha256, run.experiment_id
+        )
         return record
+
+    def complete_attempt(
+        self,
+        sample: CalibrationSample | Mapping[str, Any] | None,
+        *,
+        monotonic_ns: int,
+        terminal_status: str = "completed",
+    ) -> dict[str, object]:
+        self._validate_timestamp(monotonic_ns)
+        if self._pending is None:
+            raise CalibrationError("attempt outcome has no durable intent")
+        cell, run = self._pending
+        parsed = (
+            sample
+            if isinstance(sample, CalibrationSample)
+            else CalibrationSample.from_mapping(sample)
+            if sample is not None
+            else None
+        )
+        if terminal_status == "completed":
+            if parsed is None or parsed.cell != cell:
+                raise CalibrationError("completed sample differs from its intent")
+        elif terminal_status not in TERMINAL_FAILURE_STATUSES or parsed is not None:
+            raise CalibrationError("failed attempt outcome is malformed")
+        record = seal_calibration_record(
+            self.plan,
+            parsed,
+            run,
+            sequence=self._record_sequence + 1,
+            attempt_sequence=self._attempt_sequence + 1,
+            monotonic_ns=monotonic_ns,
+            terminal_status=terminal_status,
+            previous_sha256=self._previous,
+        )
+        _, record_cell, record_run, _ = _validate_record(
+            record,
+            self.plan,
+            expected_sequence=self._record_sequence + 1,
+            expected_previous=self._previous,
+        )
+        if (record_cell, record_run) != self._pending:
+            raise CalibrationError("attempt outcome binding changed")
+        self._write_record(record, monotonic_ns)
+        self._pending = None
+        self._attempt_sequence += 1
+        if terminal_status != "completed":
+            self._tainted = True
+        return record
+
+    def append(
+        self,
+        sample: CalibrationSample | Mapping[str, Any],
+        run_attestation: CalibrationRunAttestation | Mapping[str, Any],
+        *,
+        monotonic_ns: int,
+    ) -> dict[str, object]:
+        """Durably write an intent and its successful terminal outcome."""
+
+        self.begin_attempt(run_attestation, monotonic_ns=monotonic_ns)
+        return self.complete_attempt(
+            sample,
+            monotonic_ns=monotonic_ns + 1,
+            terminal_status="completed",
+        )
 
     def close(self) -> None:
         if self._closed:
@@ -1214,9 +1768,14 @@ class CalibrationJournalWriter:
             raise error
 
     def finalize(self) -> VerifiedCalibrationJournal:
-        if self._sequence != self.plan.maximum_actions:
+        if (
+            self._pending is not None
+            or self._tainted
+            or self._attempt_sequence != self.plan.maximum_actions
+        ):
             raise CalibrationError(
-                f"cannot finalize incomplete journal: {self._sequence}/"
+                f"cannot finalize incomplete or tainted journal: "
+                f"{self._attempt_sequence}/"
                 f"{self.plan.maximum_actions}"
             )
         self.close()
@@ -1323,6 +1882,42 @@ def _metric_artifact(
     }
 
 
+def _enforce_metric_acceptance(
+    metrics: Mapping[str, Mapping[str, object]],
+    plan: CalibrationPlan,
+) -> None:
+    """Apply every frozen bound to a conservative 95% confidence edge."""
+
+    failures: list[str] = []
+    for field in METRIC_FIELDS:
+        metric = metrics[field]
+        uncertainty = _finite(
+            metric.get("uncertainty"),
+            f"derived {field} uncertainty",
+            nonnegative=True,
+        )
+        for statistic, bounds in plan.metric_acceptance[field].items():
+            point = _finite(
+                metric.get(statistic),
+                f"derived {field}.{statistic}",
+                nonnegative=True,
+            )
+            if "max" in bounds and point + uncertainty > bounds["max"]:
+                failures.append(
+                    f"{field}.{statistic} upper confidence edge "
+                    f"{point + uncertainty} > {bounds['max']}"
+                )
+            if "min" in bounds and point - uncertainty < bounds["min"]:
+                failures.append(
+                    f"{field}.{statistic} lower confidence edge "
+                    f"{point - uncertainty} < {bounds['min']}"
+                )
+    if failures:
+        raise CalibrationError(
+            "calibration metric acceptance failed: " + "; ".join(failures)
+        )
+
+
 def _verify_soak_binding(
     plan: CalibrationPlan,
     soak_report: Mapping[str, Any],
@@ -1363,7 +1958,11 @@ def _verify_soak_binding(
         _mapping(soak_report.get("provenance"), "soak provenance").get("observed"),
         "soak observed provenance",
     )
-    for key in ("game_executable_sha256", "measurement_tool_sha256"):
+    for key in (
+        "game_executable_sha256",
+        "measurement_tool_sha256",
+        "wine_prefix_sha256",
+    ):
         if report_provenance.get(key) != plan.provenance[key]:
             raise CalibrationError(f"soak report does not bind {key}")
     return report_sha256, event_stream_sha256
@@ -1391,6 +1990,7 @@ def build_deployment_evidence(
     metrics = {
         field: _metric_artifact(field, journal.samples, plan) for field in METRIC_FIELDS
     }
+    _enforce_metric_acceptance(metrics, plan)
     artifacts = list(
         dict.fromkeys(
             (
@@ -1440,6 +2040,15 @@ def build_deployment_evidence(
             "continuous_drift_check": True,
         }
     )
+    observed_provenance = dict(plan.provenance)
+    observed_tool_hashes = {
+        run.measurement_tool_sha256 for run in journal.run_attestations
+    }
+    if observed_tool_hashes != {plan.provenance["measurement_tool_sha256"]}:
+        raise CalibrationError(
+            "journal measurement-tool provenance differs from the frozen plan"
+        )
+    observed_provenance["measurement_tool_sha256"] = next(iter(observed_tool_hashes))
     return {
         "schema_version": DEPLOYMENT_EVIDENCE_SCHEMA,
         "contract_version": "deployment-v1",
@@ -1448,7 +2057,7 @@ def build_deployment_evidence(
         "soak_event_stream_sha256": event_stream_sha256,
         "soak_threshold_config_sha256": plan.soak_threshold_config_sha256,
         "soak_report_sha256": report_sha256,
-        "provenance": dict(plan.provenance),
+        "provenance": observed_provenance,
         "sections": sections,
     }
 
@@ -1458,12 +2067,15 @@ __all__ = [
     "CalibrationError",
     "CalibrationJournalWriter",
     "CalibrationPlan",
+    "CalibrationRunAttestation",
     "CalibrationSample",
     "JournalPublicationError",
     "VerifiedCalibrationJournal",
     "build_deployment_evidence",
     "encode_calibration_record",
     "load_calibration_plan",
+    "measurement_tool_bundle_sha256",
+    "seal_calibration_intent",
     "seal_calibration_record",
     "verify_calibration_journal",
 ]

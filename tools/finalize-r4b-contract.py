@@ -22,8 +22,13 @@ from irisu_rl.original_game.contracts import (
 )
 from irisu_rl.original_game.evidence import load_json_document
 from irisu_rl.original_game.private_io import (
-    publish_private_noreplace,
+    publish_private_bundle_noreplace,
+    snapshot_private_files,
 )
+
+MAX_REPORT_BYTES = 32 << 20
+MAX_EVENT_BYTES = 512 << 20
+MAX_THRESHOLD_BYTES = 32 << 20
 
 
 def main() -> None:
@@ -31,7 +36,7 @@ def main() -> None:
         description=(
             "Rebuild deployment evidence from a complete typed calibration journal "
             "and verified soak sources; publish evidence and a measured-pending-review "
-            "contract without replacing either output."
+            "contract as one crash-atomic no-replace bundle."
         )
     )
     parser.add_argument("base_contract", type=Path)
@@ -43,24 +48,35 @@ def main() -> None:
     parser.add_argument("output_directory", type=Path)
     parser.add_argument("--evidence-name", default="r4b-deployment-evidence.json")
     parser.add_argument("--contract-name", default="deployment-v1.measured.toml")
+    parser.add_argument("--bundle-name", default="r4b-measured-bundle")
     args = parser.parse_args()
     try:
         plan = load_calibration_plan(args.calibration_plan)
-        soak_report = load_json_document(args.soak_report, "soak report")
-        evidence = build_deployment_evidence(
-            plan,
-            args.calibration_journal,
-            soak_report,
-            args.soak_events,
-            args.soak_thresholds,
-        )
-        measured = finalize_deployment_contract(
-            load_deployment_contract(args.base_contract),
-            evidence,
-            soak_report,
-            args.soak_events,
-            args.soak_thresholds,
-        )
+        with snapshot_private_files(
+            {
+                "soak-report.json": (args.soak_report, MAX_REPORT_BYTES),
+                "soak-events.jsonl": (args.soak_events, MAX_EVENT_BYTES),
+                "soak-thresholds.json": (
+                    args.soak_thresholds,
+                    MAX_THRESHOLD_BYTES,
+                ),
+            }
+        ) as inputs:
+            soak_report = load_json_document(inputs["soak-report.json"], "soak report")
+            evidence = build_deployment_evidence(
+                plan,
+                args.calibration_journal,
+                soak_report,
+                inputs["soak-events.jsonl"],
+                inputs["soak-thresholds.json"],
+            )
+            measured = finalize_deployment_contract(
+                load_deployment_contract(args.base_contract),
+                evidence,
+                soak_report,
+                inputs["soak-events.jsonl"],
+                inputs["soak-thresholds.json"],
+            )
         evidence_payload = (
             json.dumps(
                 evidence,
@@ -71,13 +87,13 @@ def main() -> None:
             ).encode("ascii")
             + b"\n"
         )
-        publish_private_noreplace(
-            args.output_directory, args.evidence_name, evidence_payload
-        )
-        publish_private_noreplace(
+        publish_private_bundle_noreplace(
             args.output_directory,
-            args.contract_name,
-            render_toml(measured).encode("utf-8"),
+            args.bundle_name,
+            {
+                args.evidence_name: evidence_payload,
+                args.contract_name: render_toml(measured).encode("utf-8"),
+            },
         )
         print(measured["measurement_status"])
     except Exception as exc:

@@ -87,6 +87,7 @@ class Provider:
             self.attestation.runtime_sha256["game_executable_sha256"],
             self.attestation.runtime_identity_sha256,
             CANONICAL_WINE_SHA256,
+            "f" * 64,
         )
         return ClaimLease(
             identity,
@@ -119,7 +120,9 @@ class Provider:
             request,
             start,
             completion,
+            presentation_ns=completion,
             source_sequence=1,
+            canonical_pixel_sha256=hashlib.sha256(b"png").hexdigest(),
         )
 
     def current_cursor(self, identity, token):
@@ -176,6 +179,7 @@ class R4BOperationsTests(unittest.TestCase):
             repo_root=self.root,
             run_dir=self.run,
             launch_nonce_sha256=provider.launch_nonce_sha256,
+            wine_prefix_sha256="f" * 64,
             clock_ns=provider.clock,
         )
 

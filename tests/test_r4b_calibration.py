@@ -9,22 +9,29 @@ import sys
 import tempfile
 import unittest
 from copy import deepcopy
+from dataclasses import replace
 from pathlib import Path
 from unittest import mock
 
 from irisu_rl.original_game.calibration import (
     CLIENT_PIXEL_QUANTIZATION,
     METRIC_FIELDS,
+    METRIC_SPECS,
     SAFE_PROVIDER_CAPABILITY,
     CalibrationError,
     CalibrationJournalWriter,
     CalibrationPlan,
+    CalibrationRunAttestation,
     CalibrationSample,
     JournalPublicationError,
     build_deployment_evidence,
     encode_calibration_record,
-    seal_calibration_record,
+    measurement_tool_bundle_sha256,
     verify_calibration_journal,
+)
+from irisu_rl.original_game.calibration_runner import (
+    measurement_artifact_bundle_sha256,
+    measurement_runner_build_sha256,
 )
 from irisu_rl.original_game.contracts import (
     finalize_deployment_contract,
@@ -42,12 +49,20 @@ from irisu_rl.original_game.evidence import (
 
 ROOT = Path(__file__).resolve().parents[1]
 EXPERIMENT_IDS = ("r4b-process-001", "r4b-process-002", "r4b-process-003")
+RUNNER_SHA256 = measurement_runner_build_sha256()
+OBSERVER_SHA256 = measurement_artifact_bundle_sha256(
+    {"observer-fixture": Path(__file__).resolve()},
+    schema="r4b-measurement-observer-build-v1",
+)
 PROVENANCE = {
     "game_executable_sha256": hashlib.sha256(b"game").hexdigest(),
     "box2d_sha256": hashlib.sha256(b"box2d").hexdigest(),
     "dxlib_sha256": hashlib.sha256(b"dxlib").hexdigest(),
     "game_config_sha256": hashlib.sha256(b"config").hexdigest(),
-    "measurement_tool_sha256": hashlib.sha256(b"measurement-tool").hexdigest(),
+    "measurement_tool_sha256": measurement_tool_bundle_sha256(
+        RUNNER_SHA256, OBSERVER_SHA256
+    ),
+    "wine_prefix_sha256": hashlib.sha256(b"wine-prefix").hexdigest(),
     "runtime": "Wine controlled runtime",
     "hardware_id": "opaque-test-machine",
 }
@@ -76,6 +91,7 @@ def _thresholds() -> dict[str, object]:
         "required_provenance": {
             "game_executable_sha256": PROVENANCE["game_executable_sha256"],
             "measurement_tool_sha256": PROVENANCE["measurement_tool_sha256"],
+            "wine_prefix_sha256": PROVENANCE["wine_prefix_sha256"],
         },
         "minimum_duration_seconds": 200.0,
         "maximum_measurement_gap_seconds": 100.0,
@@ -116,6 +132,19 @@ def _soak_artifacts(root: Path) -> tuple[dict[str, object], Path, Path]:
                     "sequence": sequence,
                     "monotonic_ns": (base_seconds + offset_seconds) * 1_000_000_000,
                     "experiment_id": experiment_id,
+                    "process_binding": {
+                        "process_id": 30_000 + process_index,
+                        "process_start_ticks": 40_000 + process_index,
+                        "launch_nonce_sha256": hashlib.sha256(
+                            f"soak-nonce-{process_index}".encode()
+                        ).hexdigest(),
+                        "runtime_identity_sha256": hashlib.sha256(
+                            f"soak-runtime-{process_index}".encode()
+                        ).hexdigest(),
+                        "wine_prefix_sha256": PROVENANCE[
+                            "wine_prefix_sha256"
+                        ],
+                    },
                     "measurements": values,
                     "provenance": threshold["required_provenance"],
                     "threshold_sha256": threshold_sha256,
@@ -182,6 +211,18 @@ def _plan_mapping(report: dict[str, object]) -> dict[str, object]:
             "minimum_confirmed_actions": 512,
             "minimum_registration_rate": 0.99,
             "registration_interval_method": "wilson-score-v1",
+            "metric_bounds": {
+                field: (
+                    {"worst": {"min": 0.1}}
+                    if direction == "min"
+                    else {"worst": {"max": 1_000_000.0}}
+                )
+                for field, (_, _, direction) in METRIC_SPECS.items()
+            },
+        },
+        "measurement_tools": {
+            "runner_sha256": RUNNER_SHA256,
+            "observer_sha256": OBSERVER_SHA256,
         },
         "provenance": PROVENANCE,
     }
@@ -220,6 +261,27 @@ def _sample(plan: CalibrationPlan, index: int) -> CalibrationSample:
     )
 
 
+def _run_attestation(
+    plan: CalibrationPlan,
+    experiment_id: str,
+    *,
+    identity_index: int | None = None,
+) -> CalibrationRunAttestation:
+    experiment_index = plan.experiment_ids.index(experiment_id)
+    identity = experiment_index if identity_index is None else identity_index
+    return CalibrationRunAttestation(
+        experiment_id,
+        10_000 + identity,
+        20_000 + identity,
+        hashlib.sha256(f"nonce-{identity}".encode()).hexdigest(),
+        hashlib.sha256(f"runtime-{experiment_index}".encode()).hexdigest(),
+        plan.provenance["wine_prefix_sha256"],
+        plan.measurement_runner_sha256,
+        plan.observer_sha256,
+        plan.provenance["measurement_tool_sha256"],
+    )
+
+
 class R4BCalibrationTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
@@ -236,8 +298,10 @@ class R4BCalibrationTests(unittest.TestCase):
     def write_complete_journal(self, filename: str = "calibration.jsonl") -> Path:
         writer = CalibrationJournalWriter(self.private, filename, self.plan)
         for index in range(self.plan.maximum_actions):
+            sample = _sample(self.plan, index)
             writer.append(
-                _sample(self.plan, index),
+                sample,
+                _run_attestation(self.plan, sample.experiment_id),
                 monotonic_ns=1_000_000_000 + index * 1_000_000,
             )
         writer.finalize()
@@ -303,7 +367,12 @@ class R4BCalibrationTests(unittest.TestCase):
             "irisu_rl.original_game.calibration.os.write",
             side_effect=partial_write,
         ):
-            writer.append(_sample(self.plan, 0), monotonic_ns=1)
+            sample = _sample(self.plan, 0)
+            writer.append(
+                sample,
+                _run_attestation(self.plan, sample.experiment_id),
+                monotonic_ns=1,
+            )
         writer.close()
         verified = verify_calibration_journal(
             self.private / "partial.jsonl",
@@ -331,20 +400,33 @@ class R4BCalibrationTests(unittest.TestCase):
     ) -> None:
         wrong = _sample(self.plan, 1)
         with (
-            self.assertRaisesRegex(CalibrationError, "sweep order"),
+            self.assertRaisesRegex(CalibrationError, "differs from its intent"),
             CalibrationJournalWriter(self.private, "wrong.jsonl", self.plan) as writer,
         ):
-            writer.append(wrong, monotonic_ns=1)
+            writer.append(
+                wrong,
+                _run_attestation(self.plan, self.plan.expected_cells[0].experiment_id),
+                monotonic_ns=1,
+            )
 
-        first = seal_calibration_record(
-            self.plan,
-            _sample(self.plan, 0),
-            sequence=1,
-            monotonic_ns=1,
-        )
-        first["sample"]["measurements"]["frame_rate_hz"] = 999.0
         tampered = self.private / "tampered.jsonl"
-        tampered.write_bytes(encode_calibration_record(first))
+        sample = _sample(self.plan, 0)
+        with CalibrationJournalWriter(
+            self.private, "source.jsonl", self.plan
+        ) as writer:
+            writer.append(
+                sample,
+                _run_attestation(self.plan, sample.experiment_id),
+                monotonic_ns=1,
+            )
+        records = [
+            json.loads(line)
+            for line in (self.private / "source.jsonl").read_text().splitlines()
+        ]
+        records[1]["sample"]["measurements"]["frame_rate_hz"] = 999.0
+        tampered.write_bytes(
+            b"".join(encode_calibration_record(record) for record in records)
+        )
         tampered.chmod(0o600)
         with self.assertRaisesRegex(CalibrationError, "SHA-256"):
             verify_calibration_journal(tampered, self.plan, require_complete=False)
@@ -363,6 +445,115 @@ class R4BCalibrationTests(unittest.TestCase):
         parsed = CalibrationSample.from_mapping(value)
         self.assertFalse(parsed.registered)
 
+    def test_plan_requires_every_metric_bound_and_exact_tool_bundle(self) -> None:
+        missing_bound = deepcopy(self.plan_mapping)
+        del missing_bound["acceptance"]["metric_bounds"]["residual_client_pixels"]
+        with self.assertRaisesRegex(CalibrationError, "fields disagree"):
+            CalibrationPlan.from_mapping(missing_bound)
+
+        wrong_tool = deepcopy(self.plan_mapping)
+        wrong_tool["measurement_tools"]["observer_sha256"] = hashlib.sha256(
+            b"other-observer"
+        ).hexdigest()
+        with self.assertRaisesRegex(CalibrationError, "does not bind"):
+            CalibrationPlan.from_mapping(wrong_tool)
+
+    def test_write_ahead_intent_and_terminal_failure_permanently_taint_run(
+        self,
+    ) -> None:
+        first_cell = self.plan.expected_cells[0]
+        run = _run_attestation(self.plan, first_cell.experiment_id)
+
+        pending_path = self.private / "pending.jsonl"
+        writer = CalibrationJournalWriter(self.private, pending_path.name, self.plan)
+        writer.begin_attempt(run, monotonic_ns=1)
+        with self.assertRaisesRegex(CalibrationError, "still open"):
+            verify_calibration_journal(
+                pending_path,
+                self.plan,
+                require_complete=False,
+            )
+        writer.close()
+        pending = verify_calibration_journal(
+            pending_path, self.plan, require_complete=False
+        )
+        self.assertTrue(pending.tainted)
+        self.assertEqual(pending.attempt_count, 1)
+        self.assertEqual(pending.terminal_count, 0)
+        with self.assertRaisesRegex(CalibrationError, "incomplete"):
+            verify_calibration_journal(pending_path, self.plan)
+
+        failed_path = self.private / "failed.jsonl"
+        writer = CalibrationJournalWriter(self.private, failed_path.name, self.plan)
+        writer.begin_attempt(run, monotonic_ns=1)
+        writer.complete_attempt(None, monotonic_ns=2, terminal_status="fire_failed")
+        writer.close()
+        failed = verify_calibration_journal(
+            failed_path, self.plan, require_complete=False
+        )
+        self.assertTrue(failed.tainted)
+        self.assertEqual(failed.terminal_failures, ("fire_failed",))
+        self.assertEqual(failed.terminal_count, 1)
+
+    def test_reusing_process_or_launch_nonce_across_experiments_is_rejected(
+        self,
+    ) -> None:
+        writer = CalibrationJournalWriter(self.private, "reuse.jsonl", self.plan)
+        first_experiment = self.plan.experiment_ids[0]
+        while (
+            writer.next_cell is not None
+            and writer.next_cell.experiment_id == first_experiment
+        ):
+            index = writer.sequence
+            sample = _sample(self.plan, index)
+            writer.append(
+                sample,
+                _run_attestation(self.plan, first_experiment),
+                monotonic_ns=1 + index * 10,
+            )
+        second_experiment = self.plan.experiment_ids[1]
+        reused = _run_attestation(self.plan, second_experiment, identity_index=0)
+        with self.assertRaisesRegex(CalibrationError, "reused"):
+            writer.begin_attempt(reused, monotonic_ns=1 + writer.sequence * 10)
+        reused_runtime = replace(
+            _run_attestation(self.plan, second_experiment),
+            runtime_identity_sha256=_run_attestation(
+                self.plan, first_experiment
+            ).runtime_identity_sha256,
+        )
+        with self.assertRaisesRegex(CalibrationError, "reused"):
+            writer.begin_attempt(
+                reused_runtime,
+                monotonic_ns=2 + writer.sequence * 10,
+            )
+        writer.close()
+
+    def test_metric_acceptance_uses_conservative_confidence_edge(self) -> None:
+        mapping = deepcopy(self.plan_mapping)
+        mapping["acceptance"]["metric_bounds"]["residual_client_pixels"] = {
+            "worst": {"max": 0.105}
+        }
+        plan = CalibrationPlan.from_mapping(mapping)
+        writer = CalibrationJournalWriter(self.private, "metric-fail.jsonl", plan)
+        for index in range(plan.maximum_actions):
+            sample = _sample(plan, index)
+            writer.append(
+                sample,
+                _run_attestation(plan, sample.experiment_id),
+                monotonic_ns=1_000_000_000 + index * 1_000_000,
+            )
+        writer.finalize()
+        with self.assertRaisesRegex(
+            CalibrationError, "residual_client_pixels.worst upper confidence"
+        ):
+            build_deployment_evidence(
+                plan,
+                writer.path,
+                self.report,
+                self.events,
+                self.thresholds,
+            )
+
     def test_complete_journal_builds_only_raw_derived_contract_evidence(self) -> None:
         journal = self.write_complete_journal()
         evidence = build_deployment_evidence(
@@ -373,6 +564,10 @@ class R4BCalibrationTests(unittest.TestCase):
             self.thresholds,
         )
         self.assertEqual(evidence["status"], "measured")
+        self.assertEqual(
+            evidence["provenance"]["measurement_tool_sha256"],
+            self.plan.provenance["measurement_tool_sha256"],
+        )
         sections = evidence["sections"]
         for section in sections.values():
             self.assertEqual(section["sample_count"], 756)
@@ -410,6 +605,9 @@ class R4BCalibrationTests(unittest.TestCase):
         report_path = self.root / "report.json"
         plan_path.write_text(json.dumps(self.plan.manifest()), encoding="utf-8")
         report_path.write_text(json.dumps(self.report), encoding="utf-8")
+        report_path.chmod(0o600)
+        self.events.chmod(0o600)
+        self.thresholds.chmod(0o600)
         result = subprocess.run(
             [
                 sys.executable,
@@ -429,11 +627,19 @@ class R4BCalibrationTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.strip(), "measured_pending_review")
-        contract = (self.private / "deployment-v1.measured.toml").read_text(
-            encoding="utf-8"
-        )
+        bundle = self.private / "r4b-measured-bundle"
+        self.assertEqual(bundle.stat().st_mode & 0o777, 0o700)
+        contract = (bundle / "deployment-v1.measured.toml").read_text(encoding="utf-8")
         self.assertIn('measurement_status = "measured_pending_review"', contract)
         self.assertIn("live_deployment_enabled = false", contract)
+        self.assertTrue((bundle / "r4b-deployment-evidence.json").is_file())
+        repeated = subprocess.run(
+            result.args,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertNotEqual(repeated.returncode, 0)
 
     def test_builder_rejects_soak_and_plan_tampering(self) -> None:
         journal = self.write_complete_journal("bound.jsonl")
@@ -463,7 +669,12 @@ class R4BCalibrationTests(unittest.TestCase):
         self,
     ) -> None:
         writer = CalibrationJournalWriter(self.private, "incomplete.jsonl", self.plan)
-        writer.append(_sample(self.plan, 0), monotonic_ns=1)
+        sample = _sample(self.plan, 0)
+        writer.append(
+            sample,
+            _run_attestation(self.plan, sample.experiment_id),
+            monotonic_ns=1,
+        )
         with self.assertRaisesRegex(CalibrationError, "incomplete"):
             writer.finalize()
         writer.close()
@@ -471,10 +682,16 @@ class R4BCalibrationTests(unittest.TestCase):
             verify_calibration_journal(self.private / "incomplete.jsonl", self.plan)
 
         writer = CalibrationJournalWriter(self.private, "runtime.jsonl", self.plan)
-        writer.append(_sample(self.plan, 0), monotonic_ns=1)
+        writer.append(
+            sample,
+            _run_attestation(self.plan, sample.experiment_id),
+            monotonic_ns=1,
+        )
+        second = _sample(self.plan, 1)
         with self.assertRaisesRegex(CalibrationError, "maximum run time"):
             writer.append(
-                _sample(self.plan, 1),
+                second,
+                _run_attestation(self.plan, second.experiment_id),
                 monotonic_ns=int((self.plan.maximum_runtime_seconds + 1) * 1e9),
             )
         writer.close()

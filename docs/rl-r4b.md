@@ -49,9 +49,17 @@ R4b rejects the preserved source tree, symlinks, hard-linked required files,
 missing or mismatched disposable-run markers, trace-proxy DLLs, and any change
 to the executable, Box2D, DxLib, configuration, or packed data during a run.
 All eight canonical v2.03 hashes and the preregistered Wine executable are
-pinned.
+pinned. Attestation also snapshots every other immutable file through
+descriptor-relative no-follow traversal, rejects any unapproved Windows module,
+and permits mutation only for the exact known output paths (`save.dat`,
+`photo.png`, and `replay/new.rpy`). Live orchestration must re-attest that
+baseline immediately around every input/observation boundary.
 
-The launcher strips ambient Wine overrides, supplies the fixed Wine prefix,
+The launcher strips ambient Wine overrides and binds every owned, non-writable
+file plus the permitted standard `dosdevices`/user-shell symlinks in the fixed
+Wine prefix. Prefix content is SHA-bound into measurement provenance and its
+metadata baseline is re-attested immediately before and after input; any
+prefix mutation invalidates the run. The launcher then
 holds a cross-process measurement lock, starts one new process session, and
 creates a 256-bit launch nonce. It never kills a shared wineserver or scans and
 signals unrelated Wine processes. A claimed target binds:
@@ -60,13 +68,21 @@ signals unrelated Wine processes. A claimed target binds:
 - Unix PID and `/proc` process-start generation;
 - launch-nonce hash;
 - game executable and complete disposable-runtime identity hashes;
-- Wine executable hash; and
+- Wine executable and complete Wine-prefix hashes; and
 - broker instance and monotonically increasing claim generation.
 
 The broker must discover exactly one target carrying the raw nonce. Title,
 class, process name, or a matching icon is not authority. Every renewal must
 preserve the target, token, generation, and broker while strictly extending a
 still-live lease.
+
+After discovery, the launcher must bind that PID/start generation to its raw
+nonce and newly created Unix session. It pins the process with a pidfd and
+requires the bound target to exit during cleanup. The calibration runner
+refuses a harness without both runtime and Wine-prefix guards, and the harness
+rechecks the exact binding around capture and input. This deliberately does not
+signal a shared wineserver; production orchestration must call `bind_target`
+before opening the guarded harness.
 
 ## Input-free preflight
 
@@ -80,7 +96,12 @@ Reports and journals require an owner-controlled, non-symlink directory with
 mode `0700`. Files are created once with `O_NOFOLLOW|O_EXCL`, mode `0600`, an
 exclusive writer lock, complete-write loops, file `fsync`, and directory
 `fsync`. A partial final journal record is invalid rather than silently
-ignored.
+ignored. The R4b finalizer single-opens its private soak report/event/threshold
+sources under shared locks, verifies owner/mode/link count and a bounded stable
+identity, and works only from one private snapshot so repeated verification
+cannot observe different source versions. Evidence and the measured contract
+are published inside one fsynced, atomically renamed `0700` bundle directory;
+a crash cannot expose only one member as a completed bundle.
 
 Example after an independently audited broker exists:
 
@@ -90,6 +111,7 @@ PYTHONPATH=python python tools/run-r4b-preflight.py \
   <experiment-id> \
   "$PWD/reference/runs/<experiment-id>" \
   <exact-window-address> <exact-capture-id> <launch-nonce-sha256> \
+  /absolute/path/to/fixed-wine-prefix \
   /absolute/path/to/audited-broker <broker-sha256> \
   /private/r4b-preflight
 ```
@@ -121,6 +143,15 @@ inferred game poll/effect, and first visible confirmation. A failed or
 ambiguous registration is a result; it cannot receive fabricated latency or
 coordinate measurements.
 
+Before any capture or input attempt, the runner appends and `fsync`s a
+write-ahead intent bound to the exact sweep cell, process ID/start generation,
+launch-nonce hash, runtime identity, and audited runner/observer bundle. It then
+appends one terminal outcome. Capture, fire, observer, effect-recording,
+sample-validation, and final runtime/prefix revalidation failures are explicit
+terminal states; a crash leaves an unmatched intent. Either condition
+permanently taints that no-replace journal and prevents finalization, so an
+attempted action cannot disappear from the qualifying record.
+
 The copied `replay/new.rpy` is the authoritative IriSu-side input check. Each
 confirmed command must produce exactly one new edge for the correct button and
 quantized coordinate, never `BOTH`, with a sampled neutral record before the
@@ -134,6 +165,15 @@ one-dimensional coverage, wrong buttons, clipped coordinates, repeated edges,
 or runtime/geometry drift fail the run. Detection overlays and associations
 remain private and require operator review before promotion.
 
+Every experiment retains one immutable process attestation. Launch nonces and
+PID/start generations must be unique across experiment IDs; relabeling one
+long-lived IriSu process as several fresh runs is rejected before the next
+input and again during journal verification. The measurement provenance is
+derived from the runner's observed installed `original_game` source bundle and
+the observer's role-bound, owner-controlled artifact files. The runner hashes
+those files itself and records the resulting build identities in each
+attestation; callers cannot supply provenance strings copied from the plan.
+
 ## Statistics and soak
 
 Calibration values are rebuilt from a typed SHA-256 journal, not accepted as
@@ -143,6 +183,12 @@ Registration reliability uses a frozen Wilson lower confidence bound.
 Instrument resolution is a floor on uncertainty; a constant sample cannot
 claim zero uncertainty.
 
+The executable plan must freeze at least one acceptance bound for every
+calibration metric. Evidence construction evaluates the conservative 95%
+confidence edge—point estimate plus uncertainty for maximum bounds and minus
+uncertainty for minimum bounds—and fails before contract finalization if any
+bound is missed.
+
 Soak thresholds are evaluated for every experiment as well as in aggregate, so
 a good run cannot hide a bad one. Safety totals are intrinsically zero for
 stale/out-of-order frames, deadline or renewal failures, release failures,
@@ -150,6 +196,15 @@ cross-window routes, buffer overflow, descriptor/thread growth, wrong/repeated
 button edges, and coordinate clipping. The report also retains duplicates,
 drops, cadence/jitter, ring age, causal and visible latency, crop drift, and
 resource growth for transfer-model fitting.
+
+Every raw soak event carries the claimed target's Unix PID, process-start
+ticks, launch-nonce hash, complete disposable-runtime identity hash, and
+Wine-prefix hash. Those five fields must remain constant within an experiment.
+Process generation,
+launch nonce, and disposable-runtime identity must each be distinct across
+experiment IDs; changing only an event's experiment label cannot manufacture
+independent executable runs. The verified report persists this experiment-to-
+process mapping alongside the per-experiment statistics.
 
 The numerical latency and coordinate limits in the preregistration are
 engineering acceptance proposals, not measurements. If a labeled pilot shows

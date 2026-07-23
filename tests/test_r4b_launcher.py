@@ -73,6 +73,7 @@ class R4BLauncherTests(unittest.TestCase):
             self.assertGreater(attestation.launcher_process_id, 0)
             self.assertGreater(attestation.launcher_process_start_ticks, 0)
             self.assertEqual(len(attestation.launch_nonce_sha256), 64)
+            self.assertEqual(len(attestation.wine_prefix_sha256), 64)
         self.verify.assert_called_once()
         second = self.process()
         second.close()
@@ -82,6 +83,49 @@ class R4BLauncherTests(unittest.TestCase):
         raw_nonce = process.launch_nonce
         with process:
             self.assertNotIn(raw_nonce, repr(process.attestation))
+
+    def test_discovered_target_is_bound_to_nonce_generation_and_session(self) -> None:
+        process = self.process()
+        with process:
+            attestation = process.attestation
+            binding = process.bind_target(
+                attestation.launcher_process_id,
+                attestation.launcher_process_start_ticks,
+            )
+            self.assertEqual(binding.process_id, attestation.launcher_process_id)
+            self.assertEqual(binding.session_id, attestation.launcher_process_id)
+            process.verify_target_binding(
+                attestation.launcher_process_id,
+                attestation.launcher_process_start_ticks,
+            )
+            with self.assertRaisesRegex(LaunchError, "bound process generation"):
+                process.verify_target_binding(
+                    attestation.launcher_process_id + 1,
+                    attestation.launcher_process_start_ticks,
+                )
+            with self.assertRaisesRegex(LaunchError, "already bound"):
+                process.bind_target(
+                    attestation.launcher_process_id,
+                    attestation.launcher_process_start_ticks,
+                )
+
+    def test_cleanup_releases_resources_even_when_final_attestation_fails(self) -> None:
+        process = self.process()
+        self.verify.side_effect = RuntimeError("mutated")
+        with self.assertRaisesRegex(LaunchError, "runtime changed"):
+            process.close()
+        self.verify.side_effect = None
+        replacement = self.process()
+        replacement.close()
+
+    def test_wine_prefix_change_invalidates_the_measurement(self) -> None:
+        process = self.process()
+        process.start()
+        (self.prefix / "user.reg").write_text("changed", encoding="utf-8")
+        with self.assertRaisesRegex(LaunchError, "runtime changed"):
+            process.close()
+        replacement = self.process()
+        replacement.close()
 
 
 if __name__ == "__main__":
