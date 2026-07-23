@@ -100,6 +100,14 @@ class FakeSnapshotVector:
         self.restore_many_calls: list[tuple[int, ...]] = []
         self.full_restore_calls = 0
 
+    def runner_identity_manifest(self):
+        return {
+            "version": "fake-snapshot-vector-runner-identity-v1",
+            "num_envs": self.num_envs,
+            "config_hash": _CONFIG_HASH,
+            "behavior_mode": getattr(self, "behavior_mode", 0),
+        }
+
     @staticmethod
     def _decode(snapshot: bytes) -> tuple[int, int, int, int]:
         tick, score, gauge, state_hash = _SNAPSHOT.unpack(snapshot)

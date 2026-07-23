@@ -15,6 +15,8 @@ from irisu_rl.r3b_experiments import (
     load_plan,
 )
 from irisu_rl.r3b_runner import R3BRunBuilder
+from irisu_rl.r3b_runner import _environment_implementation_identity
+from irisu_env.vector import SyncVectorEnv
 from irisu_rl.schema import TEACHER_V1
 from tests.test_r3b_snapshot_initializer import (
     FakeSnapshotVector,
@@ -36,6 +38,19 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class R3BRunBuilderTests(unittest.TestCase):
+    def test_real_portable_vector_identity_excludes_live_handles(self) -> None:
+        library = ROOT / "build/libirisu_clone.so"
+        first = SyncVectorEnv(1, library_path=library)
+        second = SyncVectorEnv(1, library_path=library)
+        try:
+            self.assertEqual(
+                _environment_implementation_identity(first),
+                _environment_implementation_identity(second),
+            )
+        finally:
+            first.close()
+            second.close()
+
     def test_runner_identity_binds_model_and_vector_implementations(self) -> None:
         plan = load_plan(ROOT / "configs/rl/experiments/r3b-completion-v1.toml")
         curriculum, blobs = _fixture()

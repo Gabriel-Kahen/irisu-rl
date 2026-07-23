@@ -24,7 +24,11 @@ class SyncVectorEnv:
         physics_backend: str = "portable",
         worker_path: str | PathLike[str] | None = None,
     ) -> None:
-        if not isinstance(num_envs, Integral) or isinstance(num_envs, bool) or num_envs <= 0:
+        if (
+            not isinstance(num_envs, Integral)
+            or isinstance(num_envs, bool)
+            or num_envs <= 0
+        ):
             raise ValueError("num_envs must be a positive integer")
         created: list[IrisuEnv] = []
         try:
@@ -44,6 +48,17 @@ class SyncVectorEnv:
             raise
         self.envs = tuple(created)
         self.num_envs = len(self.envs)
+
+    def runner_identity_manifest(self) -> dict[str, object]:
+        """Immutable vector behavior configuration without handles or lane state."""
+
+        return {
+            "version": "irisu-sync-vector-runner-identity-v1",
+            "vector_type": f"{type(self).__module__}.{type(self).__qualname__}",
+            "coordination": "sequential",
+            "num_envs": self.num_envs,
+            "lanes": [env.runner_identity_manifest() for env in self.envs],
+        }
 
     def _items(self, values: Sequence[Any], label: str) -> tuple[Any, ...]:
         if (
@@ -69,9 +84,7 @@ class SyncVectorEnv:
             raise ValueError("normal-mode seed must fit in uint32")
         return result
 
-    def _seeds(
-        self, seed: int | Sequence[int | None] | None
-    ) -> tuple[int, ...]:
+    def _seeds(self, seed: int | Sequence[int | None] | None) -> tuple[int, ...]:
         if seed is None:
             supplied: Sequence[int | None] = [None] * self.num_envs
         elif isinstance(seed, Integral) and not isinstance(seed, bool):
@@ -87,7 +100,10 @@ class SyncVectorEnv:
         options: Mapping[str, Any] | None = None,
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         seeds = self._seeds(seed)
-        results = [env.reset(seed=value, options=options) for env, value in zip(self.envs, seeds)]
+        results = [
+            env.reset(seed=value, options=options)
+            for env, value in zip(self.envs, seeds)
+        ]
         return [value[0] for value in results], [value[1] for value in results]
 
     def step(
@@ -130,7 +146,9 @@ class SyncVectorEnv:
                     env._native.restore_state(snapshot)
                     env._has_reset = had_reset
             except BaseException as rollback_error:
-                raise RuntimeError("vector snapshot rollback failed") from rollback_error
+                raise RuntimeError(
+                    "vector snapshot rollback failed"
+                ) from rollback_error
             raise
 
     def state_hash(self) -> tuple[int, ...]:
@@ -150,11 +168,15 @@ class SyncVectorEnv:
         self.close()
 
     def __copy__(self) -> SyncVectorEnv:
-        raise TypeError("SyncVectorEnv owns mutable simulator state and cannot be copied")
+        raise TypeError(
+            "SyncVectorEnv owns mutable simulator state and cannot be copied"
+        )
 
     def __deepcopy__(self, memo: dict[int, object]) -> SyncVectorEnv:
         del memo
-        raise TypeError("SyncVectorEnv owns mutable simulator state and cannot be copied")
+        raise TypeError(
+            "SyncVectorEnv owns mutable simulator state and cannot be copied"
+        )
 
 
 IrisuSyncVectorEnv = SyncVectorEnv
@@ -183,7 +205,9 @@ class ThreadVectorEnv(SyncVectorEnv):
             worker_path=worker_path,
         )
         if workers is not None and (
-            not isinstance(workers, Integral) or isinstance(workers, bool) or workers <= 0
+            not isinstance(workers, Integral)
+            or isinstance(workers, bool)
+            or workers <= 0
         ):
             super().close()
             raise ValueError("workers must be a positive integer or None")
@@ -195,6 +219,17 @@ class ThreadVectorEnv(SyncVectorEnv):
             max_workers=self._worker_count,
             thread_name_prefix="irisu-env",
         )
+
+    def runner_identity_manifest(self) -> dict[str, object]:
+        manifest = super().runner_identity_manifest()
+        manifest.update(
+            {
+                "version": "irisu-thread-vector-runner-identity-v1",
+                "coordination": "threaded",
+                "workers": self._worker_count,
+            }
+        )
+        return manifest
 
     @staticmethod
     def _drain(futures: Sequence[Future[Any]]) -> list[Any]:
@@ -272,7 +307,11 @@ class ThreadVectorEnv(SyncVectorEnv):
         results = self._drain(futures)
         observations, rewards, terminated, truncated, infos = zip(*results)
         return (
-            list(observations), list(rewards), list(terminated), list(truncated), list(infos)
+            list(observations),
+            list(rewards),
+            list(terminated),
+            list(truncated),
+            list(infos),
         )
 
     def restore_state(self, snapshots: Sequence[bytes]) -> list[dict[str, Any]]:
@@ -287,6 +326,7 @@ class ThreadVectorEnv(SyncVectorEnv):
         try:
             return self._drain(futures)
         except BaseException:
+
             def rollback(env: IrisuEnv, backup: tuple[bytes, bool]) -> None:
                 env._native.restore_state(backup[0])
                 env._has_reset = backup[1]
@@ -298,7 +338,9 @@ class ThreadVectorEnv(SyncVectorEnv):
             try:
                 self._drain(rollback_futures)
             except BaseException as rollback_error:
-                raise RuntimeError("vector snapshot rollback failed") from rollback_error
+                raise RuntimeError(
+                    "vector snapshot rollback failed"
+                ) from rollback_error
             raise
 
     def close(self) -> None:

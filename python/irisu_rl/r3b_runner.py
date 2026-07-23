@@ -148,7 +148,6 @@ def _implementation_identity(
     value: object,
     *,
     bind_callable_state: bool = False,
-    bind_instance_state: bool = False,
 ) -> dict[str, str]:
     """Bind a concrete callable/type to executable Python implementation bytes."""
 
@@ -162,11 +161,7 @@ def _implementation_identity(
         bound_state = {}
     else:
         target = type(value)
-        bound_state = (
-            getattr(value, "__dict__", {})
-            if bind_callable_state or bind_instance_state
-            else {}
-        )
+        bound_state = getattr(value, "__dict__", {}) if bind_callable_state else {}
     code = getattr(target, "__code__", None)
     try:
         source = inspect.getsource(target).encode()
@@ -234,6 +229,21 @@ def _implementation_identity(
                 "bound_state": capture(bound_state),
             }
         ),
+    }
+
+
+def _environment_implementation_identity(environment: object) -> dict[str, object]:
+    """Bind vector code and an explicit immutable configuration manifest."""
+
+    manifest_factory = getattr(environment, "runner_identity_manifest", None)
+    if manifest_factory is None or not callable(manifest_factory):
+        raise TypeError("environment must expose runner_identity_manifest()")
+    manifest = manifest_factory()
+    if not isinstance(manifest, Mapping):
+        raise TypeError("environment runner identity must be a mapping")
+    return {
+        "implementation": _implementation_identity(environment),
+        "configuration": _audit_normalize(manifest),
     }
 
 
@@ -828,9 +838,7 @@ class R3BRunBuilder:
                 "model_factory": _implementation_identity(
                     self.model_factory, bind_callable_state=True
                 ),
-                "environment": _implementation_identity(
-                    environment, bind_instance_state=True
-                ),
+                "environment": _environment_implementation_identity(environment),
                 "environment_factory": _implementation_identity(
                     self.environment_factory, bind_callable_state=True
                 ),

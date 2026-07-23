@@ -372,6 +372,20 @@ class PaddedVectorEnv:
     def poisoned(self) -> bool:
         return self._poisoned
 
+    def runner_identity_manifest(self) -> dict[str, object]:
+        """Immutable vector behavior configuration without live worker state."""
+
+        return {
+            "version": "irisu-padded-vector-runner-identity-v1",
+            "vector_type": f"{type(self).__module__}.{type(self).__qualname__}",
+            "coordination": "padded-threaded",
+            "num_envs": self._num_envs,
+            "workers": self._workers,
+            "physics_backend": self._physics_backend,
+            "body_capacity": self.body_capacity,
+            "config_hashes": list(self._config_hashes),
+        }
+
     def _require_open(self) -> ThreadPoolExecutor:
         if self._poisoned:
             raise RuntimeError("padded vector environment is poisoned")
