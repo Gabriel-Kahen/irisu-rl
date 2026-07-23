@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#070a0b">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; connect-src 'self'">
+  <title>irisu</title>
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <main class="app">
+    <header>
+      <div class="brand">irisu</div>
+      <div class="header-actions">
+        <button id="pauseButton">pause <kbd>space</kbd></button>
+        <button id="restartButton">restart <kbd>R</kbd></button>
+      </div>
+    </header>
+
+    <div class="layout">
+      <section class="game-frame">
+        <canvas id="game" width="640" height="480" aria-label="IriSu game field"></canvas>
+        <div id="gameOver" class="modal" hidden>
+          <span class="modal-kicker">RUN COMPLETE</span>
+          <h1 id="finalTitle">Game over</h1>
+          <p id="finalScore">00000000</p>
+          <button id="againButton" class="primary">try again</button>
+        </div>
+        <div id="paused" class="pause-mark" hidden>PAUSED</div>
+      </section>
+
+    </div>
+  </main>
+  <div id="toast" class="toast"></div>
+  <script type="module" src="./app.js"></script>
+</body>
+</html>

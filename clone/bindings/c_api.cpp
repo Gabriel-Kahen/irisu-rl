@@ -5,20 +5,23 @@
 #include "irisu/simulator.hpp"
 
 #include <algorithm>
-#include <atomic>
-#include <condition_variable>
 #include <cstdio>
 #include <cmath>
 #include <cstring>
 #include <exception>
 #include <limits>
-#include <mutex>
 #include <sstream>
 #include <string>
 #include <string_view>
-#include <thread>
 #include <type_traits>
 #include <vector>
+
+#if !defined(IRISU_SINGLE_THREADED_C_API)
+#include <atomic>
+#include <condition_variable>
+#include <mutex>
+#include <thread>
+#endif
 
 #ifndef IRISU_CXX_COMPILER_ID
 #define IRISU_CXX_COMPILER_ID "unknown"
@@ -413,6 +416,7 @@ int protect(irisu_simulator* simulator, Function&& function) {
   }
 }
 
+#if !defined(IRISU_SINGLE_THREADED_C_API)
 struct PaddedBatchRequest {
   irisu_simulator* const* simulators{};
   const irisu_padded_action_v1* actions{};
@@ -547,6 +551,7 @@ PaddedBatchPool& padded_batch_pool() {
   static PaddedBatchPool pool;
   return pool;
 }
+#endif
 
 }  // namespace
 
@@ -671,9 +676,20 @@ int irisu_padded_step_batch(irisu_simulator* const* simulators,
         if (simulators[index] == simulators[previous]) return 0;
       }
     }
+#if defined(IRISU_SINGLE_THREADED_C_API)
+    for (std::size_t index = 0; index < simulator_count; ++index) {
+      const auto& action = actions[index];
+      statuses[index] = static_cast<std::uint8_t>(protect(
+          simulators[index], [&] {
+            padded_step_impl(*simulators[index], action.kind, action.x,
+                             action.y, action.wait_ticks, destinations[index]);
+          }));
+    }
+#else
     PaddedBatchRequest request{simulators, actions, destinations, statuses,
                                simulator_count};
     padded_batch_pool().run(request, worker_count);
+#endif
     return 1;
   } catch (...) {
     return 0;
