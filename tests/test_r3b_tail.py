@@ -252,6 +252,7 @@ class ScoreOnlyTailTests(unittest.TestCase):
         restored.load_state_dict(state)
         self.assertEqual(restored.state_dict(), state)
         self.assertEqual(restored.sha256, source.sha256)
+        self.assertGreater(restored.event_count, 0)
 
         wrong_identity = tail_controller(1)
         with self.assertRaisesRegex(ValueError, "identity"):
@@ -261,6 +262,29 @@ class ScoreOnlyTailTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "clocks disagree"):
             restored.load_state_dict(malformed)
         self.assertEqual(restored.state_dict(), state)
+
+        missing_chain = dict(state)
+        missing_chain["event_head"] = "0" * 64
+        with self.assertRaisesRegex(ValueError, "event-chain head"):
+            restored.load_state_dict(missing_chain)
+        self.assertEqual(restored.state_dict(), state)
+
+        wrong_count = dict(state)
+        wrong_count["event_count"] = int(state["event_count"]) + 1
+        with self.assertRaisesRegex(ValueError, "event count"):
+            restored.load_state_dict(wrong_count)
+        self.assertEqual(restored.state_dict(), state)
+
+        old_version = dict(state)
+        old_version["version"] = "score-only-tail-controller-v2"
+        with self.assertRaisesRegex(ValueError, "version"):
+            restored.load_state_dict(old_version)
+
+        fresh = tail_controller(1)
+        impossible_fresh = fresh.state_dict()
+        impossible_fresh["event_head"] = "a" * 64
+        with self.assertRaisesRegex(ValueError, "event-chain head"):
+            fresh.load_state_dict(impossible_fresh)
 
     def test_configuration_and_weight_validation(self) -> None:
         with self.assertRaisesRegex(ValueError, "positive"):

@@ -29,6 +29,7 @@ from irisu_rl.rewards import (
     RewardKnot,
     RewardSchedule,
 )
+from irisu_rl.runtime_identity import attest_simulator_runtime
 from irisu_rl.vector_adapter import MacroVectorAdapter
 
 
@@ -38,8 +39,20 @@ _CONFIG = {"mode": "snapshot-test"}
 _CONFIG_SHA256 = hashlib.sha256(
     json.dumps(_CONFIG, sort_keys=True, separators=(",", ":")).encode()
 ).hexdigest()
-_RUNTIME_SHA256 = "2" * 64
 _POOL = "snapshot-pool"
+
+
+class FakeRuntimeLane:
+    library_path = str(Path(__file__).resolve())
+    build_info = {
+        "physics_backend": "portable-test-r58",
+        "snapshot_schema": 7,
+        "clone_version": "snapshot-fixture-v1",
+    }
+
+
+_RUNTIME_ATTESTATION = attest_simulator_runtime(FakeRuntimeLane())
+_RUNTIME_SHA256 = _RUNTIME_ATTESTATION.sha256
 
 
 def _observation(
@@ -79,6 +92,7 @@ class FakeSnapshotVector:
     num_envs = 2
 
     def __init__(self) -> None:
+        self.envs = (FakeRuntimeLane(), FakeRuntimeLane())
         self.states = [(0, 0, 100, 1), (0, 0, 100, 2)]
         self.seeds = [0, 0]
         self.terminate_next: set[int] = set()
@@ -182,6 +196,9 @@ class FakeSnapshotVector:
 
 
 class ResetBoundReplaySimulator:
+    library_path = FakeRuntimeLane.library_path
+    build_info = FakeRuntimeLane.build_info
+
     def __init__(self) -> None:
         self.initialized = False
         self.tick = 0
@@ -292,7 +309,7 @@ def _components():
         coordinator,
         store,
         environment_pool=_POOL,
-        runtime_identity_sha256=_RUNTIME_SHA256,
+        runtime_attestation=_RUNTIME_ATTESTATION,
     )
     return spec, coordinator, store, initializer
 
@@ -330,15 +347,13 @@ class SnapshotInitializerTests(unittest.TestCase):
             replay_snapshot_recipe(
                 ResetBoundReplaySimulator(),
                 recipe,
-                runtime_identity_sha256=_RUNTIME_SHA256,
             ),
             snapshot,
         )
         with self.assertRaisesRegex(ValueError, "runtime identity"):
             replay_snapshot_recipe(
                 ResetBoundReplaySimulator(),
-                recipe,
-                runtime_identity_sha256="3" * 64,
+                replace(recipe, runtime_identity_sha256="3" * 64),
             )
         with self.assertRaisesRegex(ValueError, "nonzero"):
             replace(recipe, runtime_identity_sha256="0" * 64)
@@ -572,7 +587,7 @@ class SnapshotInitializerTests(unittest.TestCase):
             restored_coordinator,
             store,
             environment_pool=_POOL,
-            runtime_identity_sha256=_RUNTIME_SHA256,
+            runtime_attestation=_RUNTIME_ATTESTATION,
         )
         restored_env = FakeSnapshotVector()
         restored_adapter = MacroVectorAdapter(

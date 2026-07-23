@@ -1,19 +1,30 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import struct
+import tempfile
 import unittest
 from dataclasses import replace
+from pathlib import Path
 
 from irisu_env import Action
 from irisu_rl.actions import ActionSpec
-from irisu_rl.curriculum import SnapshotBlobStore
-from irisu_rl.encoding import TeacherStateEncoder
+from irisu_rl.curriculum import SnapshotBlobStore, SnapshotLibrary
+from irisu_rl.encoding import ActorTrackEncoder, TeacherStateEncoder
 from irisu_rl.models import RecurrentActorCritic, RecurrentModelConfig
 from irisu_rl.r3b_evaluation import (
+    CrossBackendCellPair,
+    CrossBackendEvaluationManifest,
+    DeploymentPolicyIdentity,
+    EvaluationReport,
     EvaluationSuite,
     ScriptedBaselineSpec,
     RecurrentSemanticPolicy,
+    behavior_build_identity_manifest,
+    behavior_build_identity_sha256,
     build_baseline_evidence,
+    encoder_instance_manifest,
     evaluate_recurrent_policy,
     evaluate_scripted_baseline,
     semantic_from_native,
@@ -26,6 +37,7 @@ from tests.test_r3b_snapshot_initializer import (
     _CONFIG,
     _CONFIG_HASH,
     _RUNTIME_SHA256,
+    FakeRuntimeLane,
     _fixture,
 )
 
@@ -33,15 +45,14 @@ from tests.test_r3b_snapshot_initializer import (
 _SNAPSHOT = struct.Struct("<qqqQ")
 
 
-def evaluation_identity(*, backend: str = "a", execution: str = "c"):
-    return {
-        "actual_runtime_identity_sha256": _RUNTIME_SHA256,
-        "backend_identity_sha256": backend * 64,
-        "execution_identity_sha256": execution * 64,
-    }
+def evaluation_identity(*, execution: str = "c"):
+    return {"execution_identity_sha256": execution * 64}
 
 
 class FakeSingleSimulator:
+    library_path = FakeRuntimeLane.library_path
+    build_info = FakeRuntimeLane.build_info
+
     def __init__(self) -> None:
         self.tick = 0
         self.score = 0
@@ -79,7 +90,87 @@ class FakeSingleSimulator:
         return self._observation(), int(delta), False, False, {"invalid_action": False}
 
 
+class ConfiguredTeacherEncoder(TeacherStateEncoder):
+    def __init__(self, scale: int) -> None:
+        self.scale = scale
+
+
 class R3BEvaluationTests(unittest.TestCase):
+    def test_build_identity_binds_source_dependencies_runtime_and_configuration(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "package"
+            source.mkdir()
+            module = source / "helper.py"
+            module.write_text("VALUE = 1\n", encoding="utf-8")
+            lock = root / "uv.lock"
+            project = root / "pyproject.toml"
+            lock.write_text("version = 1\n", encoding="utf-8")
+            project.write_text("[project]\nname = 'fixture'\n", encoding="utf-8")
+            inputs = {"pyproject.toml": project, "uv.lock": lock}
+            roots = {"fixture": source}
+
+            first = behavior_build_identity_sha256(
+                {"mode": "train"}, source_roots=roots, dependency_inputs=inputs
+            )
+            module.write_text("VALUE = 2\n", encoding="utf-8")
+            changed_source = behavior_build_identity_sha256(
+                {"mode": "train"}, source_roots=roots, dependency_inputs=inputs
+            )
+            changed_config = behavior_build_identity_sha256(
+                {"mode": "evaluate"}, source_roots=roots, dependency_inputs=inputs
+            )
+            lock.write_text("version = 2\n", encoding="utf-8")
+            changed_dependency = behavior_build_identity_sha256(
+                {"mode": "evaluate"}, source_roots=roots, dependency_inputs=inputs
+            )
+            manifest = behavior_build_identity_manifest(
+                {"mode": "evaluate"},
+                source_roots=roots,
+                dependency_inputs=inputs,
+            )
+
+        self.assertNotEqual(first, changed_source)
+        self.assertNotEqual(changed_source, changed_config)
+        self.assertNotEqual(changed_config, changed_dependency)
+        self.assertEqual(manifest["version"], "r3b-behavior-build-identity-v1")
+        self.assertIn("torch", manifest["runtime"])
+        self.assertIn("algorithms_enabled", manifest["deterministic_settings"])
+
+    def test_deployment_identity_binds_encoder_instance_and_model_inference(
+        self,
+    ) -> None:
+        torch.manual_seed(17)
+        model = RecurrentActorCritic(
+            TEACHER_V1,
+            config=RecurrentModelConfig(8, 8, 12, 12, 1, critic_condition_features=1),
+        )
+        kind = torch.ones((1, 3), dtype=torch.bool)
+        wait = torch.ones((1, len(ActionSpec().wait_choices)), dtype=torch.bool)
+        first_encoder = ConfiguredTeacherEncoder(1)
+        second_encoder = ConfiguredTeacherEncoder(2)
+
+        first = DeploymentPolicyIdentity.from_components(
+            model, first_encoder, kind, wait
+        )
+        second = DeploymentPolicyIdentity.from_components(
+            model, second_encoder, kind, wait
+        )
+
+        self.assertNotEqual(
+            encoder_instance_manifest(first_encoder),
+            encoder_instance_manifest(second_encoder),
+        )
+        self.assertNotEqual(
+            first.encoder_identity_sha256, second.encoder_identity_sha256
+        )
+        self.assertNotEqual(first.inference_build_sha256, second.inference_build_sha256)
+        self.assertNotEqual(first.sha256, second.sha256)
+        self.assertEqual(first.version, "r3b-deployment-policy-v2")
+        self.assertNotEqual(first.model_manifest_sha256, "0" * 64)
+
     def test_fixed_cells_use_raw_score_delta_and_macro_bounds(self) -> None:
         spec, blobs = _fixture()
         store = SnapshotBlobStore(spec.library, blobs)
@@ -96,6 +187,25 @@ class R3BEvaluationTests(unittest.TestCase):
             store.library.sha256,
             store.sha256,
             ActionSpec().sha256,
+            (spec.library["validation"].sha256,),
+        )
+        portable_recipe = spec.library["validation"]
+        exact_recipe = replace(
+            portable_recipe,
+            snapshot_id="exact-validation",
+            environment_pool="exact-validation",
+            snapshot_sha256="c" * 64,
+            runtime_identity_sha256="b" * 64,
+        )
+        logical_manifest = CrossBackendEvaluationManifest(
+            (CrossBackendCellPair.from_recipes(portable_recipe, exact_recipe),)
+        )
+        exact_library = SnapshotLibrary((exact_recipe,))
+        logical_ids = tuple(pair.logical_cell.sha256 for pair in logical_manifest.pairs)
+        suite = replace(
+            suite,
+            logical_cell_ids=logical_ids,
+            logical_manifest_sha256=logical_manifest.sha256,
         )
         baseline = ScriptedBaselineSpec("no_action_long_wait", (("wait_ticks", 1),))
         report = evaluate_scripted_baseline(
@@ -121,18 +231,112 @@ class R3BEvaluationTests(unittest.TestCase):
             expected_assignment_sha256=spec.assignment_sha256,
             **evaluation_identity(execution="d"),
         )
-        exact = evaluate_scripted_baseline(
-            FakeSingleSimulator(),
-            store,
+        exact_suite = replace(
             suite,
-            baseline,
-            evaluator_sha256="e" * 64,
-            expected_assignment_sha256=spec.assignment_sha256,
-            **evaluation_identity(backend="b", execution="e"),
+            suite_id="validation-exact-v1",
+            snapshot_ids=("exact-validation",),
+            recipe_sha256s=(exact_recipe.sha256,),
+            runtime_identity_sha256="b" * 64,
+            library_sha256=exact_library.sha256,
+            snapshot_store_sha256="d" * 64,
+            assignment_sha256="9" * 64,
+            backend="exact",
         )
-        evidence = build_baseline_evidence(baseline, suite, report, replay, exact)
+        exact = EvaluationReport(
+            exact_suite.sha256,
+            baseline.sha256,
+            "e" * 64,
+            exact_suite.runtime_identity_sha256,
+            "f" * 64,
+            tuple(
+                replace(value, snapshot_id="exact-validation")
+                for value in report.episodes
+            ),
+        )
+        evidence = build_baseline_evidence(
+            baseline,
+            suite,
+            report,
+            replay,
+            exact_suite,
+            exact,
+            logical_manifest,
+            store.library,
+            exact_library,
+        )
         self.assertEqual(evidence.episodes, 2)
         self.assertEqual(evidence.invalid_actions, 0)
+        canonical = json.dumps(
+            report.manifest(),
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode()
+        self.assertEqual(report.sha256, hashlib.sha256(canonical).hexdigest())
+        with self.assertRaisesRegex(ValueError, "canonical provenance"):
+            CrossBackendCellPair.from_recipes(
+                portable_recipe,
+                replace(exact_recipe, reset_seed=exact_recipe.reset_seed + 1),
+            )
+        with self.assertRaisesRegex(ValueError, "shared recipe provenance"):
+            forged_suite = replace(exact_suite, logical_cell_ids=("forged",))
+            build_baseline_evidence(
+                baseline,
+                suite,
+                report,
+                replay,
+                forged_suite,
+                replace(exact, suite_sha256=forged_suite.sha256),
+                logical_manifest,
+                store.library,
+                exact_library,
+            )
+        forged_portable_recipe = replace(
+            portable_recipe,
+            reset_seed=portable_recipe.reset_seed + 1,
+            snapshot_sha256="1" * 64,
+        )
+        forged_exact_recipe = replace(
+            exact_recipe,
+            reset_seed=exact_recipe.reset_seed + 1,
+            snapshot_sha256="2" * 64,
+        )
+        forged_manifest = CrossBackendEvaluationManifest(
+            (
+                CrossBackendCellPair.from_recipes(
+                    forged_portable_recipe, forged_exact_recipe
+                ),
+            )
+        )
+        forged_portable_library = SnapshotLibrary((forged_portable_recipe,))
+        forged_exact_library = SnapshotLibrary((forged_exact_recipe,))
+        forged_logical_ids = (forged_manifest.pairs[0].logical_cell.sha256,)
+        forged_portable_suite = replace(
+            suite,
+            recipe_sha256s=(forged_portable_recipe.sha256,),
+            logical_cell_ids=forged_logical_ids,
+            logical_manifest_sha256=forged_manifest.sha256,
+            library_sha256=forged_portable_library.sha256,
+        )
+        forged_exact_suite = replace(
+            exact_suite,
+            recipe_sha256s=(forged_exact_recipe.sha256,),
+            logical_cell_ids=forged_logical_ids,
+            logical_manifest_sha256=forged_manifest.sha256,
+            library_sha256=forged_exact_library.sha256,
+        )
+        with self.assertRaisesRegex(ValueError, "shared recipe provenance"):
+            build_baseline_evidence(
+                baseline,
+                forged_portable_suite,
+                replace(report, suite_sha256=forged_portable_suite.sha256),
+                replace(replay, suite_sha256=forged_portable_suite.sha256),
+                forged_exact_suite,
+                replace(exact, suite_sha256=forged_exact_suite.sha256),
+                forged_manifest,
+                store.library,
+                exact_library,
+            )
         with self.assertRaisesRegex(ValueError, "assignment identity"):
             evaluate_scripted_baseline(
                 FakeSingleSimulator(),
@@ -170,6 +374,7 @@ class R3BEvaluationTests(unittest.TestCase):
             store.library.sha256,
             store.sha256,
             ActionSpec().sha256,
+            (spec.library["validation"].sha256,),
         )
         with self.assertRaisesRegex(ValueError, "wrong split"):
             evaluate_scripted_baseline(
@@ -231,6 +436,7 @@ class R3BEvaluationTests(unittest.TestCase):
             store.library.sha256,
             store.sha256,
             model.action_spec.sha256,
+            (spec.library["validation"].sha256,),
         )
         eval_wait = torch.zeros_like(wait)
         eval_wait[:, 0] = True
@@ -249,6 +455,36 @@ class R3BEvaluationTests(unittest.TestCase):
         self.assertEqual(len(report.episodes), 1)
         self.assertEqual(report.episodes[0].raw_score, 2)
 
+        wait_only = torch.zeros_like(kind)
+        wait_only[:, 0] = True
+        restricted = evaluate_recurrent_policy(
+            FakeSingleSimulator(),
+            store,
+            suite,
+            model,
+            TeacherStateEncoder(),
+            wait_only,
+            eval_wait,
+            evaluator_sha256="e" * 64,
+            expected_assignment_sha256=spec.assignment_sha256,
+            **evaluation_identity(execution="d"),
+        )
+        self.assertNotEqual(report.policy_sha256, restricted.policy_sha256)
+
+        with self.assertRaisesRegex(ValueError, "encoder schema"):
+            evaluate_recurrent_policy(
+                FakeSingleSimulator(),
+                store,
+                suite,
+                model,
+                ActorTrackEncoder(),
+                kind,
+                eval_wait,
+                evaluator_sha256="e" * 64,
+                expected_assignment_sha256=spec.assignment_sha256,
+                **evaluation_identity(),
+            )
+
         with self.assertRaisesRegex(ValueError, "all-masked"):
             evaluate_recurrent_policy(
                 FakeSingleSimulator(),
@@ -257,6 +493,20 @@ class R3BEvaluationTests(unittest.TestCase):
                 model,
                 TeacherStateEncoder(),
                 torch.zeros_like(kind),
+                eval_wait,
+                evaluator_sha256="e" * 64,
+                expected_assignment_sha256=spec.assignment_sha256,
+                **evaluation_identity(),
+            )
+
+        with self.assertRaisesRegex(ValueError, "runtime identity"):
+            evaluate_recurrent_policy(
+                FakeSingleSimulator(),
+                store,
+                replace(suite, runtime_identity_sha256="f" * 64),
+                model,
+                TeacherStateEncoder(),
+                kind,
                 eval_wait,
                 evaluator_sha256="e" * 64,
                 expected_assignment_sha256=spec.assignment_sha256,
@@ -279,6 +529,7 @@ class R3BEvaluationTests(unittest.TestCase):
             store.library.sha256,
             store.sha256,
             ActionSpec().sha256,
+            (spec.library["validation"].sha256,),
         )
         report = evaluate_scripted_baseline(
             FakeSingleSimulator(),

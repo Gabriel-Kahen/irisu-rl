@@ -15,6 +15,7 @@ from torch import Tensor
 
 from .actions import ActionSpec, SemanticActionKind
 from .rewards import RewardSchedule
+from .runtime_identity import SimulatorRuntimeAttestation, attest_simulator_runtime
 from .vector_adapter import EpisodeInitialization
 
 
@@ -365,16 +366,11 @@ class SnapshotBlobStore:
 def replay_snapshot_recipe(
     simulator: Any,
     recipe: SnapshotRecipe,
-    *,
-    runtime_identity_sha256: str,
 ) -> bytes:
     """Rebuild and verify a cached snapshot from reset seed plus legal macros."""
 
-    if (
-        not _is_sha256(runtime_identity_sha256)
-        or runtime_identity_sha256 == _SHA256_ZERO
-        or runtime_identity_sha256 != recipe.runtime_identity_sha256
-    ):
+    runtime = attest_simulator_runtime(simulator)
+    if runtime.sha256 != recipe.runtime_identity_sha256:
         raise ValueError("snapshot recipe runtime identity mismatch")
     action_spec = ActionSpec()
     if recipe.action_spec_sha256 != action_spec.sha256:
@@ -1579,14 +1575,14 @@ class CurriculumSnapshotInitializer:
         store: SnapshotBlobStore,
         *,
         environment_pool: str,
-        runtime_identity_sha256: str,
+        runtime_attestation: SimulatorRuntimeAttestation,
     ) -> None:
         if store.library is not coordinator.spec.library:
             raise ValueError("snapshot store and curriculum library must be identical")
         if not environment_pool or _SAFE_IDENTIFIER.fullmatch(environment_pool) is None:
             raise ValueError("environment pool identity is invalid")
-        if not _is_sha256(runtime_identity_sha256):
-            raise ValueError("runtime identity must be a lowercase SHA-256")
+        if not isinstance(runtime_attestation, SimulatorRuntimeAttestation):
+            raise TypeError("runtime attestation must be measured from the simulator")
         stages = coordinator.spec.stages
         if {stage.environment_pool for stage in stages} != {environment_pool}:
             raise ValueError(
@@ -1597,19 +1593,21 @@ class CurriculumSnapshotInitializer:
         }
         recipes = tuple(store.library[snapshot_id] for snapshot_id in recipe_ids)
         if any(
-            recipe.runtime_identity_sha256 != runtime_identity_sha256
+            recipe.runtime_identity_sha256 != runtime_attestation.sha256
             for recipe in recipes
         ):
             raise ValueError("curriculum snapshot runtime identity mismatch")
         self.coordinator = coordinator
         self.store = store
         self.environment_pool = environment_pool
-        self.runtime_identity_sha256 = runtime_identity_sha256
+        self.runtime_attestation = runtime_attestation
+        self.runtime_identity_sha256 = runtime_attestation.sha256
         self.expected_config_hash = recipes[0].config_hash
         if any(recipe.config_hash != self.expected_config_hash for recipe in recipes):
             raise ValueError("environment pool mixes simulator config hashes")
         self._pending: AssignmentReservation | None = None
         self._pending_backups: tuple[bytes, ...] = ()
+        self._attested_environment_ids: set[int] = set()
 
     @property
     def has_pending(self) -> bool:
@@ -1656,6 +1654,14 @@ class CurriculumSnapshotInitializer:
             raise TypeError("deferred commit flag must be boolean")
         if self._pending is not None:
             raise RuntimeError("a snapshot assignment commit is already pending")
+        environment_id = id(env)
+        if environment_id not in self._attested_environment_ids:
+            actual_runtime = attest_simulator_runtime(env)
+            if actual_runtime.sha256 != self.runtime_attestation.sha256:
+                raise RuntimeError(
+                    "curriculum environment runtime attestation mismatch"
+                )
+            self._attested_environment_ids.add(environment_id)
         reservation = self.coordinator.reserve_assignments(lane_ids)
         lanes = tuple(assignment.lane_id for assignment in reservation.assignments)
         recipes = tuple(

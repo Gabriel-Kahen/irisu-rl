@@ -11,8 +11,11 @@ import hashlib
 import json
 import math
 import random
+import secrets
+import sqlite3
 import statistics
 import tomllib
+from contextlib import closing
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Mapping, Sequence
@@ -478,7 +481,7 @@ class R3BExperimentPlan:
         phase: str,
         arms: (
             Sequence[CandidateArm]
-            | CalibrationSelectionAuthorization
+            | ValidationRunAuthorization
             | SealedTestRunAuthorization
         ) = (),
     ) -> tuple[TrialJob, ...]:
@@ -488,12 +491,23 @@ class R3BExperimentPlan:
             ()
             if isinstance(
                 arms,
-                (CalibrationSelectionAuthorization, SealedTestRunAuthorization),
+                (
+                    CalibrationSelectionAuthorization,
+                    ValidationRunAuthorization,
+                    SealedTestRunAuthorization,
+                ),
             )
             else tuple(arms)
         )
         if phase == "calibration":
-            if supplied:
+            if supplied or isinstance(
+                arms,
+                (
+                    CalibrationSelectionAuthorization,
+                    ValidationRunAuthorization,
+                    SealedTestRunAuthorization,
+                ),
+            ):
                 raise ValueError("calibration arms come only from the frozen grid")
             selected = self.arms
             seeds = self.calibration_learner_seeds
@@ -501,11 +515,11 @@ class R3BExperimentPlan:
             sealed = False
         elif phase == "validation":
             if (
-                not isinstance(arms, CalibrationSelectionAuthorization)
-                or arms.plan_sha256 != self.sha256
+                not isinstance(arms, ValidationRunAuthorization)
+                or arms.plan.sha256 != self.sha256
             ):
                 raise ValueError("validation jobs require calibrated-arm authorization")
-            selected = arms.arms
+            selected = arms.authorization.arms
             seeds = self.validation_learner_seeds
             budgets = (self.validation_updates,)
             sealed = False
@@ -515,6 +529,7 @@ class R3BExperimentPlan:
                 or arms.plan.sha256 != self.sha256
             ):
                 raise ValueError("test jobs require a validation-bound authorization")
+            arms.assert_authorized()
             indexed = {arm.arm_id: arm for arm in self.arms}
             try:
                 selected = (
@@ -542,7 +557,7 @@ class R3BExperimentPlan:
                     if isinstance(
                         arms,
                         (
-                            CalibrationSelectionAuthorization,
+                            ValidationRunAuthorization,
                             SealedTestRunAuthorization,
                         ),
                     )
@@ -968,13 +983,17 @@ class CalibrationSelectionAuthorization:
     plan_sha256: str
     arms: tuple[CandidateArm, ...]
     calibration_results_sha256: str
-    version: str = "r3b-calibration-selection-authorization-v1"
+    runner_spec_sha256: str
+    evaluation_suite_sha256: str
+    version: str = "r3b-calibration-selection-authorization-v2"
 
     def __post_init__(self) -> None:
         if (
-            self.version != "r3b-calibration-selection-authorization-v1"
+            self.version != "r3b-calibration-selection-authorization-v2"
             or not _is_nonzero_sha256(self.plan_sha256)
             or not _is_nonzero_sha256(self.calibration_results_sha256)
+            or not _is_nonzero_sha256(self.runner_spec_sha256)
+            or not _is_nonzero_sha256(self.evaluation_suite_sha256)
             or not isinstance(self.arms, tuple)
             or not self.arms
             or any(not isinstance(arm, CandidateArm) for arm in self.arms)
@@ -987,7 +1006,35 @@ class CalibrationSelectionAuthorization:
             "plan_sha256": self.plan_sha256,
             "arms": [arm.manifest() for arm in self.arms],
             "calibration_results_sha256": self.calibration_results_sha256,
+            "runner_spec_sha256": self.runner_spec_sha256,
+            "evaluation_suite_sha256": self.evaluation_suite_sha256,
         }
+
+    @property
+    def sha256(self) -> str:
+        return _canonical_sha256(self.manifest())
+
+
+@dataclass(frozen=True, slots=True)
+class TestSuiteCommitment:
+    """Durable pre-validation commitment to the single sealed test suite."""
+
+    plan_sha256: str
+    test_suite_sha256: str
+    ledger_nonce: str
+    version: str = "r3b-test-suite-commitment-v1"
+
+    def __post_init__(self) -> None:
+        if (
+            self.version != "r3b-test-suite-commitment-v1"
+            or not _is_nonzero_sha256(self.plan_sha256)
+            or not _is_nonzero_sha256(self.test_suite_sha256)
+            or not _is_nonzero_sha256(self.ledger_nonce)
+        ):
+            raise ValueError("sealed test-suite commitment is malformed")
+
+    def manifest(self) -> dict[str, object]:
+        return asdict(self)
 
     @property
     def sha256(self) -> str:
@@ -1045,6 +1092,284 @@ def tick_aligned_raw_score_auc(
 
 
 @dataclass(frozen=True, slots=True)
+class TrainingCheckpointArtifact:
+    """Session-produced checkpoint identity used for one metric-grid point."""
+
+    learner_seed: int
+    completed_updates: int
+    simulated_ticks: int
+    plan_sha256: str
+    job_sha256: str
+    trial_manifest_sha256: str
+    runner_spec_sha256: str
+    checkpoint_manifest_sha256: str
+    model_sha256: str
+    deployment_policy_sha256: str
+    version: str = "r3b-training-checkpoint-artifact-v1"
+
+    def __post_init__(self) -> None:
+        if (
+            self.version != "r3b-training-checkpoint-artifact-v1"
+            or isinstance(self.learner_seed, bool)
+            or not isinstance(self.learner_seed, int)
+            or not 0 <= self.learner_seed < 2**64
+            or isinstance(self.completed_updates, bool)
+            or not isinstance(self.completed_updates, int)
+            or self.completed_updates < 0
+            or isinstance(self.simulated_ticks, bool)
+            or not isinstance(self.simulated_ticks, int)
+            or self.simulated_ticks < 0
+            or any(
+                not _is_nonzero_sha256(value)
+                for value in (
+                    self.plan_sha256,
+                    self.job_sha256,
+                    self.trial_manifest_sha256,
+                    self.runner_spec_sha256,
+                    self.checkpoint_manifest_sha256,
+                    self.model_sha256,
+                    self.deployment_policy_sha256,
+                )
+            )
+        ):
+            raise ValueError("training checkpoint artifact is malformed")
+
+    def manifest(self) -> dict[str, object]:
+        return asdict(self)
+
+    @property
+    def sha256(self) -> str:
+        return _canonical_sha256(self.manifest())
+
+
+@dataclass(frozen=True, slots=True)
+class CheckpointEvaluation:
+    """One evaluated training checkpoint with an explicit clock/policy binding."""
+
+    checkpoint: TrainingCheckpointArtifact
+    report: object
+    version: str = "r3b-checkpoint-evaluation-v2"
+
+    def __post_init__(self) -> None:
+        from .r3b_evaluation import EvaluationReport
+
+        if (
+            self.version != "r3b-checkpoint-evaluation-v2"
+            or not isinstance(self.checkpoint, TrainingCheckpointArtifact)
+            or not isinstance(self.report, EvaluationReport)
+            or self.report.policy_sha256 != self.checkpoint.deployment_policy_sha256
+        ):
+            raise ValueError("checkpoint evaluation identity is malformed")
+
+    @property
+    def completed_updates(self) -> int:
+        return self.checkpoint.completed_updates
+
+    @property
+    def simulated_ticks(self) -> int:
+        return self.checkpoint.simulated_ticks
+
+    @property
+    def checkpoint_artifact_sha256(self) -> str:
+        return self.checkpoint.sha256
+
+    @property
+    def policy_sha256(self) -> str:
+        return self.checkpoint.deployment_policy_sha256
+
+    def manifest(self) -> dict[str, object]:
+        return {
+            "version": self.version,
+            "checkpoint": self.checkpoint.manifest(),
+            "report_sha256": self.report.sha256,
+        }
+
+    @property
+    def sha256(self) -> str:
+        return _canonical_sha256(self.manifest())
+
+
+@dataclass(frozen=True, slots=True)
+class RawScoreMetricsArtifact:
+    """Canonical checkpoint reports from which every selection metric is derived."""
+
+    learner_seed: int
+    suite: object
+    checkpoints: tuple[CheckpointEvaluation, ...]
+    version: str = "r3b-raw-score-metrics-v2"
+
+    def __post_init__(self) -> None:
+        from .r3b_evaluation import EvaluationReport, EvaluationSuite
+
+        if (
+            self.version != "r3b-raw-score-metrics-v2"
+            or isinstance(self.learner_seed, bool)
+            or not isinstance(self.learner_seed, int)
+            or not 0 <= self.learner_seed < 2**64
+            or not isinstance(self.suite, EvaluationSuite)
+            or not isinstance(self.checkpoints, tuple)
+            or len(self.checkpoints) < 2
+        ):
+            raise ValueError("raw-score metrics artifact is malformed")
+        ticks: list[int] = []
+        reports: list[EvaluationReport] = []
+        expected_cells = {
+            (snapshot_id, repetition)
+            for snapshot_id in self.suite.snapshot_ids
+            for repetition in range(self.suite.repetitions)
+        }
+        updates: list[int] = []
+        for checkpoint in self.checkpoints:
+            if (
+                not isinstance(checkpoint, CheckpointEvaluation)
+                or checkpoint.checkpoint.learner_seed != self.learner_seed
+            ):
+                raise ValueError("checkpoint report entry is malformed")
+            tick = checkpoint.simulated_ticks
+            report = checkpoint.report
+            cells = {
+                (episode.snapshot_id, episode.repetition) for episode in report.episodes
+            }
+            if (
+                report.suite_sha256 != self.suite.sha256
+                or report.backend_identity_sha256 != self.suite.runtime_identity_sha256
+                or cells != expected_cells
+                or any(
+                    episode.policy_seed
+                    != self.suite.episode_seed(episode.snapshot_id, episode.repetition)
+                    or episode.decisions > self.suite.max_decisions
+                    or episode.elapsed_ticks > self.suite.max_simulated_ticks
+                    or not (episode.terminated or episode.truncated)
+                    or episode.invalid_actions != 0
+                    for episode in report.episodes
+                )
+            ):
+                raise ValueError("checkpoint report cells do not match the suite")
+            updates.append(checkpoint.completed_updates)
+            ticks.append(tick)
+            reports.append(report)
+        if (
+            updates[0] != 0
+            or ticks[0] != 0
+            or any(right <= left for left, right in zip(updates, updates[1:]))
+            or any(right <= left for left, right in zip(ticks, ticks[1:]))
+        ):
+            raise ValueError("checkpoint report ticks must start at zero and increase")
+        if (
+            len({report.evaluator_sha256 for report in reports}) != 1
+            or len({report.backend_identity_sha256 for report in reports}) != 1
+            or len({report.sha256 for report in reports}) != len(reports)
+            or len(
+                {
+                    checkpoint.checkpoint_artifact_sha256
+                    for checkpoint in self.checkpoints
+                }
+            )
+            != len(self.checkpoints)
+        ):
+            raise ValueError(
+                "checkpoint reports changed evaluator/backend or reused an artifact"
+            )
+
+    @property
+    def tick_reports(self) -> tuple[tuple[int, str, object], ...]:
+        """Compatibility view; authoritative metadata lives in ``checkpoints``."""
+
+        return tuple(
+            (
+                checkpoint.simulated_ticks,
+                checkpoint.checkpoint_artifact_sha256,
+                checkpoint.report,
+            )
+            for checkpoint in self.checkpoints
+        )
+
+    @property
+    def points(self) -> tuple[CurvePoint, ...]:
+        return tuple(
+            CurvePoint(
+                tick,
+                statistics.fmean(episode.raw_score for episode in report.episodes),
+            )
+            for checkpoint in self.checkpoints
+            for tick, report in ((checkpoint.simulated_ticks, checkpoint.report),)
+        )
+
+    @property
+    def final_report(self):
+        return self.checkpoints[-1].report
+
+    @property
+    def raw_score_auc(self) -> float:
+        points = self.points
+        return tick_aligned_raw_score_auc(
+            points, tuple(point.simulated_ticks for point in points)
+        )
+
+    @property
+    def final_mean_raw_score(self) -> float:
+        return statistics.fmean(
+            episode.raw_score for episode in self.final_report.episodes
+        )
+
+    @property
+    def p10_raw_score(self) -> float:
+        ordered = sorted(episode.raw_score for episode in self.final_report.episodes)
+        return float(ordered[max(0, math.ceil(0.1 * len(ordered)) - 1)])
+
+    def manifest(self) -> dict[str, object]:
+        return {
+            "version": self.version,
+            "learner_seed": self.learner_seed,
+            "suite_sha256": self.suite.sha256,
+            "checkpoints": [checkpoint.manifest() for checkpoint in self.checkpoints],
+        }
+
+    @property
+    def sha256(self) -> str:
+        return _canonical_sha256(self.manifest())
+
+
+@dataclass(frozen=True, slots=True)
+class ExactResumeArtifact:
+    """Independent checkpoint restore whose next update matches uninterrupted work."""
+
+    trial_manifest_sha256: str
+    checkpoint_manifest_sha256: str
+    checkpoint_policy_sha256: str
+    source_next_update_sha256: str
+    restored_next_update_sha256: str
+    source_after_state_sha256: str
+    restored_after_state_sha256: str
+    version: str = "r3b-exact-resume-artifact-v1"
+
+    def __post_init__(self) -> None:
+        hashes = (
+            self.trial_manifest_sha256,
+            self.checkpoint_manifest_sha256,
+            self.checkpoint_policy_sha256,
+            self.source_next_update_sha256,
+            self.restored_next_update_sha256,
+            self.source_after_state_sha256,
+            self.restored_after_state_sha256,
+        )
+        if (
+            self.version != "r3b-exact-resume-artifact-v1"
+            or any(not _is_nonzero_sha256(value) for value in hashes)
+            or self.source_next_update_sha256 != self.restored_next_update_sha256
+            or self.source_after_state_sha256 != self.restored_after_state_sha256
+        ):
+            raise ValueError("exact-resume artifact does not prove equal continuation")
+
+    def manifest(self) -> dict[str, object]:
+        return asdict(self)
+
+    @property
+    def sha256(self) -> str:
+        return _canonical_sha256(self.manifest())
+
+
+@dataclass(frozen=True, slots=True)
 class EngineeringEvidence:
     """Artifact identities required before an outcome may enter selection."""
 
@@ -1055,14 +1380,16 @@ class EngineeringEvidence:
     arm_id: str
     learner_seed: int
     authorization_sha256: str | None
+    sealed_job_lease_sha256: str | None
     policy_sha256: str
     trial_manifest_sha256: str
+    runner_spec_sha256: str
     pairing_sha256: str
     metrics_sha256: str
     evaluation_suite_sha256: str
     evaluation_report_sha256: str
-    checkpoint_resume_sha256: str
-    exact_backend_parity_sha256: str
+    checkpoint_resume_artifact: ExactResumeArtifact
+    exact_backend_parity_artifact: object
     tail_state_sha256: str | None = None
     tail_phase: str | None = None
     score_only_updates: int = 0
@@ -1084,27 +1411,46 @@ class EngineeringEvidence:
             or self.score_only_updates < 0
         ):
             raise ValueError("engineering evidence phase or counters are invalid")
+        from .r3b_evaluation import LearnedPolicyBackendParityArtifact
+
+        if not isinstance(
+            self.checkpoint_resume_artifact, ExactResumeArtifact
+        ) or not isinstance(
+            self.exact_backend_parity_artifact,
+            LearnedPolicyBackendParityArtifact,
+        ):
+            raise ValueError("engineering audit artifacts are malformed")
         hashes = (
             self.plan_sha256,
             self.job_sha256,
             self.policy_sha256,
             self.trial_manifest_sha256,
+            self.runner_spec_sha256,
             self.pairing_sha256,
             self.metrics_sha256,
             self.evaluation_suite_sha256,
             self.evaluation_report_sha256,
-            self.checkpoint_resume_sha256,
-            self.exact_backend_parity_sha256,
+            self.checkpoint_resume_artifact.sha256,
+            self.exact_backend_parity_artifact.sha256,
         )
         if self.tail_state_sha256 is not None:
             hashes += (self.tail_state_sha256,)
         if self.authorization_sha256 is not None:
             hashes += (self.authorization_sha256,)
+        if self.sealed_job_lease_sha256 is not None:
+            hashes += (self.sealed_job_lease_sha256,)
         if any(not _is_nonzero_sha256(value) for value in hashes):
             raise ValueError("engineering evidence must bind nonzero SHA-256 artifacts")
+        if (
+            self.checkpoint_resume_artifact.trial_manifest_sha256
+            != self.trial_manifest_sha256
+            or self.exact_backend_parity_artifact.policy_sha256 != self.policy_sha256
+        ):
+            raise ValueError("engineering audit artifacts disagree with the trial")
         if self.phase == "calibration":
             if (
                 self.authorization_sha256 is not None
+                or self.sealed_job_lease_sha256 is not None
                 or self.tail_state_sha256 is not None
                 or self.tail_phase is not None
                 or self.score_only_updates != 0
@@ -1112,6 +1458,10 @@ class EngineeringEvidence:
                 raise ValueError("calibration evidence cannot claim tail completion")
         elif self.authorization_sha256 is None:
             raise ValueError("full-budget evidence must bind its phase authorization")
+        if self.phase == "test" and self.sealed_job_lease_sha256 is None:
+            raise ValueError("test evidence must bind its one-time job lease")
+        if self.phase != "test" and self.sealed_job_lease_sha256 is not None:
+            raise ValueError("only sealed-test evidence may bind a job lease")
         if self.phase != "calibration" and (
             self.tail_state_sha256 is None
             or self.tail_phase != "complete"
@@ -1122,7 +1472,12 @@ class EngineeringEvidence:
             )
 
     def manifest(self) -> dict[str, object]:
-        return asdict(self)
+        value = asdict(self)
+        value["checkpoint_resume_artifact"] = self.checkpoint_resume_artifact.manifest()
+        value["exact_backend_parity_artifact"] = (
+            self.exact_backend_parity_artifact.manifest()
+        )
+        return value
 
     @property
     def sha256(self) -> str:
@@ -1138,6 +1493,7 @@ class LearnerOutcome:
     initial_model_sha256: str
     assignment_sha256: str
     seed_plan_sha256: str
+    metrics_artifact: RawScoreMetricsArtifact
     engineering_evidence: EngineeringEvidence | None
 
     def __post_init__(self) -> None:
@@ -1166,10 +1522,40 @@ class LearnerOutcome:
         ):
             raise ValueError("engineering evidence is malformed")
         if (
+            not isinstance(self.metrics_artifact, RawScoreMetricsArtifact)
+            or self.metrics_artifact.learner_seed != self.learner_seed
+        ):
+            raise ValueError("learner outcome requires its typed metrics artifact")
+        derived = (
+            self.metrics_artifact.raw_score_auc,
+            self.metrics_artifact.final_mean_raw_score,
+            self.metrics_artifact.p10_raw_score,
+        )
+        supplied = (
+            self.raw_score_auc,
+            self.final_mean_raw_score,
+            self.p10_raw_score,
+        )
+        if any(
+            not math.isclose(left, right, rel_tol=0.0, abs_tol=1e-12)
+            for left, right in zip(supplied, derived)
+        ):
+            raise ValueError("learner aggregates disagree with checkpoint reports")
+        if (
             self.engineering_evidence is not None
             and self.engineering_evidence.learner_seed != self.learner_seed
         ):
             raise ValueError("engineering evidence learner seed mismatch")
+        if self.engineering_evidence is not None and (
+            self.engineering_evidence.metrics_sha256 != self.metrics_artifact.sha256
+            or self.engineering_evidence.evaluation_suite_sha256
+            != self.metrics_artifact.suite.sha256
+            or self.engineering_evidence.evaluation_report_sha256
+            != self.metrics_artifact.final_report.sha256
+            or self.engineering_evidence.policy_sha256
+            != self.metrics_artifact.final_report.policy_sha256
+        ):
+            raise ValueError("engineering evidence disagrees with metrics reports")
         for name in (
             "initial_model_sha256",
             "assignment_sha256",
@@ -1185,17 +1571,29 @@ class LearnerOutcome:
                 raise ValueError(f"{name} must be a nonzero lowercase SHA-256")
 
     def manifest(self) -> dict[str, object]:
-        value = asdict(self)
-        value["engineering_evidence"] = (
-            None
-            if self.engineering_evidence is None
-            else self.engineering_evidence.manifest()
-        )
-        return value
+        return {
+            "learner_seed": self.learner_seed,
+            "raw_score_auc": self.raw_score_auc,
+            "final_mean_raw_score": self.final_mean_raw_score,
+            "p10_raw_score": self.p10_raw_score,
+            "initial_model_sha256": self.initial_model_sha256,
+            "assignment_sha256": self.assignment_sha256,
+            "seed_plan_sha256": self.seed_plan_sha256,
+            "metrics_artifact": self.metrics_artifact.manifest(),
+            "engineering_evidence": (
+                None
+                if self.engineering_evidence is None
+                else self.engineering_evidence.manifest()
+            ),
+        }
 
     @property
     def engineering_pass(self) -> bool:
         return self.engineering_evidence is not None
+
+    @property
+    def sha256(self) -> str:
+        return _canonical_sha256(self.manifest())
 
 
 @dataclass(frozen=True, slots=True)
@@ -1310,6 +1708,77 @@ def _require_paired_identities(
                 )
 
 
+def _require_runner_spec(results: Sequence[ArmPhaseResult]) -> str:
+    identities = {
+        outcome.engineering_evidence.runner_spec_sha256
+        for result in results
+        for outcome in result.outcomes
+        if outcome.engineering_evidence is not None
+    }
+    if len(identities) != 1:
+        raise ValueError(
+            "phase outcomes lack or disagree on the canonical runner specification"
+        )
+    return next(iter(identities))
+
+
+def _require_evaluation_suite(results: Sequence[ArmPhaseResult]) -> str:
+    identities = {
+        outcome.metrics_artifact.suite.sha256
+        for result in results
+        for outcome in result.outcomes
+        if outcome.engineering_evidence is not None
+    }
+    if len(identities) != 1:
+        raise ValueError(
+            "phase outcomes lack or disagree on the canonical evaluation suite"
+        )
+    return next(iter(identities))
+
+
+def _require_metric_artifacts(
+    plan: R3BExperimentPlan, results: Sequence[ArmPhaseResult]
+) -> None:
+    for result in results:
+        if result.status != "complete":
+            continue
+        expected_ticks = plan.tick_grid(result.budget_updates)
+        expected_updates = tuple(
+            range(
+                0,
+                result.budget_updates + 1,
+                plan.checkpoint_interval_updates,
+            )
+        )
+        for outcome in result.outcomes:
+            artifact = outcome.metrics_artifact
+            evidence = outcome.engineering_evidence
+            if (
+                evidence is None
+                or artifact.suite.split != result.phase
+                or tuple(
+                    checkpoint.completed_updates for checkpoint in artifact.checkpoints
+                )
+                != expected_updates
+                or tuple(
+                    checkpoint.simulated_ticks for checkpoint in artifact.checkpoints
+                )
+                != expected_ticks
+                or any(
+                    checkpoint.checkpoint.plan_sha256 != plan.sha256
+                    or checkpoint.checkpoint.job_sha256 != evidence.job_sha256
+                    or checkpoint.checkpoint.trial_manifest_sha256
+                    != evidence.trial_manifest_sha256
+                    or checkpoint.checkpoint.runner_spec_sha256
+                    != evidence.runner_spec_sha256
+                    for checkpoint in artifact.checkpoints
+                )
+            ):
+                raise ValueError(
+                    "learner metrics do not cover the exact phase checkpoint grid"
+                )
+
+
 def _require_plan_evidence(
     plan: R3BExperimentPlan, results: Sequence[ArmPhaseResult]
 ) -> None:
@@ -1332,6 +1801,9 @@ def select_calibrated_learning_rates(
         results, {arm.arm_id for arm in arms}, phase="calibration"
     )
     _require_plan_evidence(plan, tuple(indexed.values()))
+    _require_runner_spec(tuple(indexed.values()))
+    _require_evaluation_suite(tuple(indexed.values()))
+    _require_metric_artifacts(plan, tuple(indexed.values()))
     _require_paired_identities(tuple(indexed.values()), plan.calibration_learner_seeds)
     selected: list[CandidateArm] = []
     final_budget = plan.calibration_budgets_updates[-1]
@@ -1374,27 +1846,83 @@ def authorize_validation(
 ) -> CalibrationSelectionAuthorization:
     retained = tuple(results)
     arms = select_calibrated_learning_rates(plan, retained)
+    runner_spec_sha256 = _require_runner_spec(retained)
+    evaluation_suite_sha256 = _require_evaluation_suite(retained)
     return CalibrationSelectionAuthorization(
         plan.sha256,
         arms,
         _canonical_sha256(
             [result.sha256 for result in sorted(retained, key=lambda x: x.arm_id)]
         ),
+        runner_spec_sha256,
+        evaluation_suite_sha256,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class ValidationRunAuthorization:
+    """Calibration artifacts whose derived selection may enter validation."""
+
+    plan: R3BExperimentPlan
+    authorization: CalibrationSelectionAuthorization
+    calibration_results: tuple[ArmPhaseResult, ...]
+    test_commitment: TestSuiteCommitment
+    version: str = "r3b-validation-run-authorization-v1"
+
+    def __post_init__(self) -> None:
+        if (
+            self.version != "r3b-validation-run-authorization-v1"
+            or not isinstance(self.plan, R3BExperimentPlan)
+            or not isinstance(self.authorization, CalibrationSelectionAuthorization)
+            or not isinstance(self.calibration_results, tuple)
+            or not isinstance(self.test_commitment, TestSuiteCommitment)
+            or self.test_commitment.plan_sha256 != self.plan.sha256
+        ):
+            raise ValueError("validation-run authorization is malformed")
+        expected = authorize_validation(self.plan, self.calibration_results)
+        if expected != self.authorization:
+            raise ValueError("validation-run calibration artifacts disagree")
+
+    @property
+    def sha256(self) -> str:
+        return _canonical_sha256(
+            {
+                "version": self.version,
+                "plan_sha256": self.plan.sha256,
+                "authorization_sha256": self.authorization.sha256,
+                "calibration_results_sha256": self.authorization.calibration_results_sha256,
+                "test_commitment_sha256": self.test_commitment.sha256,
+            }
+        )
+
+
+def bind_validation_run(
+    plan: R3BExperimentPlan,
+    results: Sequence[ArmPhaseResult],
+    test_commitment: TestSuiteCommitment,
+) -> ValidationRunAuthorization:
+    retained = tuple(results)
+    return ValidationRunAuthorization(
+        plan,
+        authorize_validation(plan, retained),
+        retained,
+        test_commitment,
     )
 
 
 def select_validation_candidate(
     plan: R3BExperimentPlan,
-    authorization: CalibrationSelectionAuthorization,
+    validation_run: ValidationRunAuthorization,
     results: Sequence[ArmPhaseResult],
 ) -> CandidateArm | None:
     """Choose one shaped candidate using validation only; never consult test data."""
 
     if (
-        not isinstance(authorization, CalibrationSelectionAuthorization)
-        or authorization.plan_sha256 != plan.sha256
+        not isinstance(validation_run, ValidationRunAuthorization)
+        or validation_run.plan.sha256 != plan.sha256
     ):
         raise ValueError("validation selection lacks calibration authorization")
+    authorization = validation_run.authorization
     arms = authorization.arms
     if (
         len(arms) != len(plan.alpha_weight_ppm)
@@ -1405,14 +1933,19 @@ def select_validation_candidate(
         results, {arm.arm_id for arm in arms}, phase="validation"
     )
     _require_plan_evidence(plan, tuple(indexed.values()))
+    runner_spec_sha256 = _require_runner_spec(tuple(indexed.values()))
+    _require_evaluation_suite(tuple(indexed.values()))
+    _require_metric_artifacts(plan, tuple(indexed.values()))
     _require_paired_identities(tuple(indexed.values()), plan.validation_learner_seeds)
     if any(
         outcome.engineering_evidence is not None
-        and outcome.engineering_evidence.authorization_sha256 != authorization.sha256
+        and outcome.engineering_evidence.authorization_sha256 != validation_run.sha256
         for result in indexed.values()
         for outcome in result.outcomes
     ):
         raise ValueError("validation evidence disagrees with calibration authorization")
+    if runner_spec_sha256 != authorization.runner_spec_sha256:
+        raise ValueError("validation runner differs from calibrated runner")
     for result in indexed.values():
         if result.budget_updates != plan.validation_updates:
             raise ValueError("validation result is not a full-budget run")
@@ -1452,11 +1985,18 @@ def select_validation_candidate(
             abs(control_auc), plan.relative_score_denominator_floor
         )
         final_retention = (
-            mean_final / control_final if control_final > 0 else float(mean_final >= 0)
+            mean_final / control_final
+            if control_final > plan.relative_score_denominator_floor
+            else mean_final - control_final
+        )
+        final_threshold = (
+            plan.minimum_final_mean_retention
+            if control_final > plan.relative_score_denominator_floor
+            else 0.0
         )
         if (
             relative_auc_gain < plan.minimum_relative_auc_gain
-            or final_retention < plan.minimum_final_mean_retention
+            or final_retention < final_threshold
         ):
             continue
         candidates.append(
@@ -1589,18 +2129,19 @@ class SealedTestAuthorization:
     """One candidate selection bound to validation and a sealed test suite."""
 
     plan_sha256: str
-    calibration_authorization_sha256: str
+    validation_run_sha256: str
     control_arm_id: str
     candidate_arm_id: str
     validation_results_sha256: str
     validation_suite_sha256: str
     test_suite_sha256: str
+    runner_spec_sha256: str
     attempt: int = 1
-    version: str = "r3b-sealed-test-authorization-v2"
+    version: str = "r3b-sealed-test-authorization-v4"
 
     def __post_init__(self) -> None:
         if (
-            self.version != "r3b-sealed-test-authorization-v2"
+            self.version != "r3b-sealed-test-authorization-v4"
             or not self.control_arm_id
             or not self.candidate_arm_id
             or self.control_arm_id == self.candidate_arm_id
@@ -1609,10 +2150,11 @@ class SealedTestAuthorization:
                 not _is_nonzero_sha256(value)
                 for value in (
                     self.plan_sha256,
-                    self.calibration_authorization_sha256,
+                    self.validation_run_sha256,
                     self.validation_results_sha256,
                     self.validation_suite_sha256,
                     self.test_suite_sha256,
+                    self.runner_spec_sha256,
                 )
             )
         ):
@@ -1626,9 +2168,9 @@ class SealedTestAuthorization:
         return _canonical_sha256(self.manifest())
 
 
-def authorize_sealed_test(
+def _authorize_sealed_test(
     plan: R3BExperimentPlan,
-    calibration_authorization: CalibrationSelectionAuthorization,
+    validation_run: ValidationRunAuthorization,
     validation_results: Sequence[ArmPhaseResult],
     validation_suite: object,
     test_suite: object,
@@ -1647,12 +2189,14 @@ def authorize_sealed_test(
         or len(test_suite.snapshot_ids) * test_suite.repetitions
         != plan.test_episodes_per_policy
         or set(validation_suite.snapshot_ids) & set(test_suite.snapshot_ids)
+        or set(validation_suite.logical_cell_ids) & set(test_suite.logical_cell_ids)
         or (
             validation_suite.runtime_identity_sha256,
             validation_suite.library_sha256,
             validation_suite.snapshot_store_sha256,
             validation_suite.action_spec_sha256,
             validation_suite.assignment_sha256,
+            validation_suite.backend,
         )
         != (
             test_suite.runtime_identity_sha256,
@@ -1660,6 +2204,7 @@ def authorize_sealed_test(
             test_suite.snapshot_store_sha256,
             test_suite.action_spec_sha256,
             test_suite.assignment_sha256,
+            test_suite.backend,
         )
     ):
         raise ValueError("validation/test evaluation suites violate the sealed split")
@@ -1672,8 +2217,15 @@ def authorize_sealed_test(
         for outcome in result.outcomes
     ):
         raise ValueError("validation outcomes disagree with their evaluation suite")
+    if (
+        not isinstance(validation_run, ValidationRunAuthorization)
+        or validation_run.plan.sha256 != plan.sha256
+        or validation_run.test_commitment.test_suite_sha256 != test_suite.sha256
+    ):
+        raise ValueError("sealed test lacks verified calibration artifacts")
+    calibration_authorization = validation_run.authorization
     arms = calibration_authorization.arms
-    candidate = select_validation_candidate(plan, calibration_authorization, results)
+    candidate = select_validation_candidate(plan, validation_run, results)
     if candidate is None:
         raise ValueError("validation selected no shaped candidate")
     control = arms[0]
@@ -1684,12 +2236,13 @@ def authorize_sealed_test(
     )
     return SealedTestAuthorization(
         plan.sha256,
-        calibration_authorization.sha256,
+        validation_run.sha256,
         control.arm_id,
         candidate.arm_id,
         result_identity,
         validation_suite.sha256,
         test_suite.sha256,
+        calibration_authorization.runner_spec_sha256,
     )
 
 
@@ -1699,45 +2252,104 @@ class SealedTestRunAuthorization:
 
     plan: R3BExperimentPlan
     authorization: SealedTestAuthorization
-    calibration_authorization: CalibrationSelectionAuthorization
+    validation_run: ValidationRunAuthorization
     validation_results: tuple[ArmPhaseResult, ...]
     validation_suite: object
     test_suite: object
-    version: str = "r3b-sealed-test-run-authorization-v1"
+    ledger_path: str
+    ledger_receipt_token: str
+    version: str = "r3b-sealed-test-run-authorization-v3"
 
     def __post_init__(self) -> None:
         if (
-            self.version != "r3b-sealed-test-run-authorization-v1"
+            self.version != "r3b-sealed-test-run-authorization-v3"
             or not isinstance(self.plan, R3BExperimentPlan)
             or not isinstance(self.validation_results, tuple)
+            or not isinstance(self.ledger_path, str)
+            or not Path(self.ledger_path).is_absolute()
+            or not _is_nonzero_sha256(self.ledger_receipt_token)
         ):
             raise ValueError("sealed-test run authorization is malformed")
-        expected = authorize_sealed_test(
+        expected = _authorize_sealed_test(
             self.plan,
-            self.calibration_authorization,
+            self.validation_run,
             self.validation_results,
             self.validation_suite,
             self.test_suite,
         )
         if expected != self.authorization:
             raise ValueError("sealed-test run authorization artifacts disagree")
+        result_sha256 = _canonical_sha256(
+            [
+                result.sha256
+                for result in sorted(
+                    self.validation_results, key=lambda value: value.arm_id
+                )
+            ]
+        )
+        self.assert_authorized(expected_validation_results_sha256=result_sha256)
+
+    @property
+    def ledger_receipt_sha256(self) -> str:
+        return hashlib.sha256(self.ledger_receipt_token.encode()).hexdigest()
+
+    def assert_authorized(
+        self, *, expected_validation_results_sha256: str | None = None
+    ) -> None:
+        """Verify this opaque receipt against the durable ledger."""
+
+        result_sha256 = expected_validation_results_sha256 or _canonical_sha256(
+            [
+                result.sha256
+                for result in sorted(
+                    self.validation_results, key=lambda value: value.arm_id
+                )
+            ]
+        )
+        jobs_sha256 = _canonical_sha256(
+            list(_sealed_job_sha256s(self.plan, self.authorization))
+        )
+        try:
+            with closing(sqlite3.connect(self.ledger_path, timeout=30.0)) as connection:
+                row = connection.execute(
+                    "SELECT state,receipt_token,validation_run_sha256,"
+                    "validation_results_sha256,validation_suite_sha256,"
+                    "authorization_sha256,jobs_sha256 FROM sealed_test_attempt "
+                    "WHERE plan_sha256=?",
+                    (self.plan.sha256,),
+                ).fetchone()
+        except sqlite3.Error as exc:
+            raise RuntimeError("sealed-test ledger is unavailable") from exc
+        expected = (
+            "authorized",
+            self.ledger_receipt_token,
+            self.validation_run.sha256,
+            result_sha256,
+            self.validation_suite.sha256,
+            self.authorization.sha256,
+            jobs_sha256,
+        )
+        if row != expected:
+            raise RuntimeError("sealed-test receipt is not active in its ledger")
 
     @property
     def sha256(self) -> str:
         return self.authorization.sha256
 
 
-def bind_sealed_test_run(
+def _bind_sealed_test_run(
     plan: R3BExperimentPlan,
-    calibration_authorization: CalibrationSelectionAuthorization,
+    validation_run: ValidationRunAuthorization,
     validation_results: Sequence[ArmPhaseResult],
     validation_suite: object,
     test_suite: object,
+    ledger_path: str,
+    ledger_receipt_token: str,
 ) -> SealedTestRunAuthorization:
     results = tuple(validation_results)
-    authorization = authorize_sealed_test(
+    authorization = _authorize_sealed_test(
         plan,
-        calibration_authorization,
+        validation_run,
         results,
         validation_suite,
         test_suite,
@@ -1745,11 +2357,576 @@ def bind_sealed_test_run(
     return SealedTestRunAuthorization(
         plan,
         authorization,
-        calibration_authorization,
+        validation_run,
         results,
         validation_suite,
         test_suite,
+        ledger_path,
+        ledger_receipt_token,
     )
+
+
+def _sealed_job_sha256s(
+    plan: R3BExperimentPlan, authorization: SealedTestAuthorization
+) -> tuple[str, ...]:
+    indexed = {arm.arm_id: arm for arm in plan.arms}
+    arms = (
+        indexed[authorization.control_arm_id],
+        indexed[authorization.candidate_arm_id],
+    )
+    return tuple(
+        TrialJob(
+            plan.sha256,
+            "test",
+            arm,
+            seed,
+            plan.test_updates,
+            True,
+            TrialSeedPlan.derive(plan.sha256, seed).sha256,
+            authorization.sha256,
+        ).sha256
+        for arm in arms
+        for seed in plan.test_learner_seeds
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class SealedTestJobLease:
+    """Opaque, restart-safe permission to execute exactly one sealed job."""
+
+    sealed_run: SealedTestRunAuthorization
+    job: TrialJob
+    lease_token: str
+    version: str = "r3b-sealed-test-job-lease-v1"
+
+    def __post_init__(self) -> None:
+        if (
+            self.version != "r3b-sealed-test-job-lease-v1"
+            or not isinstance(self.sealed_run, SealedTestRunAuthorization)
+            or not isinstance(self.job, TrialJob)
+            or self.job.phase != "test"
+            or self.job.authorization_sha256 != self.sealed_run.sha256
+            or self.job.sha256
+            not in _sealed_job_sha256s(
+                self.sealed_run.plan, self.sealed_run.authorization
+            )
+            or not _is_nonzero_sha256(self.lease_token)
+        ):
+            raise ValueError("sealed-test job lease is malformed")
+        self.assert_active()
+
+    def assert_active(self) -> None:
+        self._assert_state({"leased", "running"})
+
+    def assert_running(self) -> None:
+        self._assert_state({"running"})
+
+    def _assert_state(self, allowed: set[str]) -> None:
+        self.sealed_run.assert_authorized()
+        try:
+            with closing(
+                sqlite3.connect(self.sealed_run.ledger_path, timeout=30.0)
+            ) as connection:
+                row = connection.execute(
+                    "SELECT state,lease_token FROM sealed_test_job "
+                    "WHERE plan_sha256=? AND job_sha256=?",
+                    (self.sealed_run.plan.sha256, self.job.sha256),
+                ).fetchone()
+        except sqlite3.Error as exc:
+            raise RuntimeError("sealed-test job ledger is unavailable") from exc
+        if row is None or row[0] not in allowed or row[1] != self.lease_token:
+            raise RuntimeError("sealed-test job lease is not active")
+
+    @property
+    def sha256(self) -> str:
+        return _canonical_sha256(
+            {
+                "version": self.version,
+                "authorization_sha256": self.sealed_run.authorization.sha256,
+                "job_sha256": self.job.sha256,
+                "lease_token_sha256": hashlib.sha256(
+                    self.lease_token.encode()
+                ).hexdigest(),
+            }
+        )
+
+
+class SealedTestLedger:
+    """Restart-safe single-attempt ledger for a precommitted test suite."""
+
+    version = "r3b-sealed-test-ledger-v1"
+
+    def __init__(self, path: str | Path) -> None:
+        supplied = Path(path).expanduser()
+        if not supplied.is_absolute():
+            raise ValueError("sealed-test ledger path must be absolute")
+        self.path = supplied
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        with closing(self._connect()) as connection:
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS sealed_test_attempt (
+                    plan_sha256 TEXT PRIMARY KEY,
+                    version TEXT NOT NULL,
+                    test_suite_sha256 TEXT NOT NULL,
+                    ledger_nonce TEXT NOT NULL,
+                    state TEXT NOT NULL CHECK(state IN ('ready','authorized','finalized')),
+                    validation_run_sha256 TEXT,
+                    validation_results_sha256 TEXT,
+                    validation_suite_sha256 TEXT,
+                    authorization_sha256 TEXT,
+                    jobs_sha256 TEXT,
+                    receipt_token TEXT UNIQUE,
+                    confirmation_report_sha256 TEXT,
+                    accepted INTEGER
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS sealed_test_job (
+                    plan_sha256 TEXT NOT NULL,
+                    job_sha256 TEXT NOT NULL,
+                    arm_id TEXT NOT NULL,
+                    learner_seed TEXT NOT NULL,
+                    state TEXT NOT NULL CHECK(
+                        state IN ('pending','leased','running','complete','failure')
+                    ),
+                    lease_token TEXT UNIQUE,
+                    outcome_sha256 TEXT,
+                    failure_reason TEXT,
+                    PRIMARY KEY(plan_sha256, job_sha256),
+                    UNIQUE(plan_sha256, arm_id, learner_seed),
+                    FOREIGN KEY(plan_sha256) REFERENCES sealed_test_attempt(plan_sha256)
+                )
+                """
+            )
+            connection.commit()
+
+    def _connect(self) -> sqlite3.Connection:
+        connection = sqlite3.connect(self.path, timeout=30.0)
+        connection.execute("PRAGMA journal_mode=WAL")
+        connection.execute("PRAGMA synchronous=FULL")
+        connection.execute("PRAGMA foreign_keys=ON")
+        return connection
+
+    def precommit(
+        self, plan: R3BExperimentPlan, test_suite: object
+    ) -> TestSuiteCommitment:
+        from .r3b_evaluation import EvaluationSuite
+
+        if (
+            not isinstance(plan, R3BExperimentPlan)
+            or not isinstance(test_suite, EvaluationSuite)
+            or test_suite.split != "test"
+            or len(test_suite.snapshot_ids) * test_suite.repetitions
+            != plan.test_episodes_per_policy
+        ):
+            raise ValueError("test-suite precommit violates the frozen plan")
+        nonce = secrets.token_hex(32)
+        with closing(self._connect()) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT version,test_suite_sha256,ledger_nonce FROM sealed_test_attempt "
+                "WHERE plan_sha256=?",
+                (plan.sha256,),
+            ).fetchone()
+            if row is None:
+                connection.execute(
+                    "INSERT INTO sealed_test_attempt "
+                    "(plan_sha256,version,test_suite_sha256,ledger_nonce,state) "
+                    "VALUES (?,?,?,?, 'ready')",
+                    (plan.sha256, self.version, test_suite.sha256, nonce),
+                )
+            else:
+                if row[0] != self.version or row[1] != test_suite.sha256:
+                    raise RuntimeError(
+                        "sealed-test ledger already commits another suite or version"
+                    )
+                nonce = str(row[2])
+            connection.commit()
+        return TestSuiteCommitment(plan.sha256, test_suite.sha256, nonce)
+
+    def authorize_once(
+        self,
+        plan: R3BExperimentPlan,
+        validation_run: ValidationRunAuthorization,
+        validation_results: Sequence[ArmPhaseResult],
+        validation_suite: object,
+        test_suite: object,
+    ) -> SealedTestRunAuthorization:
+        results = tuple(validation_results)
+        authorization = _authorize_sealed_test(
+            plan,
+            validation_run,
+            results,
+            validation_suite,
+            test_suite,
+        )
+        result_sha256 = _canonical_sha256(
+            [
+                result.sha256
+                for result in sorted(results, key=lambda value: value.arm_id)
+            ]
+        )
+        jobs = tuple(
+            TrialJob(
+                plan.sha256,
+                "test",
+                arm,
+                seed,
+                plan.test_updates,
+                True,
+                TrialSeedPlan.derive(plan.sha256, seed).sha256,
+                authorization.sha256,
+            )
+            for arm in (
+                next(
+                    value
+                    for value in plan.arms
+                    if value.arm_id == authorization.control_arm_id
+                ),
+                next(
+                    value
+                    for value in plan.arms
+                    if value.arm_id == authorization.candidate_arm_id
+                ),
+            )
+            for seed in plan.test_learner_seeds
+        )
+        jobs_sha256 = _canonical_sha256([job.sha256 for job in jobs])
+        receipt_token = secrets.token_hex(32)
+        with closing(self._connect()) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT test_suite_sha256,ledger_nonce,state,validation_run_sha256,"
+                "validation_results_sha256,validation_suite_sha256,authorization_sha256,"
+                "jobs_sha256,receipt_token FROM sealed_test_attempt WHERE plan_sha256=?",
+                (plan.sha256,),
+            ).fetchone()
+            if row is None:
+                raise RuntimeError("sealed test suite was not precommitted")
+            if (
+                row[0] != test_suite.sha256
+                or row[1] != validation_run.test_commitment.ledger_nonce
+            ):
+                raise RuntimeError("sealed test does not match its durable commitment")
+            expected = (
+                validation_run.sha256,
+                result_sha256,
+                validation_suite.sha256,
+                authorization.sha256,
+                jobs_sha256,
+            )
+            if row[2] == "ready":
+                updated = connection.execute(
+                    "UPDATE sealed_test_attempt SET state='authorized',"
+                    "validation_run_sha256=?,validation_results_sha256=?,"
+                    "validation_suite_sha256=?,authorization_sha256=?,jobs_sha256=?,"
+                    "receipt_token=? "
+                    "WHERE plan_sha256=? AND state='ready'",
+                    (*expected, receipt_token, plan.sha256),
+                )
+                if updated.rowcount != 1:
+                    raise RuntimeError("sealed-test authorization race was lost")
+                connection.executemany(
+                    "INSERT INTO sealed_test_job "
+                    "(plan_sha256,job_sha256,arm_id,learner_seed,state) "
+                    "VALUES (?,?,?,?, 'pending')",
+                    (
+                        (
+                            plan.sha256,
+                            job.sha256,
+                            job.arm.arm_id,
+                            str(job.learner_seed),
+                        )
+                        for job in jobs
+                    ),
+                )
+            elif row[2] != "authorized" or tuple(row[3:8]) != expected:
+                raise RuntimeError("sealed-test attempt is consumed or disagrees")
+            else:
+                receipt_token = str(row[8])
+            connection.commit()
+        return _bind_sealed_test_run(
+            plan,
+            validation_run,
+            results,
+            validation_suite,
+            test_suite,
+            str(self.path),
+            receipt_token,
+        )
+
+    def claim_job(
+        self, sealed_run: SealedTestRunAuthorization, job: TrialJob
+    ) -> SealedTestJobLease:
+        """Atomically lease one pending test job; a lease cannot be reassigned."""
+
+        if (
+            not isinstance(sealed_run, SealedTestRunAuthorization)
+            or Path(sealed_run.ledger_path) != self.path
+            or job not in sealed_run.plan.trial_jobs("test", sealed_run)
+        ):
+            raise ValueError("sealed-test job does not belong to this ledger run")
+        lease_token = secrets.token_hex(32)
+        with closing(self._connect()) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT state,lease_token FROM sealed_test_job "
+                "WHERE plan_sha256=? AND job_sha256=?",
+                (sealed_run.plan.sha256, job.sha256),
+            ).fetchone()
+            if row is None:
+                raise RuntimeError("sealed-test job is absent from the authorization")
+            if row[0] == "pending":
+                updated = connection.execute(
+                    "UPDATE sealed_test_job SET state='leased',lease_token=? "
+                    "WHERE plan_sha256=? AND job_sha256=? AND state='pending'",
+                    (lease_token, sealed_run.plan.sha256, job.sha256),
+                )
+                if updated.rowcount != 1:
+                    raise RuntimeError("sealed-test job claim race was lost")
+            else:
+                raise RuntimeError("sealed-test job is already claimed or terminal")
+            connection.commit()
+        return SealedTestJobLease(sealed_run, job, lease_token)
+
+    def resume_job(
+        self,
+        sealed_run: SealedTestRunAuthorization,
+        job: TrialJob,
+        *,
+        lease_token: str,
+    ) -> SealedTestJobLease:
+        """Recover an unstarted lease only when its bearer presents the token."""
+
+        if (
+            not isinstance(sealed_run, SealedTestRunAuthorization)
+            or Path(sealed_run.ledger_path) != self.path
+            or not isinstance(job, TrialJob)
+            or not _is_nonzero_sha256(lease_token)
+        ):
+            raise ValueError("sealed-test lease recovery is malformed")
+        with closing(self._connect()) as connection:
+            row = connection.execute(
+                "SELECT state,lease_token FROM sealed_test_job "
+                "WHERE plan_sha256=? AND job_sha256=?",
+                (sealed_run.plan.sha256, job.sha256),
+            ).fetchone()
+        if row != ("leased", lease_token):
+            raise RuntimeError("sealed-test lease recovery token is invalid")
+        return SealedTestJobLease(sealed_run, job, lease_token)
+
+    def begin_job(self, lease: SealedTestJobLease) -> None:
+        """Consume a lease into one running execution."""
+
+        if (
+            not isinstance(lease, SealedTestJobLease)
+            or Path(lease.sealed_run.ledger_path) != self.path
+        ):
+            raise ValueError("sealed-test lease belongs to another ledger")
+        lease._assert_state({"leased"})
+        with closing(self._connect()) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            updated = connection.execute(
+                "UPDATE sealed_test_job SET state='running' "
+                "WHERE plan_sha256=? AND job_sha256=? AND state='leased' "
+                "AND lease_token=?",
+                (
+                    lease.sealed_run.plan.sha256,
+                    lease.job.sha256,
+                    lease.lease_token,
+                ),
+            )
+            if updated.rowcount != 1:
+                raise RuntimeError("sealed-test job lease is stale or consumed")
+            connection.commit()
+
+    def complete_job(self, lease: SealedTestJobLease, outcome: LearnerOutcome) -> None:
+        """Persist the sole admissible result for one leased test job."""
+
+        if (
+            not isinstance(lease, SealedTestJobLease)
+            or Path(lease.sealed_run.ledger_path) != self.path
+            or not isinstance(outcome, LearnerOutcome)
+            or outcome.learner_seed != lease.job.learner_seed
+            or outcome.seed_plan_sha256 != lease.job.seed_plan_sha256
+            or outcome.engineering_evidence is None
+            or outcome.engineering_evidence.phase != "test"
+            or outcome.engineering_evidence.job_sha256 != lease.job.sha256
+            or outcome.engineering_evidence.arm_id != lease.job.arm.arm_id
+            or outcome.engineering_evidence.authorization_sha256
+            != lease.sealed_run.authorization.sha256
+            or outcome.engineering_evidence.sealed_job_lease_sha256 != lease.sha256
+            or outcome.engineering_evidence.completed_updates
+            != lease.job.budget_updates
+        ):
+            raise ValueError("sealed-test outcome disagrees with its job lease")
+        lease.assert_running()
+        with closing(self._connect()) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            updated = connection.execute(
+                "UPDATE sealed_test_job SET state='complete',outcome_sha256=? "
+                "WHERE plan_sha256=? AND job_sha256=? AND state='running' "
+                "AND lease_token=?",
+                (
+                    outcome.sha256,
+                    lease.sealed_run.plan.sha256,
+                    lease.job.sha256,
+                    lease.lease_token,
+                ),
+            )
+            if updated.rowcount != 1:
+                raise RuntimeError("sealed-test job lease is stale or consumed")
+            connection.commit()
+
+    def fail_job(self, lease: SealedTestJobLease, failure_reason: str) -> None:
+        """Record a terminal execution failure without permitting a retry."""
+
+        if (
+            not isinstance(lease, SealedTestJobLease)
+            or Path(lease.sealed_run.ledger_path) != self.path
+            or not isinstance(failure_reason, str)
+            or not failure_reason.strip()
+        ):
+            raise ValueError("sealed-test failure record is malformed")
+        lease.assert_running()
+        with closing(self._connect()) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            updated = connection.execute(
+                "UPDATE sealed_test_job SET state='failure',failure_reason=? "
+                "WHERE plan_sha256=? AND job_sha256=? AND state='running' "
+                "AND lease_token=?",
+                (
+                    failure_reason.strip(),
+                    lease.sealed_run.plan.sha256,
+                    lease.job.sha256,
+                    lease.lease_token,
+                ),
+            )
+            if updated.rowcount != 1:
+                raise RuntimeError("sealed-test job lease is stale or consumed")
+            connection.commit()
+
+    def finalize_once(
+        self,
+        sealed_run: SealedTestRunAuthorization,
+        candidate_result: ArmPhaseResult | None,
+        control_result: ArmPhaseResult | None,
+        baseline_artifacts: Sequence[object],
+    ) -> SealedConfirmationReport:
+        """Recompute and persist the decision from exactly the recorded job results."""
+
+        if (
+            not isinstance(sealed_run, SealedTestRunAuthorization)
+            or Path(sealed_run.ledger_path) != self.path
+        ):
+            raise ValueError("sealed-test finalization belongs to another ledger")
+        sealed_run.assert_authorized()
+        with closing(self._connect()) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            attempt = connection.execute(
+                "SELECT state,authorization_sha256,receipt_token FROM sealed_test_attempt "
+                "WHERE plan_sha256=?",
+                (sealed_run.plan.sha256,),
+            ).fetchone()
+            if attempt != (
+                "authorized",
+                sealed_run.authorization.sha256,
+                sealed_run.ledger_receipt_token,
+            ):
+                raise RuntimeError(
+                    "sealed-test attempt is absent, mismatched, or consumed"
+                )
+            rows = connection.execute(
+                "SELECT job_sha256,arm_id,learner_seed,state,outcome_sha256,"
+                "failure_reason FROM sealed_test_job WHERE plan_sha256=? "
+                "ORDER BY arm_id,learner_seed",
+                (sealed_run.plan.sha256,),
+            ).fetchall()
+            expected_jobs = sealed_run.plan.trial_jobs("test", sealed_run)
+            if (
+                len(rows) != len(expected_jobs)
+                or {row[0] for row in rows} != {job.sha256 for job in expected_jobs}
+                or any(row[3] not in {"complete", "failure"} for row in rows)
+            ):
+                raise RuntimeError("sealed-test jobs are incomplete or disagree")
+
+            def recorded_result(
+                arm_id: str, supplied: ArmPhaseResult | None
+            ) -> ArmPhaseResult:
+                arm_rows = [row for row in rows if row[1] == arm_id]
+                failures = tuple(
+                    (str(row[0]), str(row[5]))
+                    for row in arm_rows
+                    if row[3] == "failure"
+                )
+                if failures:
+                    reason = "; ".join(
+                        f"{job_sha256}:{message}" for job_sha256, message in failures
+                    )
+                    return ArmPhaseResult(
+                        arm_id,
+                        "test",
+                        "post_start_failure",
+                        sealed_run.plan.test_updates,
+                        failure_reason=reason,
+                    )
+                if (
+                    not isinstance(supplied, ArmPhaseResult)
+                    or supplied.arm_id != arm_id
+                    or supplied.phase != "test"
+                    or supplied.status != "complete"
+                    or supplied.budget_updates != sealed_run.plan.test_updates
+                ):
+                    raise ValueError("complete sealed jobs require their typed result")
+                recorded = {str(row[0]): str(row[4]) for row in arm_rows}
+                presented = {
+                    outcome.engineering_evidence.job_sha256: outcome.sha256
+                    for outcome in supplied.outcomes
+                    if outcome.engineering_evidence is not None
+                }
+                if recorded != presented:
+                    raise ValueError(
+                        "sealed result does not exactly match persisted job outcomes"
+                    )
+                return supplied
+
+            candidate = recorded_result(
+                sealed_run.authorization.candidate_arm_id, candidate_result
+            )
+            control = recorded_result(
+                sealed_run.authorization.control_arm_id, control_result
+            )
+            report = build_sealed_confirmation_report(
+                sealed_run.plan,
+                sealed_run,
+                candidate,
+                control,
+                tuple(baseline_artifacts),
+            )
+            updated = connection.execute(
+                "UPDATE sealed_test_attempt SET state='finalized',"
+                "confirmation_report_sha256=?,accepted=? "
+                "WHERE plan_sha256=? AND state='authorized'",
+                (report.sha256, int(report.accepted), sealed_run.plan.sha256),
+            )
+            if updated.rowcount != 1:
+                raise RuntimeError("sealed-test finalization race was lost")
+            connection.commit()
+        return report
+
+    def verify_finalized(self, report: SealedConfirmationReport) -> bool:
+        if not isinstance(report, SealedConfirmationReport):
+            return False
+        with closing(self._connect()) as connection:
+            row = connection.execute(
+                "SELECT state,confirmation_report_sha256,accepted "
+                "FROM sealed_test_attempt WHERE plan_sha256=?",
+                (report.plan_sha256,),
+            ).fetchone()
+        return row == ("finalized", report.sha256, int(report.accepted))
 
 
 @dataclass(frozen=True, slots=True)
@@ -1758,6 +2935,7 @@ class ConfirmationDecision:
     gates: tuple[tuple[str, bool], ...]
     relative_auc_gain_lower: float | None = None
     final_mean_retention_lower: float | None = None
+    final_mean_mode: str | None = None
     p10_lower: float | None = None
     p10_mode: str | None = None
     trivial_baseline_margin_lower: float | None = None
@@ -1792,8 +2970,10 @@ class ConfirmationDecision:
                 raise ValueError("confirmation bounds must be finite when present")
         if self.accepted != all(passed for _, passed in self.gates):
             raise ValueError("acceptance must equal the conjunction of all gates")
-        if self.p10_mode not in {None, "ratio", "absolute_delta"}:
-            raise ValueError("confirmation p10 mode is invalid")
+        if self.p10_mode not in {None, "ratio", "absolute_delta"} or (
+            self.final_mean_mode not in {None, "ratio", "absolute_delta"}
+        ):
+            raise ValueError("confirmation comparison mode is invalid")
 
     def manifest(self) -> dict[str, object]:
         return {
@@ -1801,6 +2981,7 @@ class ConfirmationDecision:
             "gates": {name: passed for name, passed in self.gates},
             "relative_auc_gain_lower": self.relative_auc_gain_lower,
             "final_mean_retention_lower": self.final_mean_retention_lower,
+            "final_mean_mode": self.final_mean_mode,
             "p10_lower": self.p10_lower,
             "p10_mode": self.p10_mode,
             "trivial_baseline_margin_lower": self.trivial_baseline_margin_lower,
@@ -1815,24 +2996,26 @@ class ConfirmationDecision:
 class SealedConfirmationReport:
     plan_sha256: str
     authorization_sha256: str
+    ledger_receipt_sha256: str
     candidate_arm_id: str
     control_arm_id: str
     candidate_result_sha256: str
     control_result_sha256: str
     baseline_evidence_sha256: tuple[str, ...]
     decision: ConfirmationDecision
-    version: str = "r3b-sealed-confirmation-report-v2"
+    version: str = "r3b-sealed-confirmation-report-v3"
 
     def __post_init__(self) -> None:
         hashes = (
             self.plan_sha256,
             self.authorization_sha256,
+            self.ledger_receipt_sha256,
             self.candidate_result_sha256,
             self.control_result_sha256,
             *self.baseline_evidence_sha256,
         )
         if (
-            self.version != "r3b-sealed-confirmation-report-v2"
+            self.version != "r3b-sealed-confirmation-report-v3"
             or not self.candidate_arm_id
             or not self.control_arm_id
             or not isinstance(self.decision, ConfirmationDecision)
@@ -1855,6 +3038,7 @@ class SealedConfirmationReport:
             "version": self.version,
             "plan_sha256": self.plan_sha256,
             "authorization_sha256": self.authorization_sha256,
+            "ledger_receipt_sha256": self.ledger_receipt_sha256,
             "candidate_arm_id": self.candidate_arm_id,
             "control_arm_id": self.control_arm_id,
             "candidate_result_sha256": self.candidate_result_sha256,
@@ -1884,10 +3068,9 @@ def confirm_on_sealed_test(
 ) -> ConfirmationDecision:
     """Apply one-sided paired-bootstrap gates to one preselected candidate."""
 
-    authorization_valid = (
-        isinstance(sealed_run, SealedTestRunAuthorization)
-        and sealed_run.plan.sha256 == plan.sha256
-    )
+    if not isinstance(sealed_run, SealedTestRunAuthorization):
+        return ConfirmationDecision(False, (("complete_exact_test_results", False),))
+    authorization_valid = sealed_run.plan.sha256 == plan.sha256
     authorization = sealed_run.authorization
     arm_index = {arm.arm_id: arm for arm in plan.arms}
     candidate_arm = arm_index.get(authorization.candidate_arm_id)
@@ -1915,6 +3098,13 @@ def confirm_on_sealed_test(
         _require_paired_identities(
             (candidate_result, control_result), plan.test_learner_seeds
         )
+        if (
+            _require_runner_spec((candidate_result, control_result))
+            != authorization.runner_spec_sha256
+        ):
+            raise ValueError("test runner differs from the authorized runner")
+        _require_evaluation_suite((candidate_result, control_result))
+        _require_metric_artifacts(plan, (candidate_result, control_result))
     except ValueError:
         return ConfirmationDecision(False, (("complete_exact_test_results", False),))
     candidate = {outcome.learner_seed: outcome for outcome in candidate_result.outcomes}
@@ -1961,6 +3151,14 @@ def confirm_on_sealed_test(
     control_p10_mean = statistics.fmean(
         control[seed].p10_raw_score for seed in seed_order
     )
+    control_final_mean = statistics.fmean(
+        control[seed].final_mean_raw_score for seed in seed_order
+    )
+    final_mean_mode = (
+        "ratio"
+        if control_final_mean > plan.relative_score_denominator_floor
+        else "absolute_delta"
+    )
     p10_mode = (
         "ratio"
         if control_p10_mean > plan.relative_score_denominator_floor
@@ -1992,9 +3190,9 @@ def confirm_on_sealed_test(
             / max(abs(control_auc), plan.relative_score_denominator_floor)
         )
         final_samples.append(
-            candidate_final / control_final
-            if control_final > 0
-            else float(candidate_final >= 0)
+            candidate_final / max(control_final, plan.relative_score_denominator_floor)
+            if final_mean_mode == "ratio"
+            else candidate_final - control_final
         )
         p10_samples.append(
             candidate_p10 / max(control_p10, plan.relative_score_denominator_floor)
@@ -2011,12 +3209,15 @@ def confirm_on_sealed_test(
         if p10_mode == "ratio"
         else plan.minimum_p10_absolute_delta_when_control_near_zero
     )
+    final_threshold = (
+        plan.minimum_final_mean_retention if final_mean_mode == "ratio" else 0.0
+    )
     gates = (
         ("complete_exact_test_results", True),
         ("engineering_audits", engineering),
         ("required_baselines", baseline_pass),
         ("relative_auc_gain_lcb", auc_lower > plan.minimum_relative_auc_gain),
-        ("final_mean_retention_lcb", final_lower >= plan.minimum_final_mean_retention),
+        ("final_mean_retention_lcb", final_lower >= final_threshold),
         ("p10_noninferiority_lcb", p10_lower >= p10_threshold),
         (
             "trivial_baseline_margin_lcb",
@@ -2028,6 +3229,7 @@ def confirm_on_sealed_test(
         gates=gates,
         relative_auc_gain_lower=auc_lower,
         final_mean_retention_lower=final_lower,
+        final_mean_mode=final_mean_mode,
         p10_lower=p10_lower,
         p10_mode=p10_mode,
         trivial_baseline_margin_lower=trivial_lower,
@@ -2059,6 +3261,7 @@ def build_sealed_confirmation_report(
     return SealedConfirmationReport(
         plan.sha256,
         authorization.sha256,
+        sealed_run.ledger_receipt_sha256,
         authorization.candidate_arm_id,
         authorization.control_arm_id,
         candidate_result.sha256,

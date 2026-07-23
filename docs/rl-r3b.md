@@ -107,10 +107,19 @@ without evidence those fields never carried.
 
 `R3BRunBuilder` consumes an immutable `TrialJob` and constructs a complete
 session from a frozen experiment plan,
-one-stage curriculum, verified snapshot store, exact runtime identity, model
+one-stage curriculum, verified snapshot store, measured runtime attestation, model
 factory, vector factory, and collector/PPO configurations. It rejects adaptive
 promotion in the paired hyperparameter sweep because promotion would make arms
 see different training distributions.
+
+Runtime identity is measured from the environment returned by the factory
+before any restore or step. Portable runs retain the exact shared-library file
+descriptor loaded by `ctypes`, hash those loaded bytes and file identity, and
+revalidate that descriptor during attestation; replacing the pathname cannot
+relabel the executing binary. Exact runs additionally hash the worker
+executable, recapture the mapped exact-library bytes and file identity, and
+require every vector lane to attest to the same runtime. Caller-supplied backend
+labels are not accepted as evidence.
 
 For each learner seed, `TrialSeedPlan` derives independent SHA-256 streams for:
 
@@ -125,12 +134,18 @@ The derivation is arm-independent. A job binds phase, grid arm, learner seed,
 authorized update budget, sealed status, and (for test jobs) the validation
 authorization. The session enforces the job budget while retaining the frozen
 1,000-update learning-rate horizon, so calibration cannot silently train to
-validation length. Selection rejects results when paired arms disagree on
-initial model, assignment, seed-plan, runner-pairing, or evaluation-suite
-identities. A trial manifest additionally binds the job, plan, curriculum,
-snapshot store, runtime, reward, collector, PPO, lane count, and pre-transfer
-status. Checkpoint callers must include this manifest identity in their runtime
-identity map.
+validation length. A seed-independent runner specification binds the model,
+encoder, collector and PPO configuration, lane count, reward scale, snapshot
+store, runtime, deterministic Torch settings, Python/NumPy/Torch build data,
+every Python module in `irisu_rl` and `irisu_env`, and the checked dependency
+files; a builder rejects a model factory that changes it. One runner identity
+is carried from calibration through validation and sealed test. Selection
+rejects results when any seed or paired arm
+disagrees on that specification, initial model, assignment, seed plan,
+runner-pairing, or evaluation-suite identities. A trial manifest additionally
+binds the job, plan, curriculum, snapshot store, runtime, reward, collector,
+PPO, lane count, and pre-transfer status. Checkpoint callers must include this
+manifest identity in their runtime identity map.
 
 ## Frozen selection design
 
@@ -149,18 +164,30 @@ Fresh validation uses eight disjoint learner seeds and full 1,000-update runs.
 It compares the four calibrated alpha arms and may nominate at most one shaped
 candidate. Nomination requires at least 5% mean raw-score AUC gain over the
 score-only control and at least 95% final-mean retention. Validation selects;
-it does not confirm.
+it does not confirm. Validation jobs require a typed authorization that carries
+the complete retained calibration results and recomputes the one-LR-per-alpha
+selection; a standalone selection hash cannot authorize work.
 
-The test set stays sealed until that single candidate is fixed. A canonical
-authorization binds the chosen validation candidate, control, complete
-validation-result set, sealed evaluation-suite identity, and attempt number.
-Only jobs carrying that authorization may enter the test phase. Test uses 12
-new paired learner seeds, 512 fixed evaluation episodes per policy, and a
-one-sided paired bootstrap with the learner seed as the resampling unit. A
-candidate passes only if all lower confidence bounds satisfy:
+The test suite is committed before validation in a durable SQLite ledger. The
+validation authorization carries that commitment. After validation fixes one
+candidate, an immediate transaction records the candidate, control, complete
+validation-result set, validation suite, precommitted test suite, exact test-job
+set, an opaque random receipt, and attempt number. That transaction inserts all
+24 jobs as pending. Each job can be leased once; its lease is bound into runner
+evidence, and its result or failure becomes terminal in the ledger. Reopening
+the ledger resumes the same authorization or active lease. An alternate suite
+or candidate, a terminal-job retry, and every second finalized attempt fail
+closed. Test runners require an active database-verified lease, not a
+reconstructible authorization object. Finalization verifies every persisted
+job outcome, recomputes and stores the report, and exposes `verify_finalized`;
+a caller-created report is never authoritative. Test uses 12 new paired learner seeds, 512 fixed
+evaluation episodes per policy, and a one-sided paired bootstrap with the
+learner seed as the resampling unit. A candidate passes only if all lower
+confidence bounds satisfy:
 
 - raw-score AUC gain greater than 5%;
-- final mean raw-score retention at least 95%;
+- final mean raw-score retention at least 95%, or nonnegative absolute change
+  when the control mean is near zero;
 - p10 raw-score retention at least 90%, or nonnegative absolute change when
   the control p10 is near zero;
 - final raw score strictly above the strongest trivial/scripted baseline;
@@ -171,9 +198,10 @@ same test set, and the test set cannot be reused after rejection.
 
 ## Evaluation and baselines
 
-Evaluation cells are fixed by suite identity, split snapshot ID, repetition,
-policy seed, runtime identity, assignment identity, snapshot-library identity,
-snapshot-store identity, action-schema identity, and decision/tick bounds.
+Evaluation cells are fixed by suite identity, split snapshot ID, typed logical
+recipe provenance, repetition, policy seed, measured runtime identity, assignment
+identity, snapshot-library identity, snapshot-store identity, action-schema
+identity, and decision/tick bounds.
 Raw score is always `final_score - initial_score`, and accumulated environment
 reward must equal that delta. Gauge, invalid actions, terminal status, and
 elapsed ticks are diagnostics, never selection rewards.
@@ -184,8 +212,10 @@ action branch is an error, not an implicit WAIT action.
 
 The deployment-style recurrent evaluator uses deterministic semantic argmax,
 masked wait choices, coordinate means, recurrent state, and a zero critic-only
-alpha condition. Scripted policies are converted through the same semantic
-press/release macros. Required baselines are:
+alpha condition. Its policy identity includes model weights, tensor schema,
+encoder implementation, action schema, and both action masks. Scripted policies
+are converted through the same semantic press/release macros. Required
+baselines are:
 
 - no-action long wait;
 - seeded legal random;
@@ -196,8 +226,15 @@ press/release macros. Required baselines are:
 
 All required baselines need at least 512 fixed episodes, zero invalid actions,
 deterministic replay, exact raw-score accounting, and portable/exact parity.
-Baseline evidence is built from the suite plus primary, replay, and exact-backend
-report artifacts; acceptance rejects evidence from any other sealed suite.
+Parity uses two backend-specific suites and stores because portable and exact
+snapshot schemas differ. Their physical library, store, assignment, recipe,
+and snapshot identities may differ. A typed manifest pairs recipes only after
+their config, reset seed, legal semantic trace, action schema, expected
+tick/score, split, and scenario provenance match; arbitrary logical-cell labels
+cannot establish parity. Normalized episode metrics must then match exactly.
+Each report's backend identity
+comes from the live runtime attestation. Acceptance rejects primary evidence
+from any suite other than the sealed test suite.
 `one_step_greedy` is optional and cannot substitute for a missing required
 baseline.
 
@@ -209,9 +246,14 @@ rank-ineligible. Nonfinite metrics, interpolated learning curves, identity
 mismatches, incomplete baselines, malformed tail audits, or checkpoint drift
 cannot be ignored.
 
-No result is an R3b acceptance result until the complete calibration,
-validation, sealed test, exact-resume, snapshot replay, raw-score, and baseline
-artifacts exist and the canonical confirmation function returns `accepted`.
+Raw-score AUC, final mean, and p10 are recomputed from typed fixed-cell reports
+at the exact checkpoint update/tick grid. Each point binds completed updates,
+simulated ticks, checkpoint artifact, evaluated policy, and report; reused
+reports or checkpoints and relabeled policy reports are rejected. Scalar
+aggregates cannot be edited independently. No result is an R3b
+acceptance result until the complete calibration, validation, sealed test,
+exact-resume, snapshot replay, raw-score, and baseline artifacts exist and the
+canonical confirmation function returns `accepted`.
 Learner outcomes no longer carry a default boolean engineering pass: they must
 bind the completed trial manifest, pairing identity, metrics, evaluation,
 checkpoint-resume, exact-backend parity, and (for full-budget runs) completed
@@ -230,8 +272,12 @@ plan = load_plan("configs/rl/experiments/r3b-completion-v1.toml")
 ```
 
 The next operational work is to generate the versioned full-game snapshot
-library, run the bounded calibration and validation jobs, inspect retained
-failure/diagnostic artifacts, freeze one candidate, and only then unlock the
-sealed test. In parallel, R4 must complete the real-game causal observation and
-input calibration path. A successful R3b simulator result does not remove that
-transfer gate.
+library, precommit the test suite with `SealedTestLedger.precommit`, run the
+bounded calibration jobs, create validation jobs through
+`bind_validation_run`, and inspect every retained failure/diagnostic artifact.
+Only after validation freezes one candidate may `authorize_once` emit the exact
+sealed job set. Each job then follows `claim_job` and `complete_job` (or
+`fail_job`), and `finalize_once` consumes the recorded outcomes and returns the
+authoritative report. In parallel, R4 must complete the real-game causal observation
+and input calibration path. A successful R3b simulator result does not remove
+that transfer gate.

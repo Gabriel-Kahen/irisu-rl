@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import copy
+import functools
 import hashlib
+import itertools
+import tempfile
 import tomllib
 import unittest
 from dataclasses import replace
@@ -9,27 +12,35 @@ from pathlib import Path
 
 from irisu_rl.r3b_evaluation import (
     BaselineArtifactBundle,
+    CrossBackendCellPair,
+    CrossBackendEvaluationManifest,
     EpisodeMetrics,
     EvaluationReport,
     EvaluationSuite,
+    LearnedPolicyBackendParityArtifact,
     ScriptedBaselineSpec,
 )
+from irisu_rl.actions import ActionSpec
+from irisu_rl.curriculum import SnapshotLibrary, SnapshotRecipe
 from irisu_rl.r3b_experiments import (
     ArmPhaseResult,
     BaselineEvidence,
-    CalibrationSelectionAuthorization,
     CandidateArm,
+    CheckpointEvaluation,
     CurvePoint,
     EngineeringEvidence,
+    ExactResumeArtifact,
     LearnerOutcome,
+    RawScoreMetricsArtifact,
     R3BExperimentPlan,
+    SealedTestLedger,
     SealedTestAuthorization,
     SealedTestRunAuthorization,
+    ValidationRunAuthorization,
     TrialSeedPlan,
-    authorize_sealed_test,
-    authorize_validation,
+    TrainingCheckpointArtifact,
     baseline_requirements_pass,
-    bind_sealed_test_run,
+    bind_validation_run,
     build_sealed_confirmation_report,
     confirm_on_sealed_test,
     load_plan,
@@ -43,6 +54,44 @@ ROOT = Path(__file__).resolve().parents[1]
 PLAN_PATH = ROOT / "configs/rl/experiments/r3b-completion-v1.toml"
 TEST_PLAN = load_plan(PLAN_PATH)
 PLAN_SHA256 = TEST_PLAN.sha256
+_LEDGER_DIRECTORY = tempfile.TemporaryDirectory()
+_LEDGER_IDS = itertools.count()
+_METRICS_CACHE: dict[tuple[object, ...], RawScoreMetricsArtifact] = {}
+unittest.addModuleCleanup(_LEDGER_DIRECTORY.cleanup)
+_ACTION_SHA256 = ActionSpec().sha256
+_PORTABLE_TEST_RECIPE = SnapshotRecipe(
+    "test-snapshot",
+    "test-stage",
+    "test",
+    "test-family",
+    "portable-test",
+    "a" * 64,
+    1,
+    71,
+    _ACTION_SHA256,
+    (),
+    0,
+    0,
+    1,
+    "b" * 64,
+    "1" * 64,
+    "test-generator",
+)
+_EXACT_TEST_RECIPE = replace(
+    _PORTABLE_TEST_RECIPE,
+    snapshot_id="exact-test-snapshot",
+    environment_pool="exact-test",
+    snapshot_sha256="c" * 64,
+    runtime_identity_sha256="6" * 64,
+)
+_PORTABLE_TEST_LIBRARY = SnapshotLibrary((_PORTABLE_TEST_RECIPE,))
+_EXACT_TEST_LIBRARY = SnapshotLibrary((_EXACT_TEST_RECIPE,))
+TEST_LOGICAL_MANIFEST = CrossBackendEvaluationManifest(
+    (CrossBackendCellPair.from_recipes(_PORTABLE_TEST_RECIPE, _EXACT_TEST_RECIPE),)
+)
+TEST_LOGICAL_CELL_IDS = tuple(
+    pair.logical_cell.sha256 for pair in TEST_LOGICAL_MANIFEST.pairs
+)
 VALIDATION_EVALUATION_SUITE = EvaluationSuite(
     "validation-v1",
     "validation",
@@ -53,9 +102,10 @@ VALIDATION_EVALUATION_SUITE = EvaluationSuite(
     1,
     "1" * 64,
     "2" * 64,
-    "3" * 64,
+    _PORTABLE_TEST_LIBRARY.sha256,
     "4" * 64,
-    "5" * 64,
+    _ACTION_SHA256,
+    ("d" * 64,),
 )
 TEST_EVALUATION_SUITE = EvaluationSuite(
     "sealed-test-v1",
@@ -67,9 +117,38 @@ TEST_EVALUATION_SUITE = EvaluationSuite(
     1,
     "1" * 64,
     "2" * 64,
-    "3" * 64,
+    _PORTABLE_TEST_LIBRARY.sha256,
     "4" * 64,
-    "5" * 64,
+    _ACTION_SHA256,
+    (_PORTABLE_TEST_RECIPE.sha256,),
+    TEST_LOGICAL_CELL_IDS,
+    "portable",
+    TEST_LOGICAL_MANIFEST.sha256,
+)
+EXACT_TEST_EVALUATION_SUITE = replace(
+    TEST_EVALUATION_SUITE,
+    suite_id="sealed-test-exact-v1",
+    snapshot_ids=("exact-test-snapshot",),
+    recipe_sha256s=(_EXACT_TEST_RECIPE.sha256,),
+    runtime_identity_sha256="6" * 64,
+    library_sha256=_EXACT_TEST_LIBRARY.sha256,
+    snapshot_store_sha256="8" * 64,
+    backend="exact",
+)
+CALIBRATION_EVALUATION_SUITE = EvaluationSuite(
+    "calibration-v1",
+    "calibration",
+    ("calibration-snapshot",),
+    10,
+    51,
+    1,
+    1,
+    "1" * 64,
+    "2" * 64,
+    _PORTABLE_TEST_LIBRARY.sha256,
+    "4" * 64,
+    _ACTION_SHA256,
+    ("e" * 64,),
 )
 
 
@@ -78,9 +157,116 @@ def suite_identity(phase: str) -> str:
         return TEST_EVALUATION_SUITE.sha256
     if phase == "validation":
         return VALIDATION_EVALUATION_SUITE.sha256
-    return hashlib.sha256(f"suite:{phase}".encode()).hexdigest()
+    return CALIBRATION_EVALUATION_SUITE.sha256
 
 
+@functools.lru_cache(maxsize=None)
+def parity_artifact(
+    policy_sha256: str, phase: str, seed: int
+) -> LearnedPolicyBackendParityArtifact:
+    split = phase
+    portable_recipe = SnapshotRecipe(
+        f"parity-{phase}-portable",
+        f"parity-{phase}",
+        split,
+        f"parity-{phase}",
+        f"parity-{phase}-portable-pool",
+        "a" * 64,
+        1,
+        seed % (2**32),
+        _ACTION_SHA256,
+        (),
+        0,
+        0,
+        seed % (2**64),
+        hashlib.sha256(f"parity:{phase}:{seed}:portable".encode()).hexdigest(),
+        "1" * 64,
+        "test-generator",
+    )
+    exact_recipe = replace(
+        portable_recipe,
+        snapshot_id=f"parity-{phase}-exact",
+        environment_pool=f"parity-{phase}-exact-pool",
+        snapshot_sha256=hashlib.sha256(
+            f"parity:{phase}:{seed}:exact".encode()
+        ).hexdigest(),
+        runtime_identity_sha256="6" * 64,
+    )
+    portable_library = SnapshotLibrary((portable_recipe,))
+    exact_library = SnapshotLibrary((exact_recipe,))
+    logical_manifest = CrossBackendEvaluationManifest(
+        (CrossBackendCellPair.from_recipes(portable_recipe, exact_recipe),)
+    )
+    logical_ids = (logical_manifest.pairs[0].logical_cell.sha256,)
+    portable_suite = EvaluationSuite(
+        f"parity-{phase}-portable",
+        split,
+        (portable_recipe.snapshot_id,),
+        1,
+        seed,
+        1,
+        1,
+        "1" * 64,
+        "2" * 64,
+        portable_library.sha256,
+        "4" * 64,
+        _ACTION_SHA256,
+        (portable_recipe.sha256,),
+        logical_ids,
+        "portable",
+        logical_manifest.sha256,
+    )
+    exact_suite = replace(
+        portable_suite,
+        suite_id=f"parity-{phase}-exact",
+        snapshot_ids=(exact_recipe.snapshot_id,),
+        recipe_sha256s=(exact_recipe.sha256,),
+        runtime_identity_sha256="6" * 64,
+        assignment_sha256="7" * 64,
+        library_sha256=exact_library.sha256,
+        snapshot_store_sha256="8" * 64,
+        backend="exact",
+    )
+
+    def report(suite: EvaluationSuite, execution: str) -> EvaluationReport:
+        snapshot_id = suite.snapshot_ids[0]
+        return EvaluationReport(
+            suite.sha256,
+            policy_sha256,
+            "e" * 64,
+            suite.runtime_identity_sha256,
+            hashlib.sha256(execution.encode()).hexdigest(),
+            (
+                EpisodeMetrics(
+                    snapshot_id,
+                    0,
+                    suite.episode_seed(snapshot_id, 0),
+                    0,
+                    0,
+                    0,
+                    1,
+                    1,
+                    False,
+                    True,
+                    0,
+                    100,
+                    100,
+                ),
+            ),
+        )
+
+    return LearnedPolicyBackendParityArtifact(
+        portable_suite,
+        report(portable_suite, f"{phase}:{seed}:portable"),
+        exact_suite,
+        report(exact_suite, f"{phase}:{seed}:exact"),
+        logical_manifest,
+        portable_library,
+        exact_library,
+    )
+
+
+@functools.lru_cache(maxsize=None)
 def outcomes(
     seeds: tuple[int, ...],
     *,
@@ -96,46 +282,146 @@ def outcomes(
     def identity(seed: int, domain: str) -> str:
         return hashlib.sha256(f"{seed}:{domain}".encode()).hexdigest()
 
-    return tuple(
-        LearnerOutcome(
-            seed,
-            raw_score_auc=auc,
-            final_mean_raw_score=final,
-            p10_raw_score=p10,
-            initial_model_sha256=identity(seed, "model"),
-            assignment_sha256=identity(seed, "assignment"),
-            seed_plan_sha256=identity(seed, "seed-plan"),
-            engineering_evidence=(
-                EngineeringEvidence(
-                    phase=phase,
-                    completed_updates=budget,
-                    plan_sha256=PLAN_SHA256,
-                    job_sha256=identity(seed, f"job:{arm_id}"),
-                    arm_id=arm_id,
-                    learner_seed=seed,
-                    authorization_sha256=(
-                        None if phase == "calibration" else authorization_sha256
-                    ),
-                    policy_sha256=identity(seed, f"policy:{arm_id}"),
-                    trial_manifest_sha256=identity(seed, "trial-manifest"),
-                    pairing_sha256=identity(seed, f"pairing:{phase}:{budget}"),
-                    metrics_sha256=identity(seed, "metrics"),
-                    evaluation_suite_sha256=suite_identity(phase),
-                    evaluation_report_sha256=identity(seed, "evaluation-report"),
-                    checkpoint_resume_sha256=identity(seed, "resume"),
-                    exact_backend_parity_sha256=identity(seed, "parity"),
-                    tail_state_sha256=(
-                        None if phase == "calibration" else identity(seed, "tail")
-                    ),
-                    tail_phase=None if phase == "calibration" else "complete",
-                    score_only_updates=0 if phase == "calibration" else 400,
-                )
-                if engineering_pass
-                else None
-            ),
+    def metrics(seed: int) -> RawScoreMetricsArtifact:
+        suite = {
+            "calibration": CALIBRATION_EVALUATION_SUITE,
+            "validation": VALIDATION_EVALUATION_SUITE,
+            "test": TEST_EVALUATION_SUITE,
+        }[phase]
+        ticks = TEST_PLAN.tick_grid(budget)
+        final_count = len(suite.snapshot_ids) * suite.repetitions
+        lower_count = max(1, (final_count + 9) // 10)
+        upper = round(
+            (final * final_count - p10 * lower_count)
+            / max(final_count - lower_count, 1)
         )
-        for seed in seeds
-    )
+        final_scores = [round(p10)] * lower_count + [upper] * (
+            final_count - lower_count
+        )
+        reports = []
+        episode_cache: dict[tuple[int, ...], tuple[EpisodeMetrics, ...]] = {}
+        for tick_index, tick in enumerate(ticks):
+            scores = tuple(
+                final_scores
+                if tick_index == len(ticks) - 1
+                else [round(auc)] * final_count
+            )
+            episodes = episode_cache.get(scores)
+            if episodes is None:
+                episodes = tuple(
+                    EpisodeMetrics(
+                        snapshot_id,
+                        repetition,
+                        suite.episode_seed(snapshot_id, repetition),
+                        0,
+                        scores[cell],
+                        scores[cell],
+                        1,
+                        1,
+                        False,
+                        True,
+                        0,
+                        100,
+                        100,
+                    )
+                    for cell, (snapshot_id, repetition) in enumerate(
+                        (snapshot_id, repetition)
+                        for snapshot_id in suite.snapshot_ids
+                        for repetition in range(suite.repetitions)
+                    )
+                )
+                episode_cache[scores] = episodes
+            policy_sha256 = identity(seed, f"policy:{arm_id}:{tick_index}")
+            checkpoint = TrainingCheckpointArtifact(
+                seed,
+                tick_index * TEST_PLAN.checkpoint_interval_updates,
+                tick,
+                PLAN_SHA256,
+                identity(seed, f"job:{arm_id}"),
+                identity(seed, "trial-manifest"),
+                hashlib.sha256(b"runner:canonical-r3b").hexdigest(),
+                identity(seed, f"checkpoint-manifest:{arm_id}:{tick_index}"),
+                identity(seed, f"checkpoint-model:{arm_id}:{tick_index}"),
+                policy_sha256,
+            )
+            reports.append(
+                CheckpointEvaluation(
+                    checkpoint,
+                    EvaluationReport(
+                        suite.sha256,
+                        policy_sha256,
+                        "e" * 64,
+                        suite.runtime_identity_sha256,
+                        identity(seed, f"evaluation:{arm_id}:{tick_index}"),
+                        episodes,
+                    ),
+                )
+            )
+        return RawScoreMetricsArtifact(seed, suite, tuple(reports))
+
+    values = []
+    for seed in seeds:
+        key = (seed, auc, final, p10, phase, budget, arm_id)
+        artifact = _METRICS_CACHE.get(key)
+        if artifact is None:
+            artifact = metrics(seed)
+            _METRICS_CACHE[key] = artifact
+        evidence = (
+            EngineeringEvidence(
+                phase=phase,
+                completed_updates=budget,
+                plan_sha256=PLAN_SHA256,
+                job_sha256=identity(seed, f"job:{arm_id}"),
+                arm_id=arm_id,
+                learner_seed=seed,
+                authorization_sha256=(
+                    None if phase == "calibration" else authorization_sha256
+                ),
+                sealed_job_lease_sha256=(
+                    identity(seed, f"lease:{arm_id}") if phase == "test" else None
+                ),
+                policy_sha256=artifact.final_report.policy_sha256,
+                trial_manifest_sha256=identity(seed, "trial-manifest"),
+                runner_spec_sha256=hashlib.sha256(b"runner:canonical-r3b").hexdigest(),
+                pairing_sha256=identity(seed, f"pairing:{phase}:{budget}"),
+                metrics_sha256=artifact.sha256,
+                evaluation_suite_sha256=artifact.suite.sha256,
+                evaluation_report_sha256=artifact.final_report.sha256,
+                checkpoint_resume_artifact=ExactResumeArtifact(
+                    identity(seed, "trial-manifest"),
+                    artifact.checkpoints[-1].checkpoint.checkpoint_manifest_sha256,
+                    artifact.final_report.policy_sha256,
+                    identity(seed, f"resume-next:{arm_id}"),
+                    identity(seed, f"resume-next:{arm_id}"),
+                    identity(seed, f"resume-state:{arm_id}"),
+                    identity(seed, f"resume-state:{arm_id}"),
+                ),
+                exact_backend_parity_artifact=parity_artifact(
+                    artifact.final_report.policy_sha256, phase, seed
+                ),
+                tail_state_sha256=(
+                    None if phase == "calibration" else identity(seed, "tail")
+                ),
+                tail_phase=None if phase == "calibration" else "complete",
+                score_only_updates=0 if phase == "calibration" else 400,
+            )
+            if engineering_pass
+            else None
+        )
+        values.append(
+            LearnerOutcome(
+                seed,
+                raw_score_auc=artifact.raw_score_auc,
+                final_mean_raw_score=artifact.final_mean_raw_score,
+                p10_raw_score=artifact.p10_raw_score,
+                initial_model_sha256=identity(seed, "model"),
+                assignment_sha256=identity(seed, "assignment"),
+                seed_plan_sha256=identity(seed, "seed-plan"),
+                metrics_artifact=artifact,
+                engineering_evidence=evidence,
+            )
+        )
+    return tuple(values)
 
 
 def phase_result(
@@ -225,25 +511,40 @@ def valid_baseline_artifacts(
     for baseline_id in plan.required_baselines:
         baseline = ScriptedBaselineSpec(baseline_id)
 
-        def report(backend: str, execution_domain: str) -> EvaluationReport:
+        def report(execution_domain: str) -> EvaluationReport:
             return EvaluationReport(
                 TEST_EVALUATION_SUITE.sha256,
                 baseline.sha256,
                 "e" * 64,
-                backend * 64,
+                TEST_EVALUATION_SUITE.runtime_identity_sha256,
                 hashlib.sha256(
                     f"{baseline_id}:{execution_domain}".encode()
                 ).hexdigest(),
                 episodes,
             )
 
+        exact_report = EvaluationReport(
+            EXACT_TEST_EVALUATION_SUITE.sha256,
+            baseline.sha256,
+            "e" * 64,
+            EXACT_TEST_EVALUATION_SUITE.runtime_identity_sha256,
+            hashlib.sha256(f"{baseline_id}:exact".encode()).hexdigest(),
+            tuple(
+                replace(value, snapshot_id="exact-test-snapshot") for value in episodes
+            ),
+        )
+
         bundles.append(
             BaselineArtifactBundle(
                 baseline,
                 TEST_EVALUATION_SUITE,
-                report("a", "primary"),
-                report("a", "replay"),
-                report("b", "exact"),
+                report("primary"),
+                report("replay"),
+                EXACT_TEST_EVALUATION_SUITE,
+                exact_report,
+                TEST_LOGICAL_MANIFEST,
+                _PORTABLE_TEST_LIBRARY,
+                _EXACT_TEST_LIBRARY,
             )
         )
     return tuple(bundles)
@@ -255,22 +556,29 @@ def authorization(
     return sealed_run(plan, control, candidate).authorization
 
 
+@functools.lru_cache(maxsize=None)
 def sealed_run(
     plan: R3BExperimentPlan, control: CandidateArm, candidate: CandidateArm
 ) -> SealedTestRunAuthorization:
-    results = authorization_validation_results(plan, control, candidate)
-    return bind_sealed_test_run(
+    ledger, validation = validation_context(plan, control.learning_rate)
+    results = authorization_validation_results(
+        plan, control, candidate, validation_run=validation
+    )
+    return ledger.authorize_once(
         plan,
-        validation_authorization(plan, control.learning_rate),
+        validation,
         results,
         VALIDATION_EVALUATION_SUITE,
         TEST_EVALUATION_SUITE,
     )
 
 
-def validation_authorization(
+def validation_context(
     plan: R3BExperimentPlan, selected_learning_rate: float
-) -> CalibrationSelectionAuthorization:
+) -> tuple[SealedTestLedger, ValidationRunAuthorization]:
+    path = Path(_LEDGER_DIRECTORY.name) / f"ledger-{next(_LEDGER_IDS)}.sqlite3"
+    ledger = SealedTestLedger(path)
+    commitment = ledger.precommit(plan, TEST_EVALUATION_SUITE)
     results = tuple(
         phase_result(
             arm,
@@ -282,17 +590,29 @@ def validation_authorization(
         )
         for arm in plan.arms
     )
-    return authorize_validation(plan, results)
+    return ledger, bind_validation_run(plan, results, commitment)
+
+
+@functools.lru_cache(maxsize=None)
+def validation_authorization(
+    plan: R3BExperimentPlan, selected_learning_rate: float
+) -> ValidationRunAuthorization:
+    return validation_context(plan, selected_learning_rate)[1]
 
 
 def authorization_validation_results(
-    plan: R3BExperimentPlan, control: CandidateArm, candidate: CandidateArm
+    plan: R3BExperimentPlan,
+    control: CandidateArm,
+    candidate: CandidateArm,
+    *,
+    validation_run: ValidationRunAuthorization | None = None,
 ) -> tuple[ArmPhaseResult, ...]:
     arms = tuple(
         CandidateArm(alpha, control.learning_rate) for alpha in plan.alpha_weight_ppm
     )
     if candidate not in arms:
         raise ValueError("test helper candidate must share the calibrated LR")
+    run = validation_run or validation_authorization(plan, control.learning_rate)
     return tuple(
         phase_result(
             arm,
@@ -301,6 +621,7 @@ def authorization_validation_results(
             budget=plan.validation_updates,
             auc=110 if arm == candidate else 100,
             final=100,
+            authorization_sha256=run.sha256,
         )
         for arm in arms
     )
@@ -352,6 +673,33 @@ class R3BExperimentPlanTests(unittest.TestCase):
         self.assertEqual(tick_aligned_raw_score_auc(points, (0, 10, 20)), 12.5)
         with self.assertRaisesRegex(ValueError, "exactly match"):
             tick_aligned_raw_score_auc(points, (0, 10, 30))
+
+    def test_outcome_aggregates_are_derived_from_typed_reports(self) -> None:
+        value = outcomes(
+            (self.plan.test_learner_seeds[0],),
+            auc=100,
+            final=100,
+            phase="test",
+            budget=self.plan.test_updates,
+            authorization_sha256="a" * 64,
+        )[0]
+        with self.assertRaisesRegex(ValueError, "disagree with checkpoint reports"):
+            replace(value, raw_score_auc=value.raw_score_auc + 1)
+
+        artifact = value.metrics_artifact
+        reused = tuple(
+            replace(
+                checkpoint,
+                report=artifact.final_report,
+                checkpoint=replace(
+                    checkpoint.checkpoint,
+                    deployment_policy_sha256=artifact.final_report.policy_sha256,
+                ),
+            )
+            for checkpoint in artifact.checkpoints
+        )
+        with self.assertRaisesRegex(ValueError, "reused an artifact"):
+            replace(artifact, checkpoints=reused)
 
     def test_calibration_selects_one_lr_per_alpha_with_stable_ties(self) -> None:
         results: list[ArmPhaseResult] = []
@@ -408,6 +756,7 @@ class R3BExperimentPlanTests(unittest.TestCase):
         self.assertEqual(selected[0], self.plan.arms[1])
 
     def test_validation_selection_uses_gain_retention_and_stable_ties(self) -> None:
+        ledger, validation = validation_context(self.plan, self.plan.learning_rates[1])
         arms = tuple(
             CandidateArm(alpha, self.plan.learning_rates[1])
             for alpha in self.plan.alpha_weight_ppm
@@ -420,6 +769,7 @@ class R3BExperimentPlanTests(unittest.TestCase):
                 budget=self.plan.validation_updates,
                 auc=100,
                 final=100,
+                authorization_sha256=validation.sha256,
             ),
             phase_result(
                 arms[1],
@@ -428,6 +778,7 @@ class R3BExperimentPlanTests(unittest.TestCase):
                 budget=self.plan.validation_updates,
                 auc=110,
                 final=100,
+                authorization_sha256=validation.sha256,
             ),
             phase_result(
                 arms[2],
@@ -436,6 +787,7 @@ class R3BExperimentPlanTests(unittest.TestCase):
                 budget=self.plan.validation_updates,
                 auc=110,
                 final=100,
+                authorization_sha256=validation.sha256,
             ),
             phase_result(
                 arms[3],
@@ -444,26 +796,73 @@ class R3BExperimentPlanTests(unittest.TestCase):
                 budget=self.plan.validation_updates,
                 auc=130,
                 final=90,
+                authorization_sha256=validation.sha256,
             ),
         ]
         self.assertEqual(
             select_validation_candidate(
                 self.plan,
-                validation_authorization(self.plan, self.plan.learning_rates[1]),
+                validation,
                 results,
             ),
             arms[1],
         )
-        sealed = authorize_sealed_test(
+        wrong_runner = "f" * 64
+
+        def with_wrong_runner(outcome: LearnerOutcome) -> LearnerOutcome:
+            metrics = replace(
+                outcome.metrics_artifact,
+                checkpoints=tuple(
+                    replace(
+                        checkpoint,
+                        checkpoint=replace(
+                            checkpoint.checkpoint,
+                            runner_spec_sha256=wrong_runner,
+                        ),
+                    )
+                    for checkpoint in outcome.metrics_artifact.checkpoints
+                ),
+            )
+            return replace(
+                outcome,
+                metrics_artifact=metrics,
+                engineering_evidence=replace(
+                    outcome.engineering_evidence,
+                    runner_spec_sha256=wrong_runner,
+                    metrics_sha256=metrics.sha256,
+                ),
+            )
+
+        mismatched = tuple(
+            replace(
+                result,
+                outcomes=tuple(
+                    with_wrong_runner(outcome) for outcome in result.outcomes
+                ),
+            )
+            for result in results
+        )
+        with self.assertRaisesRegex(ValueError, "differs from calibrated runner"):
+            select_validation_candidate(self.plan, validation, mismatched)
+        sealed = ledger.authorize_once(
             self.plan,
-            validation_authorization(self.plan, self.plan.learning_rates[1]),
+            validation,
             results,
             VALIDATION_EVALUATION_SUITE,
             TEST_EVALUATION_SUITE,
-        )
+        ).authorization
         self.assertEqual(sealed.control_arm_id, arms[0].arm_id)
         self.assertEqual(sealed.candidate_arm_id, arms[1].arm_id)
         self.assertEqual(sealed.attempt, 1)
+
+        forged = replace(
+            validation.authorization,
+            arms=tuple(reversed(validation.authorization.arms)),
+        )
+        with self.assertRaisesRegex(ValueError, "calibration artifacts disagree"):
+            replace(validation, authorization=forged)
+        with self.assertRaisesRegex(ValueError, "calibrated-arm authorization"):
+            self.plan.trial_jobs("validation", validation.authorization)
 
     def test_baseline_requirements_are_exact_and_fail_closed(self) -> None:
         evidence = valid_baselines(self.plan)
@@ -497,11 +896,7 @@ class R3BExperimentPlanTests(unittest.TestCase):
         )
         decision = confirm_on_sealed_test(
             self.plan,
-            authorization(self.plan, control, candidate),
-            validation_authorization(self.plan, control.learning_rate),
-            authorization_validation_results(self.plan, control, candidate),
-            VALIDATION_EVALUATION_SUITE,
-            TEST_EVALUATION_SUITE,
+            sealed_run(self.plan, control, candidate),
             candidate_result,
             control_result,
             valid_baseline_artifacts(self.plan),
@@ -511,11 +906,7 @@ class R3BExperimentPlanTests(unittest.TestCase):
         self.assertGreater(decision.relative_auc_gain_lower, 0.05)
         report = build_sealed_confirmation_report(
             self.plan,
-            authorization(self.plan, control, candidate),
-            validation_authorization(self.plan, control.learning_rate),
-            authorization_validation_results(self.plan, control, candidate),
-            VALIDATION_EVALUATION_SUITE,
-            TEST_EVALUATION_SUITE,
+            sealed_run(self.plan, control, candidate),
             candidate_result,
             control_result,
             valid_baseline_artifacts(self.plan),
@@ -529,26 +920,11 @@ class R3BExperimentPlanTests(unittest.TestCase):
             authorization(self.plan, control, candidate),
             candidate_arm_id=unselected.arm_id,
         )
-        forged_result = phase_result(
-            unselected,
-            "test",
-            self.plan.test_learner_seeds,
-            budget=self.plan.test_updates,
-            auc=110,
-            final=100,
-        )
-        rejected = confirm_on_sealed_test(
-            self.plan,
-            forged_authorization,
-            validation_authorization(self.plan, control.learning_rate),
-            authorization_validation_results(self.plan, control, candidate),
-            VALIDATION_EVALUATION_SUITE,
-            TEST_EVALUATION_SUITE,
-            forged_result,
-            control_result,
-            valid_baseline_artifacts(self.plan),
-        )
-        self.assertFalse(rejected.accepted)
+        with self.assertRaisesRegex(ValueError, "artifacts disagree"):
+            replace(
+                sealed_run(self.plan, control, candidate),
+                authorization=forged_authorization,
+            )
 
     def test_sealed_confirmation_rejects_regression_or_bad_evidence(self) -> None:
         control = CandidateArm(0, self.plan.learning_rates[1])
@@ -573,11 +949,7 @@ class R3BExperimentPlanTests(unittest.TestCase):
         )
         decision = confirm_on_sealed_test(
             self.plan,
-            authorization(self.plan, control, candidate),
-            validation_authorization(self.plan, control.learning_rate),
-            authorization_validation_results(self.plan, control, candidate),
-            VALIDATION_EVALUATION_SUITE,
-            TEST_EVALUATION_SUITE,
+            sealed_run(self.plan, control, candidate),
             regressed,
             control_result,
             valid_baseline_artifacts(self.plan),
@@ -587,11 +959,7 @@ class R3BExperimentPlanTests(unittest.TestCase):
         self.assertFalse(dict(decision.gates)["final_mean_retention_lcb"])
         decision = confirm_on_sealed_test(
             self.plan,
-            authorization(self.plan, control, candidate),
-            validation_authorization(self.plan, control.learning_rate),
-            authorization_validation_results(self.plan, control, candidate),
-            VALIDATION_EVALUATION_SUITE,
-            TEST_EVALUATION_SUITE,
+            sealed_run(self.plan, control, candidate),
             replace(
                 regressed,
                 outcomes=outcomes(
@@ -616,11 +984,7 @@ class R3BExperimentPlanTests(unittest.TestCase):
         stronger_baselines = valid_baseline_artifacts(self.plan, raw_score=101)
         decision = confirm_on_sealed_test(
             self.plan,
-            authorization(self.plan, control, candidate),
-            validation_authorization(self.plan, control.learning_rate),
-            authorization_validation_results(self.plan, control, candidate),
-            VALIDATION_EVALUATION_SUITE,
-            TEST_EVALUATION_SUITE,
+            sealed_run(self.plan, control, candidate),
             replace(
                 regressed,
                 outcomes=outcomes(
@@ -642,6 +1006,34 @@ class R3BExperimentPlanTests(unittest.TestCase):
         self.assertFalse(decision.accepted)
         self.assertFalse(dict(decision.gates)["trivial_baseline_margin_lcb"])
 
+        near_zero_control = phase_result(
+            control,
+            "test",
+            self.plan.test_learner_seeds,
+            budget=self.plan.test_updates,
+            auc=100,
+            final=0,
+            p10=0,
+        )
+        near_zero_candidate = phase_result(
+            candidate,
+            "test",
+            self.plan.test_learner_seeds,
+            budget=self.plan.test_updates,
+            auc=110,
+            final=0,
+            p10=0,
+        )
+        near_zero = confirm_on_sealed_test(
+            self.plan,
+            sealed_run(self.plan, control, candidate),
+            near_zero_candidate,
+            near_zero_control,
+            valid_baseline_artifacts(self.plan),
+        )
+        self.assertEqual(near_zero.final_mean_mode, "absolute_delta")
+        self.assertEqual(near_zero.final_mean_retention_lower, 0.0)
+
     def test_noncomplete_test_result_is_rejection_not_silent_drop(self) -> None:
         control = CandidateArm(0, self.plan.learning_rates[1])
         candidate = CandidateArm(100_000, self.plan.learning_rates[1])
@@ -662,17 +1054,23 @@ class R3BExperimentPlanTests(unittest.TestCase):
         )
         decision = confirm_on_sealed_test(
             self.plan,
-            authorization(self.plan, control, candidate),
-            validation_authorization(self.plan, control.learning_rate),
-            authorization_validation_results(self.plan, control, candidate),
-            VALIDATION_EVALUATION_SUITE,
-            TEST_EVALUATION_SUITE,
+            sealed_run(self.plan, control, candidate),
             failed,
             control_result,
             valid_baseline_artifacts(self.plan),
         )
         self.assertFalse(decision.accepted)
         self.assertEqual(decision.gates, (("complete_exact_test_results", False),))
+
+        malformed = confirm_on_sealed_test(
+            self.plan,
+            object(),  # type: ignore[arg-type]
+            failed,
+            control_result,
+            valid_baseline_artifacts(self.plan),
+        )
+        self.assertFalse(malformed.accepted)
+        self.assertEqual(malformed.gates, (("complete_exact_test_results", False),))
 
     def test_seed_plans_are_domain_separated_and_arm_independent(self) -> None:
         first = TrialSeedPlan.derive(self.plan.sha256, 42)
@@ -711,7 +1109,7 @@ class R3BExperimentPlanTests(unittest.TestCase):
         self.assertTrue(all(not job.sealed for job in validation))
         candidate = selected[1]
         test = self.plan.trial_jobs(
-            "test", authorization(self.plan, selected[0], candidate)
+            "test", sealed_run(self.plan, selected[0], candidate)
         )
         self.assertEqual(len(test), 2 * 12)
         self.assertTrue(all(job.sealed for job in test))
@@ -725,6 +1123,159 @@ class R3BExperimentPlanTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(ValueError, "validation-bound"):
             self.plan.trial_jobs("test", selected)
+
+    def test_sealed_test_ledger_is_precommitted_restart_safe_and_one_shot(
+        self,
+    ) -> None:
+        control = CandidateArm(0, self.plan.learning_rates[1])
+        candidate = CandidateArm(100_000, self.plan.learning_rates[1])
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "sealed.sqlite3"
+            ledger = SealedTestLedger(path)
+            commitment = ledger.precommit(self.plan, TEST_EVALUATION_SUITE)
+            calibration = validation_authorization(
+                self.plan, control.learning_rate
+            ).calibration_results
+            validation = bind_validation_run(self.plan, calibration, commitment)
+            results = authorization_validation_results(
+                self.plan,
+                control,
+                candidate,
+                validation_run=validation,
+            )
+            first = ledger.authorize_once(
+                self.plan,
+                validation,
+                results,
+                VALIDATION_EVALUATION_SUITE,
+                TEST_EVALUATION_SUITE,
+            )
+            forged_report = build_sealed_confirmation_report(
+                self.plan,
+                first,
+                phase_result(
+                    candidate,
+                    "test",
+                    self.plan.test_learner_seeds,
+                    budget=self.plan.test_updates,
+                    auc=110,
+                    final=100,
+                    authorization_sha256=first.sha256,
+                ),
+                phase_result(
+                    control,
+                    "test",
+                    self.plan.test_learner_seeds,
+                    budget=self.plan.test_updates,
+                    auc=100,
+                    final=100,
+                    authorization_sha256=first.sha256,
+                ),
+                valid_baseline_artifacts(self.plan),
+            )
+            self.assertFalse(ledger.verify_finalized(forged_report))
+            resumed = SealedTestLedger(path).authorize_once(
+                self.plan,
+                validation,
+                results,
+                VALIDATION_EVALUATION_SUITE,
+                TEST_EVALUATION_SUITE,
+            )
+            self.assertEqual(first.authorization, resumed.authorization)
+            with self.assertRaisesRegex(RuntimeError, "receipt is not active"):
+                replace(first, ledger_receipt_token="f" * 64)
+            alternate = replace(
+                TEST_EVALUATION_SUITE,
+                suite_id="post-hoc-test",
+                snapshot_ids=("alternate-test-snapshot",),
+            )
+            with self.assertRaisesRegex(RuntimeError, "another suite"):
+                ledger.precommit(self.plan, alternate)
+            with self.assertRaisesRegex(ValueError, "sealed test lacks"):
+                ledger.authorize_once(
+                    self.plan,
+                    validation,
+                    results,
+                    VALIDATION_EVALUATION_SUITE,
+                    alternate,
+                )
+
+            candidate_result = phase_result(
+                candidate,
+                "test",
+                self.plan.test_learner_seeds,
+                budget=self.plan.test_updates,
+                auc=110,
+                final=100,
+                authorization_sha256=first.sha256,
+            )
+            control_result = phase_result(
+                control,
+                "test",
+                self.plan.test_learner_seeds,
+                budget=self.plan.test_updates,
+                auc=100,
+                final=100,
+                authorization_sha256=first.sha256,
+            )
+            recorded_results = {
+                candidate.arm_id: candidate_result,
+                control.arm_id: control_result,
+            }
+            recorded_outcomes: dict[str, list[LearnerOutcome]] = {
+                candidate.arm_id: [],
+                control.arm_id: [],
+            }
+            for job in self.plan.trial_jobs("test", first):
+                lease = ledger.claim_job(first, job)
+                ledger.begin_job(lease)
+                source = next(
+                    outcome
+                    for outcome in recorded_results[job.arm.arm_id].outcomes
+                    if outcome.learner_seed == job.learner_seed
+                )
+                assert source.engineering_evidence is not None
+                bound = replace(
+                    source,
+                    seed_plan_sha256=job.seed_plan_sha256,
+                    engineering_evidence=replace(
+                        source.engineering_evidence,
+                        job_sha256=job.sha256,
+                        sealed_job_lease_sha256=lease.sha256,
+                    ),
+                )
+                ledger.complete_job(lease, bound)
+                recorded_outcomes[job.arm.arm_id].append(bound)
+            candidate_result = replace(
+                candidate_result,
+                outcomes=tuple(recorded_outcomes[candidate.arm_id]),
+            )
+            control_result = replace(
+                control_result,
+                outcomes=tuple(recorded_outcomes[control.arm_id]),
+            )
+            report = ledger.finalize_once(
+                first,
+                candidate_result,
+                control_result,
+                valid_baseline_artifacts(self.plan),
+            )
+            self.assertTrue(ledger.verify_finalized(report))
+            with self.assertRaisesRegex(RuntimeError, "receipt is not active"):
+                ledger.finalize_once(
+                    first,
+                    candidate_result,
+                    control_result,
+                    valid_baseline_artifacts(self.plan),
+                )
+            with self.assertRaisesRegex(RuntimeError, "consumed"):
+                ledger.authorize_once(
+                    self.plan,
+                    validation,
+                    results,
+                    VALIDATION_EVALUATION_SUITE,
+                    TEST_EVALUATION_SUITE,
+                )
 
     def test_selection_rejects_unpaired_model_or_assignment_identity(self) -> None:
         results = [
@@ -747,4 +1298,3 @@ class R3BExperimentPlanTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-    (authorize_sealed_test,)

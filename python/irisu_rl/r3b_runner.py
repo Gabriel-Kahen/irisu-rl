@@ -4,10 +4,14 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass, replace
+import math
+from dataclasses import dataclass, fields, is_dataclass, replace
+from pathlib import Path
+from threading import Lock
 from types import MappingProxyType
 from typing import Any, Callable, Mapping
 
+import numpy as np
 import torch
 
 from .collector import (
@@ -17,6 +21,7 @@ from .collector import (
     RecurrentCollector,
     model_state_sha256,
 )
+from .checkpoints import capture_rng_state, restore_rng_state
 from .curriculum import (
     CurriculumCoordinator,
     CurriculumSnapshotInitializer,
@@ -26,15 +31,23 @@ from .curriculum import (
 from .encoding import TeacherStateEncoder
 from .models import RecurrentActorCritic
 from .ppo import PPOConfig, PPOTrainer
-from .r3b_evaluation import EvaluationReport, EvaluationSuite
+from .r3b_evaluation import (
+    DeploymentPolicyIdentity,
+    LearnedPolicyBackendParityArtifact,
+    behavior_build_identity_sha256,
+    encoder_instance_manifest,
+)
 from .r3b_experiments import (
-    CalibrationSelectionAuthorization,
     CandidateArm,
     EngineeringEvidence,
+    ExactResumeArtifact,
+    RawScoreMetricsArtifact,
     R3BExperimentPlan,
-    SealedTestRunAuthorization,
+    SealedTestLedger,
+    SealedTestJobLease,
     TrialJob,
     TrialSeedPlan,
+    ValidationRunAuthorization,
 )
 from .r3b_tail import ScoreOnlyTailController
 from .rewards import (
@@ -44,6 +57,7 @@ from .rewards import (
     RewardSchedule,
 )
 from .vector_adapter import MacroVectorAdapter
+from .runtime_identity import SimulatorRuntimeAttestation, attest_simulator_runtime
 
 
 def _freeze_json(value: object) -> object:
@@ -68,6 +82,120 @@ def _thaw_json(value: object) -> object:
     return value
 
 
+def _audit_normalize(value: object) -> object:
+    if isinstance(value, torch.Tensor):
+        tensor = value.detach().cpu().contiguous()
+        return {
+            "tensor_dtype": str(tensor.dtype),
+            "tensor_shape": list(tensor.shape),
+            "tensor_sha256": hashlib.sha256(
+                tensor.reshape(-1).view(torch.uint8).numpy().tobytes()
+            ).hexdigest(),
+        }
+    if isinstance(value, np.ndarray):
+        array = np.ascontiguousarray(value)
+        return {
+            "numpy_dtype": array.dtype.str,
+            "numpy_shape": list(array.shape),
+            "numpy_sha256": hashlib.sha256(array.tobytes()).hexdigest(),
+        }
+    if is_dataclass(value) and not isinstance(value, type):
+        return {
+            "dataclass": f"{type(value).__module__}.{type(value).__qualname__}",
+            "fields": {
+                field.name: _audit_normalize(getattr(value, field.name))
+                for field in fields(value)
+                if field.init
+            },
+        }
+    if isinstance(value, Mapping):
+        return {
+            str(key): _audit_normalize(item)
+            for key, item in sorted(value.items(), key=lambda item: str(item[0]))
+        }
+    if isinstance(value, (tuple, list)):
+        return [_audit_normalize(item) for item in value]
+    if isinstance(value, bytes):
+        return {
+            "bytes": len(value),
+            "sha256": hashlib.sha256(value).hexdigest(),
+        }
+    if isinstance(value, np.generic):
+        return _audit_normalize(value.item())
+    if value is None or isinstance(value, (bool, int, str)):
+        return value
+    if isinstance(value, float) and math.isfinite(value):
+        return value
+    raise TypeError(f"resume audit cannot normalize {type(value).__name__}")
+
+
+def _audit_sha256(value: object) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            _audit_normalize(value),
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode()
+    ).hexdigest()
+
+
+def _session_continuation_state(session: R3ATrainingSession) -> dict[str, object]:
+    return {
+        "model": session.model.state_dict(),
+        "trainer": session.trainer.state_dict(),
+        "collector": session.collector.state_dict(),
+        "task": session.task.state_dict(),
+        "adapter": session.collector.adapter.checkpoint(),
+        "tail": (
+            None
+            if session.tail_controller is None
+            else session.tail_controller.state_dict()
+        ),
+        "attempted_rollouts": session.attempted_rollouts,
+        "skipped_rollouts": session.skipped_rollouts,
+        "consecutive_skips": session.consecutive_skips,
+        "rng": capture_rng_state(session.numpy_generator),
+    }
+
+
+def verify_exact_resume_continuation(
+    *,
+    trial_manifest_sha256: str,
+    checkpoint_manifest_sha256: str,
+    source: R3ATrainingSession,
+    restored: R3ATrainingSession,
+) -> ExactResumeArtifact:
+    """Advance independent source/restored sessions and prove exact continuation."""
+
+    if source is restored:
+        raise ValueError("exact-resume verification requires independent sessions")
+    source_policy = source.policy_sha256
+    if restored.policy_sha256 != source_policy:
+        raise ValueError("restored checkpoint policy differs before continuation")
+    initial_rng = capture_rng_state(source.numpy_generator)
+    initial_source = _audit_sha256(_session_continuation_state(source))
+    initial_restored = _audit_sha256(_session_continuation_state(restored))
+    if initial_source != initial_restored:
+        raise ValueError("restored checkpoint state differs before continuation")
+    source_update = source.run_update()
+    source_update_sha256 = _audit_sha256(source_update)
+    source_after_sha256 = _audit_sha256(_session_continuation_state(source))
+    restore_rng_state(initial_rng, restored.numpy_generator)
+    restored_update = restored.run_update()
+    restored_update_sha256 = _audit_sha256(restored_update)
+    restored_after_sha256 = _audit_sha256(_session_continuation_state(restored))
+    return ExactResumeArtifact(
+        trial_manifest_sha256,
+        checkpoint_manifest_sha256,
+        source_policy,
+        source_update_sha256,
+        restored_update_sha256,
+        source_after_sha256,
+        restored_after_sha256,
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class TrialManifest:
     plan_sha256: str
@@ -82,9 +210,12 @@ class TrialManifest:
     initial_model_sha256: str
     curriculum_sha256: str
     assignment_sha256: str
+    library_sha256: str
     snapshot_store_sha256: str
     runtime_identity_sha256: str
+    action_spec_sha256: str
     reward_sha256: str
+    runner_spec_sha256: str
     pairing_sha256: str
     collector: Mapping[str, object]
     ppo: Mapping[str, object]
@@ -92,7 +223,7 @@ class TrialManifest:
     deployable: bool = False
     observation_provenance: str = "privileged_simulator"
     transfer_gate: str = "R4 causal tracker and input calibration pending"
-    version: str = "r3b-trial-manifest-v2"
+    version: str = "r3b-trial-manifest-v4"
 
     def __post_init__(self) -> None:
         hashes = (
@@ -102,9 +233,12 @@ class TrialManifest:
             self.initial_model_sha256,
             self.curriculum_sha256,
             self.assignment_sha256,
+            self.library_sha256,
             self.snapshot_store_sha256,
             self.runtime_identity_sha256,
+            self.action_spec_sha256,
             self.reward_sha256,
+            self.runner_spec_sha256,
             self.pairing_sha256,
         )
         if any(
@@ -118,7 +252,7 @@ class TrialManifest:
                 "trial identities must be nonzero lowercase SHA-256 values"
             )
         if (
-            self.version != "r3b-trial-manifest-v2"
+            self.version != "r3b-trial-manifest-v4"
             or self.phase not in {"calibration", "validation", "test"}
             or not self.arm_id
             or isinstance(self.learner_seed, bool)
@@ -170,9 +304,12 @@ class TrialManifest:
             "initial_model_sha256": self.initial_model_sha256,
             "curriculum_sha256": self.curriculum_sha256,
             "assignment_sha256": self.assignment_sha256,
+            "library_sha256": self.library_sha256,
             "snapshot_store_sha256": self.snapshot_store_sha256,
             "runtime_identity_sha256": self.runtime_identity_sha256,
+            "action_spec_sha256": self.action_spec_sha256,
             "reward_sha256": self.reward_sha256,
+            "runner_spec_sha256": self.runner_spec_sha256,
             "pairing_sha256": self.pairing_sha256,
             "collector": _thaw_json(self.collector),
             "ppo": _thaw_json(self.ppo),
@@ -196,6 +333,7 @@ class BuiltTrial:
     session: R3ATrainingSession
     manifest: TrialManifest
     environment: Any
+    sealed_job_lease_sha256: str | None = None
 
     def close(self) -> None:
         close = getattr(self.environment, "close", None)
@@ -205,21 +343,59 @@ class BuiltTrial:
     def engineering_evidence(
         self,
         *,
-        metrics_sha256: str,
-        evaluation_suite: EvaluationSuite,
-        evaluation_report: EvaluationReport,
-        checkpoint_resume_sha256: str,
-        exact_backend_parity_sha256: str,
+        metrics_artifact: RawScoreMetricsArtifact,
+        deployment_identity: DeploymentPolicyIdentity,
+        checkpoint_resume_artifact: ExactResumeArtifact,
+        exact_backend_parity_artifact: LearnedPolicyBackendParityArtifact,
     ) -> EngineeringEvidence:
         """Bind completed session state to the external audit artifacts."""
 
         self.session.assert_evidence_ready()
         completed = self.session.trainer.schedule.completed_updates
-        policy_sha256 = self.session.policy_sha256
+        model_sha256 = self.session.policy_sha256
+        final_checkpoint = (
+            metrics_artifact.checkpoints[-1].checkpoint
+            if isinstance(metrics_artifact, RawScoreMetricsArtifact)
+            else None
+        )
         if (
-            evaluation_suite.split != self.manifest.phase
-            or evaluation_report.suite_sha256 != evaluation_suite.sha256
-            or evaluation_report.policy_sha256 != policy_sha256
+            not isinstance(metrics_artifact, RawScoreMetricsArtifact)
+            or not isinstance(deployment_identity, DeploymentPolicyIdentity)
+            or metrics_artifact.suite.split != self.manifest.phase
+            or metrics_artifact.final_report.policy_sha256 != deployment_identity.sha256
+            or deployment_identity.model_sha256 != model_sha256
+            or final_checkpoint is None
+            or final_checkpoint.completed_updates != completed
+            or final_checkpoint.simulated_ticks
+            != self.session.collector.simulated_ticks
+            or final_checkpoint.plan_sha256 != self.manifest.plan_sha256
+            or final_checkpoint.job_sha256 != self.manifest.job_sha256
+            or final_checkpoint.trial_manifest_sha256 != self.manifest.sha256
+            or final_checkpoint.runner_spec_sha256 != self.manifest.runner_spec_sha256
+            or final_checkpoint.model_sha256 != model_sha256
+            or final_checkpoint.deployment_policy_sha256 != deployment_identity.sha256
+            or metrics_artifact.suite.runtime_identity_sha256
+            != self.manifest.runtime_identity_sha256
+            or metrics_artifact.suite.assignment_sha256
+            != self.manifest.assignment_sha256
+            or metrics_artifact.suite.library_sha256 != self.manifest.library_sha256
+            or metrics_artifact.suite.snapshot_store_sha256
+            != self.manifest.snapshot_store_sha256
+            or metrics_artifact.suite.action_spec_sha256
+            != self.manifest.action_spec_sha256
+            or deployment_identity.action_spec_sha256
+            != self.manifest.action_spec_sha256
+            or not isinstance(checkpoint_resume_artifact, ExactResumeArtifact)
+            or checkpoint_resume_artifact.trial_manifest_sha256 != self.manifest.sha256
+            or not isinstance(
+                exact_backend_parity_artifact,
+                LearnedPolicyBackendParityArtifact,
+            )
+            or exact_backend_parity_artifact.portable_suite.sha256
+            != metrics_artifact.suite.sha256
+            or exact_backend_parity_artifact.portable_report.sha256
+            != metrics_artifact.final_report.sha256
+            or exact_backend_parity_artifact.policy_sha256 != deployment_identity.sha256
         ):
             raise ValueError(
                 "evaluation artifacts do not belong to the completed trial"
@@ -248,14 +424,16 @@ class BuiltTrial:
             arm_id=self.manifest.arm_id,
             learner_seed=self.manifest.learner_seed,
             authorization_sha256=self.manifest.authorization_sha256,
-            policy_sha256=policy_sha256,
+            sealed_job_lease_sha256=self.sealed_job_lease_sha256,
+            policy_sha256=deployment_identity.sha256,
             trial_manifest_sha256=self.manifest.sha256,
+            runner_spec_sha256=self.manifest.runner_spec_sha256,
             pairing_sha256=self.manifest.pairing_sha256,
-            metrics_sha256=metrics_sha256,
-            evaluation_suite_sha256=evaluation_suite.sha256,
-            evaluation_report_sha256=evaluation_report.sha256,
-            checkpoint_resume_sha256=checkpoint_resume_sha256,
-            exact_backend_parity_sha256=exact_backend_parity_sha256,
+            metrics_sha256=metrics_artifact.sha256,
+            evaluation_suite_sha256=metrics_artifact.suite.sha256,
+            evaluation_report_sha256=metrics_artifact.final_report.sha256,
+            checkpoint_resume_artifact=checkpoint_resume_artifact,
+            exact_backend_parity_artifact=exact_backend_parity_artifact,
             tail_state_sha256=tail_state_sha256,
             tail_phase=tail_phase,
             score_only_updates=score_only_updates,
@@ -277,12 +455,13 @@ class R3BRunBuilder:
         curriculum: CurriculumSpec,
         snapshots: SnapshotBlobStore,
         *,
-        runtime_identity_sha256: str,
+        runtime_attestation: SimulatorRuntimeAttestation,
         lanes: int,
         collector_config: CollectorConfig,
         ppo_config: PPOConfig,
         model_factory: Callable[[], RecurrentActorCritic],
         environment_factory: Callable[[], Any],
+        sealed_test_ledger: SealedTestLedger | None = None,
         reward_scale: float = 1000.0,
         max_consecutive_skips: int = 64,
     ) -> None:
@@ -313,14 +492,24 @@ class R3BRunBuilder:
         self.plan = plan
         self.base_curriculum = curriculum
         self.snapshots = snapshots
-        self.runtime_identity_sha256 = runtime_identity_sha256
+        if not isinstance(runtime_attestation, SimulatorRuntimeAttestation):
+            raise TypeError("runner requires a measured simulator runtime attestation")
+        self.runtime_attestation = runtime_attestation
+        self.runtime_identity_sha256 = runtime_attestation.sha256
         self.lanes = lanes
         self.collector_config = collector_config
         self.ppo_config = ppo_config
         self.model_factory = model_factory
         self.environment_factory = environment_factory
+        if sealed_test_ledger is not None and not isinstance(
+            sealed_test_ledger, SealedTestLedger
+        ):
+            raise TypeError("sealed-test ledger must be a trusted ledger instance")
+        self.sealed_test_ledger = sealed_test_ledger
         self.reward_scale = float(reward_scale)
         self.max_consecutive_skips = max_consecutive_skips
+        self._runner_spec_sha256: str | None = None
+        self._runner_spec_lock = Lock()
 
     def _curriculum(self, arm: CandidateArm) -> CurriculumSpec:
         if arm not in self.plan.arms:
@@ -346,9 +535,7 @@ class R3BRunBuilder:
     def _validate_job(
         self,
         job: TrialJob,
-        authorization: CalibrationSelectionAuthorization
-        | SealedTestRunAuthorization
-        | None,
+        authorization: ValidationRunAuthorization | SealedTestJobLease | None,
     ) -> None:
         if not isinstance(job, TrialJob) or job.plan_sha256 != self.plan.sha256:
             raise ValueError("trial job does not belong to the frozen plan")
@@ -387,22 +574,28 @@ class R3BRunBuilder:
             valid_authorization = authorization is None
         elif job.phase == "validation":
             valid_authorization = (
-                isinstance(authorization, CalibrationSelectionAuthorization)
-                and authorization.plan_sha256 == self.plan.sha256
-                and job.arm in authorization.arms
+                isinstance(authorization, ValidationRunAuthorization)
+                and authorization.plan.sha256 == self.plan.sha256
+                and job.arm in authorization.authorization.arms
                 and job.authorization_sha256 == authorization.sha256
             )
         else:
             valid_authorization = (
-                isinstance(authorization, SealedTestRunAuthorization)
-                and authorization.plan.sha256 == self.plan.sha256
+                isinstance(authorization, SealedTestJobLease)
+                and authorization.sealed_run.plan.sha256 == self.plan.sha256
+                and authorization.job == job
                 and job.arm.arm_id
                 in {
-                    authorization.authorization.control_arm_id,
-                    authorization.authorization.candidate_arm_id,
+                    authorization.sealed_run.authorization.control_arm_id,
+                    authorization.sealed_run.authorization.candidate_arm_id,
                 }
-                and job.authorization_sha256 == authorization.sha256
+                and job.authorization_sha256 == authorization.sealed_run.sha256
+                and self.sealed_test_ledger is not None
+                and self.sealed_test_ledger.path
+                == Path(authorization.sealed_run.ledger_path)
             )
+            if valid_authorization:
+                authorization.assert_active()
         if not valid_authorization:
             raise ValueError("trial job lacks its phase-selection authorization")
 
@@ -410,11 +603,12 @@ class R3BRunBuilder:
         self,
         job: TrialJob,
         *,
-        authorization: CalibrationSelectionAuthorization
-        | SealedTestRunAuthorization
-        | None = None,
+        authorization: ValidationRunAuthorization | SealedTestJobLease | None = None,
     ) -> BuiltTrial:
         self._validate_job(job, authorization)
+        if isinstance(authorization, SealedTestJobLease):
+            assert self.sealed_test_ledger is not None
+            self.sealed_test_ledger.begin_job(authorization)
         arm = job.arm
         learner_seed = job.learner_seed
         seed_plan = TrialSeedPlan.derive(self.plan.sha256, learner_seed)
@@ -423,6 +617,12 @@ class R3BRunBuilder:
         try:
             if int(environment.num_envs) != self.lanes:
                 raise ValueError("environment factory returned the wrong lane count")
+            actual_runtime = attest_simulator_runtime(environment)
+            if (
+                actual_runtime.sha256 != self.runtime_attestation.sha256
+                or actual_runtime.verified_lanes != self.lanes
+            ):
+                raise RuntimeError("environment factory returned an unattested runtime")
             coordinator = CurriculumCoordinator(
                 curriculum, self.lanes, learner_seed=seed_plan.assignment
             )
@@ -430,7 +630,7 @@ class R3BRunBuilder:
                 coordinator,
                 self.snapshots,
                 environment_pool=curriculum.stages[0].environment_pool,
-                runtime_identity_sha256=self.runtime_identity_sha256,
+                runtime_attestation=actual_runtime,
             )
             cuda_devices = (
                 list(range(torch.cuda.device_count()))
@@ -449,6 +649,71 @@ class R3BRunBuilder:
                     gamma_tick=self.collector_config.gamma_tick
                 ),
             )
+            encoder = TeacherStateEncoder()
+            encoder_manifest = encoder_instance_manifest(encoder)
+            curriculum_shared = {
+                **{
+                    key: value
+                    for key, value in curriculum.manifest().items()
+                    if key not in {"stages", "assignment_sha256"}
+                },
+                "assignment_sha256": curriculum.assignment_sha256,
+                "stages": [
+                    {
+                        key: value
+                        for key, value in stage.manifest().items()
+                        if key != "reward_schedule"
+                    }
+                    for stage in curriculum.stages
+                ],
+            }
+            build_identity_sha256 = behavior_build_identity_sha256(
+                {
+                    "purpose": "r3b-training-runner-v1",
+                    "model": model.manifest(),
+                    "encoder": encoder_manifest,
+                    "collector": self.collector_config.manifest(),
+                    "ppo_without_learning_rate": {
+                        key: value
+                        for key, value in self.ppo_config.manifest().items()
+                        if key != "learning_rate"
+                    },
+                    "curriculum_shared": curriculum_shared,
+                }
+            )
+            runner_spec_sha256 = hashlib.sha256(
+                json.dumps(
+                    {
+                        "version": "r3b-runner-spec-v1",
+                        "plan_sha256": self.plan.sha256,
+                        "model": model.manifest(),
+                        "encoder": encoder_manifest,
+                        "collector": self.collector_config.manifest(),
+                        "ppo_without_learning_rate": {
+                            key: value
+                            for key, value in self.ppo_config.manifest().items()
+                            if key != "learning_rate"
+                        },
+                        "lanes": self.lanes,
+                        "reward_scale": self.reward_scale,
+                        "max_consecutive_skips": self.max_consecutive_skips,
+                        "runtime_identity_sha256": actual_runtime.sha256,
+                        "snapshot_store_sha256": self.snapshots.sha256,
+                        "curriculum_shared": curriculum_shared,
+                        "build_identity_sha256": build_identity_sha256,
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    allow_nan=False,
+                ).encode()
+            ).hexdigest()
+            with self._runner_spec_lock:
+                if self._runner_spec_sha256 is None:
+                    self._runner_spec_sha256 = runner_spec_sha256
+                elif self._runner_spec_sha256 != runner_spec_sha256:
+                    raise RuntimeError(
+                        "model factory changed the frozen runner specification"
+                    )
             task = CurriculumTaskContract(
                 coordinator,
                 composer,
@@ -457,7 +722,7 @@ class R3BRunBuilder:
             )
             adapter = MacroVectorAdapter(
                 environment,
-                encoder=TeacherStateEncoder(),
+                encoder=encoder,
                 capture_events=False,
                 episode_initializer=initializer,
             )
@@ -503,24 +768,13 @@ class R3BRunBuilder:
                 "seed_plan_sha256": seed_plan.sha256,
                 "initial_model_sha256": initial_model_sha256,
                 "assignment_sha256": curriculum.assignment_sha256,
-                "curriculum_shared": {
-                    **{
-                        key: value
-                        for key, value in curriculum.manifest().items()
-                        if key not in {"stages", "assignment_sha256"}
-                    },
-                    "stages": [
-                        {
-                            key: value
-                            for key, value in stage.manifest().items()
-                            if key != "reward_schedule"
-                        }
-                        for stage in curriculum.stages
-                    ],
-                },
+                "curriculum_shared": curriculum_shared,
+                "library_sha256": self.snapshots.library.sha256,
                 "snapshot_store_sha256": self.snapshots.sha256,
                 "runtime_identity_sha256": self.runtime_identity_sha256,
+                "action_spec_sha256": model.action_spec.sha256,
                 "reward_sha256": composer.sha256,
+                "runner_spec_sha256": runner_spec_sha256,
                 "collector": self.collector_config.manifest(),
                 "ppo_without_learning_rate": {
                     key: value
@@ -551,15 +805,25 @@ class R3BRunBuilder:
                 initial_model_sha256,
                 curriculum.sha256,
                 curriculum.assignment_sha256,
+                self.snapshots.library.sha256,
                 self.snapshots.sha256,
                 self.runtime_identity_sha256,
+                model.action_spec.sha256,
                 composer.sha256,
+                runner_spec_sha256,
                 pairing_sha256,
                 self.collector_config.manifest(),
                 trial_ppo.manifest(),
                 self.lanes,
             )
-            return BuiltTrial(session, manifest, environment)
+            return BuiltTrial(
+                session,
+                manifest,
+                environment,
+                authorization.sha256
+                if isinstance(authorization, SealedTestJobLease)
+                else None,
+            )
         except BaseException:
             close = getattr(environment, "close", None)
             if close is not None:

@@ -239,7 +239,7 @@ class ScoreOnlyTailController:
     again when the completed clock advances.
     """
 
-    version = "score-only-tail-controller-v2"
+    version = "score-only-tail-controller-v3"
 
     def __init__(
         self,
@@ -278,6 +278,7 @@ class ScoreOnlyTailController:
         self.completed_updates = 0
         self.drain_collections = 0
         self.score_only_updates = 0
+        self.event_count = 0
         self.event_head = _ZERO_SHA256
         self._pending_update: tuple[int, str] | None = None
 
@@ -303,14 +304,17 @@ class ScoreOnlyTailController:
         return value
 
     def _append_event(self, kind: str, payload: Mapping[str, object]) -> None:
+        next_count = self.event_count + 1
         self.event_head = _canonical_sha256(
             {
                 "previous": self.event_head,
+                "event_count": next_count,
                 "kind": kind,
                 "completed_updates": self.completed_updates,
                 "payload": dict(payload),
             }
         )
+        self.event_count = next_count
 
     def collection_mode(
         self,
@@ -454,6 +458,7 @@ class ScoreOnlyTailController:
             "completed_updates": self.completed_updates,
             "drain_collections": self.drain_collections,
             "score_only_updates": self.score_only_updates,
+            "event_count": self.event_count,
             "event_head": self.event_head,
         }
 
@@ -466,6 +471,7 @@ class ScoreOnlyTailController:
             self.completed_updates,
             self.drain_collections,
             self.score_only_updates,
+            self.event_count,
         )
         if any(
             isinstance(value, bool) or not isinstance(value, int) or value < 0
@@ -480,6 +486,17 @@ class ScoreOnlyTailController:
             self.completed_updates - self.sweep_updates, 0
         ):
             raise ValueError("tail score-only and optimizer clocks disagree")
+        expected_events = (
+            self.completed_updates
+            + self.drain_collections
+            + (self.phase != "sweep")
+            + (self.phase in {"score_only", "complete"})
+            + (self.phase == "complete")
+        )
+        if self.event_count != expected_events:
+            raise ValueError("tail event count disagrees with checkpoint state")
+        if (self.event_count == 0) != (self.event_head == _ZERO_SHA256):
+            raise ValueError("tail event-chain head disagrees with event count")
         if self.phase == "sweep" and (
             self.completed_updates > self.sweep_updates
             or self.drain_collections != 0
@@ -510,6 +527,7 @@ class ScoreOnlyTailController:
             "completed_updates",
             "drain_collections",
             "score_only_updates",
+            "event_count",
             "event_head",
         }
         if set(state) != expected or state["version"] != self.version:
@@ -523,6 +541,7 @@ class ScoreOnlyTailController:
             self.completed_updates,
             self.drain_collections,
             self.score_only_updates,
+            self.event_count,
             self.event_head,
         )
         try:
@@ -530,6 +549,7 @@ class ScoreOnlyTailController:
             self.completed_updates = state["completed_updates"]  # type: ignore[assignment]
             self.drain_collections = state["drain_collections"]  # type: ignore[assignment]
             self.score_only_updates = state["score_only_updates"]  # type: ignore[assignment]
+            self.event_count = state["event_count"]  # type: ignore[assignment]
             self.event_head = state["event_head"]  # type: ignore[assignment]
             self._validate_state()
         except BaseException:
@@ -538,6 +558,7 @@ class ScoreOnlyTailController:
                 self.completed_updates,
                 self.drain_collections,
                 self.score_only_updates,
+                self.event_count,
                 self.event_head,
             ) = prior
             raise

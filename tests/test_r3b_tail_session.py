@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import hashlib
+import tempfile
 import unittest
+
+import torch
 
 from irisu_rl.collector import (
     CollectorConfig,
@@ -13,6 +17,7 @@ from irisu_rl.curriculum import CurriculumCoordinator, SnapshotLibrary
 from irisu_rl.encoding import TeacherStateEncoder
 from irisu_rl.models import RecurrentActorCritic, RecurrentModelConfig
 from irisu_rl.ppo import PPOConfig, PPOTrainer
+from irisu_rl.r3b_runner import verify_exact_resume_continuation
 from irisu_rl.r3b_tail import ScoreOnlyTailController
 from irisu_rl.rewards import (
     LinearGaugePotential,
@@ -26,7 +31,92 @@ from tests.test_r3a_collector import AllHeldTruncatingVector
 from tests.test_r3a_curriculum import curriculum
 
 
+def build_tail_session() -> R3ATrainingSession:
+    torch.manual_seed(101)
+    base = curriculum()
+    library = SnapshotLibrary(
+        tuple(replace(recipe, config_hash=99) for recipe in base.library.recipes)
+    )
+    schedule = RewardSchedule(
+        "tail-resume-v1",
+        (RewardKnot(0, 500_000), RewardKnot(1, 500_000), RewardKnot(2, 0)),
+    )
+    spec = replace(
+        base,
+        curriculum_id="tail-resume-v1",
+        library=library,
+        stages=(
+            replace(base.stages[0], reward_schedule=schedule, max_updates=402),
+            base.stages[1],
+        ),
+    )
+    coordinator = CurriculumCoordinator(spec, 4, learner_seed=11)
+    composer = RewardComposer(shaping_spec=LinearGaugePotential())
+    task = CurriculumTaskContract(coordinator, composer, capture_events=False)
+    model = RecurrentActorCritic(
+        TEACHER_V1,
+        config=RecurrentModelConfig(8, 8, 12, 12, 1, critic_condition_features=1),
+    )
+    collector = RecurrentCollector(
+        model,
+        MacroVectorAdapter(AllHeldTruncatingVector(), encoder=TeacherStateEncoder()),
+        task,
+        config=CollectorConfig(max_decisions=1),
+        policy_sampler_seed=7,
+    )
+    trainer = PPOTrainer(
+        model,
+        config=PPOConfig(epochs=1, lane_minibatch_size=4, target_kl=1.0),
+        total_updates=402,
+        sampler_seed=13,
+    )
+    tail = ScoreOnlyTailController(
+        2,
+        reward_scale=composer.reward_scale,
+        reward_sha256=composer.sha256,
+    )
+    return R3ATrainingSession(
+        collector,
+        trainer,
+        numpy_seed=17,
+        tail_controller=tail,
+    )
+
+
 class TailSessionIntegrationTests(unittest.TestCase):
+    def test_resume_is_exact_mid_sweep_drain_and_score_only(self) -> None:
+        identity = {"test": "r3b-tail-boundary-resume"}
+        with tempfile.TemporaryDirectory() as directory:
+            source = build_tail_session()
+            source.initialize()
+            source.run_update()
+
+            def assert_next_update_exact(generation: str) -> None:
+                destination = source.save(directory, generation, identity=identity)
+                restored = build_tail_session()
+                restored.restore(directory, generation=generation, identity=identity)
+                artifact = verify_exact_resume_continuation(
+                    trial_manifest_sha256="a" * 64,
+                    checkpoint_manifest_sha256=hashlib.sha256(
+                        (destination / "manifest.json").read_bytes()
+                    ).hexdigest(),
+                    source=source,
+                    restored=restored,
+                )
+                self.assertEqual(
+                    artifact.source_next_update_sha256,
+                    artifact.restored_next_update_sha256,
+                )
+
+            # One of two shaped updates has completed: the next update is still sweep.
+            assert_next_update_exact("mid-sweep")
+            # The shaped sweep is complete: the next collection is the no-update drain.
+            assert_next_update_exact("sweep-boundary")
+            # One drain completed and all lanes reset: the next update starts score-only.
+            assert_next_update_exact("mid-drain")
+            # One score-only update completed: the following optimizer step is exact.
+            assert_next_update_exact("mid-score-only")
+
     def test_drain_rollout_cannot_advance_optimizer_clock(self) -> None:
         base = curriculum()
         library = SnapshotLibrary(
@@ -39,7 +129,10 @@ class TailSessionIntegrationTests(unittest.TestCase):
             base,
             curriculum_id="tail-session-v1",
             library=library,
-            stages=(replace(base.stages[0], reward_schedule=schedule), base.stages[1]),
+            stages=(
+                replace(base.stages[0], reward_schedule=schedule, max_updates=401),
+                base.stages[1],
+            ),
         )
         coordinator = CurriculumCoordinator(spec, 4, learner_seed=11)
         composer = RewardComposer(shaping_spec=LinearGaugePotential())
@@ -98,6 +191,15 @@ class TailSessionIntegrationTests(unittest.TestCase):
                 for weight in decision.shaping_weight_ppm
             )
         )
+        for _ in range(399):
+            update = session.run_update()
+            self.assertIsNotNone(update.optimizer)
+        self.assertEqual(tail.phase, "complete")
+        self.assertEqual(tail.score_only_updates, 400)
+        self.assertEqual(trainer.schedule.completed_updates, 401)
+        session.assert_evidence_ready()
+        with self.assertRaisesRegex(RuntimeError, "closed"):
+            session.run_update()
 
 
 if __name__ == "__main__":

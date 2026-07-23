@@ -7,15 +7,26 @@ from pathlib import Path
 from irisu_rl.collector import CollectorConfig
 from irisu_rl.models import RecurrentActorCritic, RecurrentModelConfig
 from irisu_rl.ppo import PPOConfig
-from irisu_rl.r3b_experiments import TrialJob, load_plan
+from irisu_rl.r3b_experiments import (
+    SealedTestLedger,
+    TrialJob,
+    bind_validation_run,
+    load_plan,
+)
 from irisu_rl.r3b_runner import R3BRunBuilder
 from irisu_rl.schema import TEACHER_V1
 from tests.test_r3b_snapshot_initializer import (
     FakeSnapshotVector,
-    _RUNTIME_SHA256,
+    FakeRuntimeLane,
+    _RUNTIME_ATTESTATION,
     _fixture,
 )
-from tests.test_r3b_experiments import validation_authorization
+from tests.test_r3b_experiments import (
+    TEST_EVALUATION_SUITE,
+    VALIDATION_EVALUATION_SUITE,
+    authorization_validation_results,
+    validation_authorization,
+)
 from tests.test_r3a_curriculum import curriculum as multistage_curriculum
 from irisu_rl.curriculum import SnapshotBlobStore
 
@@ -41,7 +52,7 @@ class R3BRunBuilderTests(unittest.TestCase):
             plan,
             curriculum,
             store,
-            runtime_identity_sha256=_RUNTIME_SHA256,
+            runtime_attestation=_RUNTIME_ATTESTATION,
             lanes=2,
             collector_config=CollectorConfig(
                 max_decisions=1,
@@ -92,6 +103,10 @@ class R3BRunBuilderTests(unittest.TestCase):
             self.assertEqual(
                 control.manifest.pairing_sha256,
                 shaped.manifest.pairing_sha256,
+            )
+            self.assertEqual(
+                control.manifest.runner_spec_sha256,
+                shaped.manifest.runner_spec_sha256,
             )
             self.assertEqual(
                 control.session.optimizer_update_limit,
@@ -149,6 +164,46 @@ class R3BRunBuilderTests(unittest.TestCase):
             self.assertEqual(trial.session.optimizer_update_limit, plan.total_updates)
             self.assertIsNotNone(trial.session.tail_controller)
 
+        with tempfile.TemporaryDirectory() as ledger_directory:
+            ledger = SealedTestLedger(Path(ledger_directory) / "sealed.sqlite3")
+            commitment = ledger.precommit(plan, TEST_EVALUATION_SUITE)
+            calibration = validation_authorization(
+                plan, control_arm.learning_rate
+            ).calibration_results
+            test_validation = bind_validation_run(plan, calibration, commitment)
+            validation_results = authorization_validation_results(
+                plan,
+                control_arm,
+                shaped_arm,
+                validation_run=test_validation,
+            )
+            test_auth = ledger.authorize_once(
+                plan,
+                test_validation,
+                validation_results,
+                VALIDATION_EVALUATION_SUITE,
+                TEST_EVALUATION_SUITE,
+            )
+            test_job = plan.trial_jobs("test", test_auth)[0]
+            with self.assertRaisesRegex(ValueError, "phase-selection authorization"):
+                builder.build(  # type: ignore[arg-type]
+                    test_job, authorization=test_auth
+                )
+            lease = ledger.claim_job(test_auth, test_job)
+            with self.assertRaisesRegex(RuntimeError, "already claimed"):
+                ledger.claim_job(test_auth, test_job)
+            resumed_lease = ledger.resume_job(
+                test_auth, test_job, lease_token=lease.lease_token
+            )
+            self.assertEqual(resumed_lease, lease)
+            builder.sealed_test_ledger = ledger
+            with builder.build(test_job, authorization=lease) as trial:
+                self.assertTrue(trial.manifest.sealed)
+                self.assertEqual(trial.manifest.authorization_sha256, test_auth.sha256)
+                self.assertEqual(trial.sealed_job_lease_sha256, lease.sha256)
+            with self.assertRaisesRegex(RuntimeError, "lease is not active"):
+                builder.build(test_job, authorization=lease)
+
         with tempfile.TemporaryDirectory() as directory:
             with builder.build(validation_job, authorization=validation_auth) as source:
                 source.session.initialize()
@@ -179,7 +234,7 @@ class R3BRunBuilderTests(unittest.TestCase):
                 plan,
                 multi_stage,
                 None,  # type: ignore[arg-type]
-                runtime_identity_sha256=_RUNTIME_SHA256,
+                runtime_attestation=_RUNTIME_ATTESTATION,
                 lanes=2,
                 collector_config=CollectorConfig(
                     target_simulated_ticks=plan.ticks_per_update
@@ -190,6 +245,81 @@ class R3BRunBuilderTests(unittest.TestCase):
                 model_factory=lambda: None,  # type: ignore[arg-type]
                 environment_factory=FakeSnapshotVector,
             )
+
+    def test_runtime_and_model_factory_are_frozen(self) -> None:
+        plan = load_plan(ROOT / "configs/rl/experiments/r3b-completion-v1.toml")
+        curriculum, blobs = _fixture()
+        store = SnapshotBlobStore(curriculum.library, blobs)
+        collector = CollectorConfig(
+            max_decisions=1,
+            target_simulated_ticks=plan.ticks_per_update,
+        )
+        ppo = PPOConfig(
+            final_learning_rate_fraction=plan.final_learning_rate_fraction,
+            epochs=1,
+            lane_minibatch_size=2,
+        )
+        job = plan.trial_jobs("calibration")[0]
+
+        class WrongRuntimeLane(FakeRuntimeLane):
+            build_info = {
+                **FakeRuntimeLane.build_info,
+                "clone_version": "different-runtime",
+            }
+
+        class WrongRuntimeVector(FakeSnapshotVector):
+            def __init__(self) -> None:
+                super().__init__()
+                self.envs = (WrongRuntimeLane(), WrongRuntimeLane())
+
+        def stable_model():
+            return RecurrentActorCritic(
+                TEACHER_V1,
+                config=RecurrentModelConfig(
+                    8, 8, 12, 12, 1, critic_condition_features=1
+                ),
+            )
+
+        wrong_runtime = R3BRunBuilder(
+            plan,
+            curriculum,
+            store,
+            runtime_attestation=_RUNTIME_ATTESTATION,
+            lanes=2,
+            collector_config=collector,
+            ppo_config=ppo,
+            model_factory=stable_model,
+            environment_factory=WrongRuntimeVector,
+        )
+        with self.assertRaisesRegex(RuntimeError, "unattested runtime"):
+            wrong_runtime.build(job)
+
+        widths = iter((8, 9))
+
+        def changing_model():
+            width = next(widths)
+            return RecurrentActorCritic(
+                TEACHER_V1,
+                config=RecurrentModelConfig(
+                    width, 8, 12, 12, 1, critic_condition_features=1
+                ),
+            )
+
+        changing = R3BRunBuilder(
+            plan,
+            curriculum,
+            store,
+            runtime_attestation=_RUNTIME_ATTESTATION,
+            lanes=2,
+            collector_config=collector,
+            ppo_config=ppo,
+            model_factory=changing_model,
+            environment_factory=FakeSnapshotVector,
+        )
+        with changing.build(job):
+            pass
+        with self.assertRaisesRegex(RuntimeError, "runner specification"):
+            changing.build(plan.trial_jobs("calibration")[1])
 
 
 if __name__ == "__main__":
