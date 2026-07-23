@@ -16,7 +16,7 @@ import sqlite3
 import statistics
 import tomllib
 from contextlib import closing
-from dataclasses import asdict, dataclass
+from dataclasses import InitVar, asdict, dataclass
 from pathlib import Path
 from typing import Mapping, Sequence
 
@@ -25,6 +25,7 @@ _RESULT_STATUSES = frozenset(
     {"complete", "eliminated", "pre_start_failure", "post_start_failure"}
 )
 _PHASES = frozenset({"calibration", "validation", "test"})
+_EXACT_RESUME_VERIFICATION_TOKEN = object()
 
 
 def _canonical_sha256(value: object) -> str:
@@ -1336,25 +1337,27 @@ class ExactResumeArtifact:
 
     trial_manifest_sha256: str
     checkpoint_manifest_sha256: str
-    checkpoint_policy_sha256: str
+    checkpoint_model_sha256: str
     source_next_update_sha256: str
     restored_next_update_sha256: str
     source_after_state_sha256: str
     restored_after_state_sha256: str
-    version: str = "r3b-exact-resume-artifact-v1"
+    version: str = "r3b-exact-resume-artifact-v2"
+    _verification_token: InitVar[object] = None
 
-    def __post_init__(self) -> None:
+    def __post_init__(self, _verification_token: object) -> None:
         hashes = (
             self.trial_manifest_sha256,
             self.checkpoint_manifest_sha256,
-            self.checkpoint_policy_sha256,
+            self.checkpoint_model_sha256,
             self.source_next_update_sha256,
             self.restored_next_update_sha256,
             self.source_after_state_sha256,
             self.restored_after_state_sha256,
         )
         if (
-            self.version != "r3b-exact-resume-artifact-v1"
+            _verification_token is not _EXACT_RESUME_VERIFICATION_TOKEN
+            or self.version != "r3b-exact-resume-artifact-v2"
             or any(not _is_nonzero_sha256(value) for value in hashes)
             or self.source_next_update_sha256 != self.restored_next_update_sha256
             or self.source_after_state_sha256 != self.restored_after_state_sha256
@@ -1367,6 +1370,29 @@ class ExactResumeArtifact:
     @property
     def sha256(self) -> str:
         return _canonical_sha256(self.manifest())
+
+
+def _verified_exact_resume_artifact(
+    trial_manifest_sha256: str,
+    checkpoint_manifest_sha256: str,
+    checkpoint_model_sha256: str,
+    source_next_update_sha256: str,
+    restored_next_update_sha256: str,
+    source_after_state_sha256: str,
+    restored_after_state_sha256: str,
+) -> ExactResumeArtifact:
+    """Internal constructor used only after an actual restore continuation audit."""
+
+    return ExactResumeArtifact(
+        trial_manifest_sha256,
+        checkpoint_manifest_sha256,
+        checkpoint_model_sha256,
+        source_next_update_sha256,
+        restored_next_update_sha256,
+        source_after_state_sha256,
+        restored_after_state_sha256,
+        _verification_token=_EXACT_RESUME_VERIFICATION_TOKEN,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -1388,16 +1414,18 @@ class EngineeringEvidence:
     metrics_sha256: str
     evaluation_suite_sha256: str
     evaluation_report_sha256: str
+    final_checkpoint_artifact: TrainingCheckpointArtifact
+    resume_checkpoint_artifact: TrainingCheckpointArtifact
     checkpoint_resume_artifact: ExactResumeArtifact
     exact_backend_parity_artifact: object
     tail_state_sha256: str | None = None
     tail_phase: str | None = None
     score_only_updates: int = 0
-    version: str = "r3b-engineering-evidence-v1"
+    version: str = "r3b-engineering-evidence-v2"
 
     def __post_init__(self) -> None:
         if (
-            self.version != "r3b-engineering-evidence-v1"
+            self.version != "r3b-engineering-evidence-v2"
             or self.phase not in _PHASES
             or isinstance(self.completed_updates, bool)
             or not isinstance(self.completed_updates, int)
@@ -1413,11 +1441,16 @@ class EngineeringEvidence:
             raise ValueError("engineering evidence phase or counters are invalid")
         from .r3b_evaluation import LearnedPolicyBackendParityArtifact
 
-        if not isinstance(
-            self.checkpoint_resume_artifact, ExactResumeArtifact
-        ) or not isinstance(
-            self.exact_backend_parity_artifact,
-            LearnedPolicyBackendParityArtifact,
+        if (
+            not isinstance(self.final_checkpoint_artifact, TrainingCheckpointArtifact)
+            or not isinstance(
+                self.resume_checkpoint_artifact, TrainingCheckpointArtifact
+            )
+            or not isinstance(self.checkpoint_resume_artifact, ExactResumeArtifact)
+            or not isinstance(
+                self.exact_backend_parity_artifact,
+                LearnedPolicyBackendParityArtifact,
+            )
         ):
             raise ValueError("engineering audit artifacts are malformed")
         hashes = (
@@ -1430,6 +1463,8 @@ class EngineeringEvidence:
             self.metrics_sha256,
             self.evaluation_suite_sha256,
             self.evaluation_report_sha256,
+            self.final_checkpoint_artifact.sha256,
+            self.resume_checkpoint_artifact.sha256,
             self.checkpoint_resume_artifact.sha256,
             self.exact_backend_parity_artifact.sha256,
         )
@@ -1442,9 +1477,37 @@ class EngineeringEvidence:
         if any(not _is_nonzero_sha256(value) for value in hashes):
             raise ValueError("engineering evidence must bind nonzero SHA-256 artifacts")
         if (
-            self.checkpoint_resume_artifact.trial_manifest_sha256
+            self.final_checkpoint_artifact.learner_seed != self.learner_seed
+            or self.final_checkpoint_artifact.completed_updates
+            != self.completed_updates
+            or self.final_checkpoint_artifact.plan_sha256 != self.plan_sha256
+            or self.final_checkpoint_artifact.job_sha256 != self.job_sha256
+            or self.final_checkpoint_artifact.trial_manifest_sha256
             != self.trial_manifest_sha256
+            or self.final_checkpoint_artifact.runner_spec_sha256
+            != self.runner_spec_sha256
+            or self.final_checkpoint_artifact.deployment_policy_sha256
+            != self.policy_sha256
+            or self.resume_checkpoint_artifact.learner_seed != self.learner_seed
+            or self.resume_checkpoint_artifact.completed_updates
+            >= self.completed_updates
+            or self.resume_checkpoint_artifact.plan_sha256 != self.plan_sha256
+            or self.resume_checkpoint_artifact.job_sha256 != self.job_sha256
+            or self.resume_checkpoint_artifact.trial_manifest_sha256
+            != self.trial_manifest_sha256
+            or self.resume_checkpoint_artifact.runner_spec_sha256
+            != self.runner_spec_sha256
+            or self.checkpoint_resume_artifact.trial_manifest_sha256
+            != self.trial_manifest_sha256
+            or self.checkpoint_resume_artifact.checkpoint_manifest_sha256
+            != self.resume_checkpoint_artifact.checkpoint_manifest_sha256
+            or self.checkpoint_resume_artifact.checkpoint_model_sha256
+            != self.resume_checkpoint_artifact.model_sha256
             or self.exact_backend_parity_artifact.policy_sha256 != self.policy_sha256
+            or self.exact_backend_parity_artifact.portable_suite.sha256
+            != self.evaluation_suite_sha256
+            or self.exact_backend_parity_artifact.portable_report.sha256
+            != self.evaluation_report_sha256
         ):
             raise ValueError("engineering audit artifacts disagree with the trial")
         if self.phase == "calibration":
@@ -1473,6 +1536,8 @@ class EngineeringEvidence:
 
     def manifest(self) -> dict[str, object]:
         value = asdict(self)
+        value["final_checkpoint_artifact"] = self.final_checkpoint_artifact.manifest()
+        value["resume_checkpoint_artifact"] = self.resume_checkpoint_artifact.manifest()
         value["checkpoint_resume_artifact"] = self.checkpoint_resume_artifact.manifest()
         value["exact_backend_parity_artifact"] = (
             self.exact_backend_parity_artifact.manifest()
@@ -1554,6 +1619,10 @@ class LearnerOutcome:
             != self.metrics_artifact.final_report.sha256
             or self.engineering_evidence.policy_sha256
             != self.metrics_artifact.final_report.policy_sha256
+            or self.engineering_evidence.final_checkpoint_artifact.sha256
+            != self.metrics_artifact.checkpoints[-1].checkpoint_artifact_sha256
+            or self.engineering_evidence.resume_checkpoint_artifact.sha256
+            != self.metrics_artifact.checkpoints[-2].checkpoint_artifact_sha256
         ):
             raise ValueError("engineering evidence disagrees with metrics reports")
         for name in (

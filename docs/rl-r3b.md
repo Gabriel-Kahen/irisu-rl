@@ -137,9 +137,10 @@ authorization. The session enforces the job budget while retaining the frozen
 validation length. A seed-independent runner specification binds the model,
 encoder, collector and PPO configuration, lane count, reward scale, snapshot
 store, runtime, deterministic Torch settings, Python/NumPy/Torch build data,
-every Python module in `irisu_rl` and `irisu_env`, and the checked dependency
-files; a builder rejects a model factory that changes it. One runner identity
-is carried from calibration through validation and sealed test. Selection
+every Python module in `irisu_rl` and `irisu_env`, the concrete model/vector and
+factory implementations (including auditable captured state), and the checked
+dependency files; a builder rejects any implementation that changes it. One
+runner identity is carried from calibration through validation and sealed test. Selection
 rejects results when any seed or paired arm
 disagrees on that specification, initial model, assignment, seed plan,
 runner-pairing, or evaluation-suite identities. A trial manifest additionally
@@ -175,9 +176,11 @@ validation-result set, validation suite, precommitted test suite, exact test-job
 set, an opaque random receipt, and attempt number. That transaction inserts all
 24 jobs as pending. Each job can be leased once; its lease is bound into runner
 evidence, and its result or failure becomes terminal in the ledger. Reopening
-the ledger resumes the same authorization or active lease. An alternate suite
-or candidate, a terminal-job retry, and every second finalized attempt fail
-closed. Test runners require an active database-verified lease, not a
+the ledger recovers the same authorization. An unstarted lease can be recovered
+only by presenting its opaque bearer token; once `begin_job` consumes it into a
+running execution, neither a crash nor a terminal outcome permits a retry. An
+alternate suite or candidate and every second finalized attempt fail closed.
+Test runners require an active database-verified lease, not a
 reconstructible authorization object. Finalization verifies every persisted
 job outcome, recomputes and stores the report, and exposes `verify_finalized`;
 a caller-created report is never authoritative. Test uses 12 new paired learner seeds, 512 fixed
@@ -254,6 +257,11 @@ aggregates cannot be edited independently. No result is an R3b
 acceptance result until the complete calibration, validation, sealed test,
 exact-resume, snapshot replay, raw-score, and baseline artifacts exist and the
 canonical confirmation function returns `accepted`.
+Exact-resume evidence is produced only by loading a manifest-hash-bound planned
+checkpoint into an independently constructed session and matching its complete
+state and next update to uninterrupted execution. The proof is bound to the
+penultimate typed evaluation checkpoint, leaving one authorized update to
+compare; the final typed checkpoint separately binds the completed result.
 Learner outcomes no longer carry a default boolean engineering pass: they must
 bind the completed trial manifest, pairing identity, metrics, evaluation,
 checkpoint-resume, exact-backend parity, and (for full-budget runs) completed
@@ -276,8 +284,9 @@ library, precommit the test suite with `SealedTestLedger.precommit`, run the
 bounded calibration jobs, create validation jobs through
 `bind_validation_run`, and inspect every retained failure/diagnostic artifact.
 Only after validation freezes one candidate may `authorize_once` emit the exact
-sealed job set. Each job then follows `claim_job` and `complete_job` (or
-`fail_job`), and `finalize_once` consumes the recorded outcomes and returns the
-authoritative report. In parallel, R4 must complete the real-game causal observation
-and input calibration path. A successful R3b simulator result does not remove
-that transfer gate.
+sealed job set. Each job then follows `claim_job`, `begin_job`, and
+`complete_job` (or `fail_job`); only a claimed-but-unstarted lease may be
+recovered with `resume_job`. `finalize_once` consumes the recorded outcomes and
+returns the authoritative report. In parallel, R4 must complete the real-game
+causal observation and input calibration path. A successful R3b simulator
+result does not remove that transfer gate.

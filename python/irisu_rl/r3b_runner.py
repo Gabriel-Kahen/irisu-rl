@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
+import marshal
 import math
 from dataclasses import dataclass, fields, is_dataclass, replace
 from pathlib import Path
@@ -45,9 +47,11 @@ from .r3b_experiments import (
     R3BExperimentPlan,
     SealedTestLedger,
     SealedTestJobLease,
+    TrainingCheckpointArtifact,
     TrialJob,
     TrialSeedPlan,
     ValidationRunAuthorization,
+    _verified_exact_resume_artifact,
 )
 from .r3b_tail import ScoreOnlyTailController
 from .rewards import (
@@ -140,6 +144,73 @@ def _audit_sha256(value: object) -> str:
     ).hexdigest()
 
 
+def _implementation_identity(
+    value: object, *, bind_callable_state: bool = False
+) -> dict[str, str]:
+    """Bind a concrete callable/type to executable Python implementation bytes."""
+
+    if inspect.ismethod(value):
+        target = value.__func__
+        bound_state: object = (
+            getattr(value.__self__, "__dict__", {}) if bind_callable_state else {}
+        )
+    elif inspect.isfunction(value) or inspect.isclass(value):
+        target = value
+        bound_state = {}
+    else:
+        target = type(value)
+        bound_state = getattr(value, "__dict__", {}) if bind_callable_state else {}
+    code = getattr(target, "__code__", None)
+    try:
+        source = inspect.getsource(target).encode()
+    except (OSError, TypeError):
+        source = b""
+    try:
+        source_path = inspect.getsourcefile(target)
+    except TypeError:
+        source_path = None
+    source_file_path = Path(source_path) if source_path else None
+    source_file = (
+        source_file_path.read_bytes()
+        if source_file_path is not None and source_file_path.is_file()
+        else b""
+    )
+    if not source and code is None and not source_file:
+        raise TypeError("runner implementation identity is not inspectable")
+
+    def capture(value: object) -> object:
+        if inspect.isfunction(value) or inspect.isclass(value):
+            return _implementation_identity(value)
+        try:
+            return _audit_normalize(value)
+        except TypeError:
+            return {
+                "opaque_type": f"{type(value).__module__}.{type(value).__qualname__}"
+            }
+
+    closure_state = (
+        tuple(capture(cell.cell_contents) for cell in (target.__closure__ or ()))
+        if bind_callable_state and inspect.isfunction(target)
+        else ()
+    )
+    return {
+        "qualified_name": f"{target.__module__}.{target.__qualname__}",
+        "source_sha256": hashlib.sha256(source).hexdigest(),
+        "source_file_sha256": hashlib.sha256(source_file).hexdigest(),
+        "code_sha256": hashlib.sha256(
+            b"" if code is None else marshal.dumps(code)
+        ).hexdigest(),
+        "state_sha256": _audit_sha256(
+            {
+                "defaults": getattr(target, "__defaults__", None),
+                "keyword_defaults": getattr(target, "__kwdefaults__", None),
+                "closure": closure_state,
+                "bound_state": capture(bound_state),
+            }
+        ),
+    }
+
+
 def _session_continuation_state(session: R3ATrainingSession) -> dict[str, object]:
     return {
         "model": session.model.state_dict(),
@@ -155,6 +226,8 @@ def _session_continuation_state(session: R3ATrainingSession) -> dict[str, object
         "attempted_rollouts": session.attempted_rollouts,
         "skipped_rollouts": session.skipped_rollouts,
         "consecutive_skips": session.consecutive_skips,
+        "max_consecutive_skips": session.max_consecutive_skips,
+        "optimizer_update_limit": session.optimizer_update_limit,
         "rng": capture_rng_state(session.numpy_generator),
     }
 
@@ -162,14 +235,40 @@ def _session_continuation_state(session: R3ATrainingSession) -> dict[str, object
 def verify_exact_resume_continuation(
     *,
     trial_manifest_sha256: str,
-    checkpoint_manifest_sha256: str,
+    checkpoint: TrainingCheckpointArtifact,
+    checkpoint_directory: str | Path,
+    generation: str,
+    checkpoint_identity: Mapping[str, object],
     source: R3ATrainingSession,
-    restored: R3ATrainingSession,
+    restored_factory: Callable[[], R3ATrainingSession],
 ) -> ExactResumeArtifact:
-    """Advance independent source/restored sessions and prove exact continuation."""
+    """Restore a bound checkpoint, then prove its next update is exact."""
 
-    if source is restored:
-        raise ValueError("exact-resume verification requires independent sessions")
+    if (
+        not isinstance(checkpoint, TrainingCheckpointArtifact)
+        or checkpoint.trial_manifest_sha256 != trial_manifest_sha256
+        or not isinstance(checkpoint_identity, Mapping)
+        or checkpoint_identity.get("trial_manifest_sha256") != trial_manifest_sha256
+        or source.policy_sha256 != checkpoint.model_sha256
+        or source.trainer.schedule.completed_updates != checkpoint.completed_updates
+        or source.collector.simulated_ticks != checkpoint.simulated_ticks
+    ):
+        raise ValueError("exact-resume source disagrees with the typed checkpoint")
+    manifest_path = Path(checkpoint_directory) / generation / "manifest.json"
+    if (
+        not manifest_path.is_file()
+        or hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+        != checkpoint.checkpoint_manifest_sha256
+    ):
+        raise ValueError("exact-resume checkpoint manifest bytes disagree")
+    restored = restored_factory()
+    if not isinstance(restored, R3ATrainingSession) or restored is source:
+        raise ValueError("exact-resume verification requires an independent session")
+    restored.restore(
+        checkpoint_directory,
+        generation=generation,
+        identity=checkpoint_identity,
+    )
     source_policy = source.policy_sha256
     if restored.policy_sha256 != source_policy:
         raise ValueError("restored checkpoint policy differs before continuation")
@@ -185,9 +284,9 @@ def verify_exact_resume_continuation(
     restored_update = restored.run_update()
     restored_update_sha256 = _audit_sha256(restored_update)
     restored_after_sha256 = _audit_sha256(_session_continuation_state(restored))
-    return ExactResumeArtifact(
+    return _verified_exact_resume_artifact(
         trial_manifest_sha256,
-        checkpoint_manifest_sha256,
+        checkpoint.checkpoint_manifest_sha256,
         source_policy,
         source_update_sha256,
         restored_update_sha256,
@@ -358,6 +457,12 @@ class BuiltTrial:
             if isinstance(metrics_artifact, RawScoreMetricsArtifact)
             else None
         )
+        resume_checkpoint = (
+            metrics_artifact.checkpoints[-2].checkpoint
+            if isinstance(metrics_artifact, RawScoreMetricsArtifact)
+            and len(metrics_artifact.checkpoints) >= 2
+            else None
+        )
         if (
             not isinstance(metrics_artifact, RawScoreMetricsArtifact)
             or not isinstance(deployment_identity, DeploymentPolicyIdentity)
@@ -365,6 +470,7 @@ class BuiltTrial:
             or metrics_artifact.final_report.policy_sha256 != deployment_identity.sha256
             or deployment_identity.model_sha256 != model_sha256
             or final_checkpoint is None
+            or resume_checkpoint is None
             or final_checkpoint.completed_updates != completed
             or final_checkpoint.simulated_ticks
             != self.session.collector.simulated_ticks
@@ -387,6 +493,10 @@ class BuiltTrial:
             != self.manifest.action_spec_sha256
             or not isinstance(checkpoint_resume_artifact, ExactResumeArtifact)
             or checkpoint_resume_artifact.trial_manifest_sha256 != self.manifest.sha256
+            or checkpoint_resume_artifact.checkpoint_manifest_sha256
+            != resume_checkpoint.checkpoint_manifest_sha256
+            or checkpoint_resume_artifact.checkpoint_model_sha256
+            != resume_checkpoint.model_sha256
             or not isinstance(
                 exact_backend_parity_artifact,
                 LearnedPolicyBackendParityArtifact,
@@ -432,6 +542,8 @@ class BuiltTrial:
             metrics_sha256=metrics_artifact.sha256,
             evaluation_suite_sha256=metrics_artifact.suite.sha256,
             evaluation_report_sha256=metrics_artifact.final_report.sha256,
+            final_checkpoint_artifact=final_checkpoint,
+            resume_checkpoint_artifact=resume_checkpoint,
             checkpoint_resume_artifact=checkpoint_resume_artifact,
             exact_backend_parity_artifact=exact_backend_parity_artifact,
             tail_state_sha256=tail_state_sha256,
@@ -501,11 +613,12 @@ class R3BRunBuilder:
         self.ppo_config = ppo_config
         self.model_factory = model_factory
         self.environment_factory = environment_factory
-        if sealed_test_ledger is not None and not isinstance(
-            sealed_test_ledger, SealedTestLedger
+        if (
+            sealed_test_ledger is not None
+            and type(sealed_test_ledger) is not SealedTestLedger
         ):
             raise TypeError("sealed-test ledger must be a trusted ledger instance")
-        self.sealed_test_ledger = sealed_test_ledger
+        self._sealed_test_ledger = sealed_test_ledger
         self.reward_scale = float(reward_scale)
         self.max_consecutive_skips = max_consecutive_skips
         self._runner_spec_sha256: str | None = None
@@ -536,6 +649,7 @@ class R3BRunBuilder:
         self,
         job: TrialJob,
         authorization: ValidationRunAuthorization | SealedTestJobLease | None,
+        sealed_test_ledger: SealedTestLedger | None,
     ) -> None:
         if not isinstance(job, TrialJob) or job.plan_sha256 != self.plan.sha256:
             raise ValueError("trial job does not belong to the frozen plan")
@@ -590,8 +704,8 @@ class R3BRunBuilder:
                     authorization.sealed_run.authorization.candidate_arm_id,
                 }
                 and job.authorization_sha256 == authorization.sealed_run.sha256
-                and self.sealed_test_ledger is not None
-                and self.sealed_test_ledger.path
+                and sealed_test_ledger is not None
+                and sealed_test_ledger.path
                 == Path(authorization.sealed_run.ledger_path)
             )
             if valid_authorization:
@@ -605,16 +719,20 @@ class R3BRunBuilder:
         *,
         authorization: ValidationRunAuthorization | SealedTestJobLease | None = None,
     ) -> BuiltTrial:
-        self._validate_job(job, authorization)
-        if isinstance(authorization, SealedTestJobLease):
-            assert self.sealed_test_ledger is not None
-            self.sealed_test_ledger.begin_job(authorization)
+        sealed_test_ledger = self._sealed_test_ledger
+        self._validate_job(job, authorization, sealed_test_ledger)
         arm = job.arm
         learner_seed = job.learner_seed
         seed_plan = TrialSeedPlan.derive(self.plan.sha256, learner_seed)
         curriculum = self._curriculum(arm)
-        environment = self.environment_factory()
+        environment = None
+        lease_started = False
         try:
+            if isinstance(authorization, SealedTestJobLease):
+                assert sealed_test_ledger is not None
+                sealed_test_ledger.begin_job(authorization)
+                lease_started = True
+            environment = self.environment_factory()
             if int(environment.num_envs) != self.lanes:
                 raise ValueError("environment factory returned the wrong lane count")
             actual_runtime = attest_simulator_runtime(environment)
@@ -651,6 +769,16 @@ class R3BRunBuilder:
             )
             encoder = TeacherStateEncoder()
             encoder_manifest = encoder_instance_manifest(encoder)
+            implementation_identity = {
+                "model": _implementation_identity(model),
+                "model_factory": _implementation_identity(
+                    self.model_factory, bind_callable_state=True
+                ),
+                "environment": _implementation_identity(environment),
+                "environment_factory": _implementation_identity(
+                    self.environment_factory, bind_callable_state=True
+                ),
+            }
             curriculum_shared = {
                 **{
                     key: value
@@ -671,6 +799,7 @@ class R3BRunBuilder:
                 {
                     "purpose": "r3b-training-runner-v1",
                     "model": model.manifest(),
+                    "implementations": implementation_identity,
                     "encoder": encoder_manifest,
                     "collector": self.collector_config.manifest(),
                     "ppo_without_learning_rate": {
@@ -687,6 +816,7 @@ class R3BRunBuilder:
                         "version": "r3b-runner-spec-v1",
                         "plan_sha256": self.plan.sha256,
                         "model": model.manifest(),
+                        "implementations": implementation_identity,
                         "encoder": encoder_manifest,
                         "collector": self.collector_config.manifest(),
                         "ppo_without_learning_rate": {
@@ -712,7 +842,7 @@ class R3BRunBuilder:
                     self._runner_spec_sha256 = runner_spec_sha256
                 elif self._runner_spec_sha256 != runner_spec_sha256:
                     raise RuntimeError(
-                        "model factory changed the frozen runner specification"
+                        "runner implementation changed the frozen runner specification"
                     )
             task = CurriculumTaskContract(
                 coordinator,
@@ -824,8 +954,21 @@ class R3BRunBuilder:
                 if isinstance(authorization, SealedTestJobLease)
                 else None,
             )
-        except BaseException:
+        except BaseException as error:
             close = getattr(environment, "close", None)
             if close is not None:
                 close()
+            if lease_started:
+                assert isinstance(authorization, SealedTestJobLease)
+                assert sealed_test_ledger is not None
+                try:
+                    sealed_test_ledger.fail_job(
+                        authorization,
+                        f"runner construction failed: {type(error).__name__}: {error}",
+                    )
+                except BaseException as ledger_error:
+                    error.add_note(
+                        "sealed-test failure recording also failed: "
+                        f"{type(ledger_error).__name__}: {ledger_error}"
+                    )
             raise

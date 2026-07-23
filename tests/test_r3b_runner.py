@@ -35,6 +35,70 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class R3BRunBuilderTests(unittest.TestCase):
+    def test_runner_identity_binds_model_and_vector_implementations(self) -> None:
+        plan = load_plan(ROOT / "configs/rl/experiments/r3b-completion-v1.toml")
+        curriculum, blobs = _fixture()
+        store = SnapshotBlobStore(curriculum.library, blobs)
+        job = plan.trial_jobs("calibration")[0]
+
+        class AlteredModel(RecurrentActorCritic):
+            def forward(self, *args, **kwargs):
+                return super().forward(*args, **kwargs)
+
+        class AlteredVector(FakeSnapshotVector):
+            pass
+
+        changed = {"model": False, "vector": False}
+
+        def model_factory():
+            model_type = AlteredModel if changed["model"] else RecurrentActorCritic
+            return model_type(
+                TEACHER_V1,
+                config=RecurrentModelConfig(
+                    8, 8, 12, 12, 1, critic_condition_features=1
+                ),
+            )
+
+        def environment_factory():
+            vector_type = AlteredVector if changed["vector"] else FakeSnapshotVector
+            return vector_type()
+
+        def make_builder() -> R3BRunBuilder:
+            return R3BRunBuilder(
+                plan,
+                curriculum,
+                store,
+                runtime_attestation=_RUNTIME_ATTESTATION,
+                lanes=2,
+                collector_config=CollectorConfig(
+                    max_decisions=1,
+                    target_simulated_ticks=plan.ticks_per_update,
+                ),
+                ppo_config=PPOConfig(
+                    learning_rate=1e-4,
+                    final_learning_rate_fraction=plan.final_learning_rate_fraction,
+                    epochs=1,
+                    lane_minibatch_size=2,
+                ),
+                model_factory=model_factory,
+                environment_factory=environment_factory,
+            )
+
+        builder = make_builder()
+        with builder.build(job):
+            pass
+        changed["model"] = True
+        with self.assertRaisesRegex(RuntimeError, "runner implementation changed"):
+            builder.build(job)
+
+        changed["model"] = False
+        builder = make_builder()
+        with builder.build(job):
+            pass
+        changed["vector"] = True
+        with self.assertRaisesRegex(RuntimeError, "runner implementation changed"):
+            builder.build(job)
+
     def test_arms_share_initial_model_assignments_and_seed_plan(self) -> None:
         plan = load_plan(ROOT / "configs/rl/experiments/r3b-completion-v1.toml")
         curriculum, blobs = _fixture()
@@ -196,13 +260,47 @@ class R3BRunBuilderTests(unittest.TestCase):
                 test_auth, test_job, lease_token=lease.lease_token
             )
             self.assertEqual(resumed_lease, lease)
-            builder.sealed_test_ledger = ledger
-            with builder.build(test_job, authorization=lease) as trial:
+            sealed_builder = R3BRunBuilder(
+                plan,
+                curriculum,
+                store,
+                runtime_attestation=_RUNTIME_ATTESTATION,
+                lanes=2,
+                collector_config=builder.collector_config,
+                ppo_config=builder.ppo_config,
+                model_factory=model_factory,
+                environment_factory=FakeSnapshotVector,
+                sealed_test_ledger=ledger,
+            )
+            with sealed_builder.build(test_job, authorization=lease) as trial:
                 self.assertTrue(trial.manifest.sealed)
                 self.assertEqual(trial.manifest.authorization_sha256, test_auth.sha256)
                 self.assertEqual(trial.sealed_job_lease_sha256, lease.sha256)
             with self.assertRaisesRegex(RuntimeError, "lease is not active"):
-                builder.build(test_job, authorization=lease)
+                sealed_builder.build(test_job, authorization=lease)
+
+            failed_job = plan.trial_jobs("test", test_auth)[1]
+            failed_lease = ledger.claim_job(test_auth, failed_job)
+
+            def failing_environment_factory():
+                raise RuntimeError("factory failed")
+
+            failing_builder = R3BRunBuilder(
+                plan,
+                curriculum,
+                store,
+                runtime_attestation=_RUNTIME_ATTESTATION,
+                lanes=2,
+                collector_config=builder.collector_config,
+                ppo_config=builder.ppo_config,
+                model_factory=model_factory,
+                environment_factory=failing_environment_factory,
+                sealed_test_ledger=ledger,
+            )
+            with self.assertRaisesRegex(RuntimeError, "factory failed"):
+                failing_builder.build(failed_job, authorization=failed_lease)
+            with self.assertRaisesRegex(RuntimeError, "lease is not active"):
+                ledger.fail_job(failed_lease, "must already be terminal")
 
         with tempfile.TemporaryDirectory() as directory:
             with builder.build(validation_job, authorization=validation_auth) as source:

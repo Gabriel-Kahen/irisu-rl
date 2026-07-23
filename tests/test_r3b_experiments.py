@@ -47,6 +47,7 @@ from irisu_rl.r3b_experiments import (
     select_calibrated_learning_rates,
     select_validation_candidate,
     tick_aligned_raw_score_auc,
+    _verified_exact_resume_artifact,
 )
 
 
@@ -59,96 +60,136 @@ _LEDGER_IDS = itertools.count()
 _METRICS_CACHE: dict[tuple[object, ...], RawScoreMetricsArtifact] = {}
 unittest.addModuleCleanup(_LEDGER_DIRECTORY.cleanup)
 _ACTION_SHA256 = ActionSpec().sha256
-_PORTABLE_TEST_RECIPE = SnapshotRecipe(
-    "test-snapshot",
-    "test-stage",
-    "test",
-    "test-family",
-    "portable-test",
-    "a" * 64,
-    1,
-    71,
-    _ACTION_SHA256,
-    (),
-    0,
-    0,
-    1,
-    "b" * 64,
-    "1" * 64,
-    "test-generator",
-)
-_EXACT_TEST_RECIPE = replace(
+
+
+def _phase_pair(phase: str, seed: int):
+    portable = SnapshotRecipe(
+        f"{phase}-snapshot",
+        f"{phase}-stage",
+        phase,
+        f"{phase}-family",
+        f"portable-{phase}",
+        "a" * 64,
+        1,
+        seed,
+        _ACTION_SHA256,
+        (),
+        0,
+        0,
+        seed,
+        hashlib.sha256(f"{phase}:portable".encode()).hexdigest(),
+        "1" * 64,
+        "test-generator",
+    )
+    exact = replace(
+        portable,
+        snapshot_id=f"exact-{phase}-snapshot",
+        environment_pool=f"exact-{phase}",
+        snapshot_sha256=hashlib.sha256(f"{phase}:exact".encode()).hexdigest(),
+        runtime_identity_sha256="6" * 64,
+    )
+    portable_library = SnapshotLibrary((portable,))
+    exact_library = SnapshotLibrary((exact,))
+    logical = CrossBackendEvaluationManifest(
+        (CrossBackendCellPair.from_recipes(portable, exact),)
+    )
+    return portable, exact, portable_library, exact_library, logical
+
+
+(
     _PORTABLE_TEST_RECIPE,
-    snapshot_id="exact-test-snapshot",
-    environment_pool="exact-test",
-    snapshot_sha256="c" * 64,
-    runtime_identity_sha256="6" * 64,
+    _EXACT_TEST_RECIPE,
+    _PORTABLE_TEST_LIBRARY,
+    _EXACT_TEST_LIBRARY,
+    TEST_LOGICAL_MANIFEST,
+) = _phase_pair("test", 71)
+(
+    _PORTABLE_VALIDATION_RECIPE,
+    _EXACT_VALIDATION_RECIPE,
+    _PORTABLE_VALIDATION_LIBRARY,
+    _EXACT_VALIDATION_LIBRARY,
+    VALIDATION_LOGICAL_MANIFEST,
+) = _phase_pair("validation", 61)
+(
+    _PORTABLE_CALIBRATION_RECIPE,
+    _EXACT_CALIBRATION_RECIPE,
+    _PORTABLE_CALIBRATION_LIBRARY,
+    _EXACT_CALIBRATION_LIBRARY,
+    CALIBRATION_LOGICAL_MANIFEST,
+) = _phase_pair("calibration", 51)
+_PORTABLE_SEALED_LIBRARY = SnapshotLibrary(
+    (_PORTABLE_VALIDATION_RECIPE, _PORTABLE_TEST_RECIPE)
 )
-_PORTABLE_TEST_LIBRARY = SnapshotLibrary((_PORTABLE_TEST_RECIPE,))
-_EXACT_TEST_LIBRARY = SnapshotLibrary((_EXACT_TEST_RECIPE,))
-TEST_LOGICAL_MANIFEST = CrossBackendEvaluationManifest(
-    (CrossBackendCellPair.from_recipes(_PORTABLE_TEST_RECIPE, _EXACT_TEST_RECIPE),)
-)
+_EXACT_SEALED_LIBRARY = SnapshotLibrary((_EXACT_VALIDATION_RECIPE, _EXACT_TEST_RECIPE))
+_PORTABLE_VALIDATION_LIBRARY = _PORTABLE_TEST_LIBRARY = _PORTABLE_SEALED_LIBRARY
+_EXACT_VALIDATION_LIBRARY = _EXACT_TEST_LIBRARY = _EXACT_SEALED_LIBRARY
 TEST_LOGICAL_CELL_IDS = tuple(
     pair.logical_cell.sha256 for pair in TEST_LOGICAL_MANIFEST.pairs
 )
-VALIDATION_EVALUATION_SUITE = EvaluationSuite(
-    "validation-v1",
+
+
+def _phase_suite(
+    phase: str,
+    repetitions: int,
+    policy_seed: int,
+    recipe: SnapshotRecipe,
+    library: SnapshotLibrary,
+    logical: CrossBackendEvaluationManifest,
+) -> EvaluationSuite:
+    return EvaluationSuite(
+        f"{phase}-v1",
+        phase,
+        (recipe.snapshot_id,),
+        repetitions,
+        policy_seed,
+        1,
+        1,
+        "1" * 64,
+        "2" * 64,
+        library.sha256,
+        "4" * 64,
+        _ACTION_SHA256,
+        (recipe.sha256,),
+        (logical.pairs[0].logical_cell.sha256,),
+        "portable",
+        logical.sha256,
+    )
+
+
+VALIDATION_EVALUATION_SUITE = _phase_suite(
     "validation",
-    ("validation-snapshot",),
     TEST_PLAN.validation_episodes_per_policy,
     61,
-    1,
-    1,
-    "1" * 64,
-    "2" * 64,
-    _PORTABLE_TEST_LIBRARY.sha256,
-    "4" * 64,
-    _ACTION_SHA256,
-    ("d" * 64,),
+    _PORTABLE_VALIDATION_RECIPE,
+    _PORTABLE_VALIDATION_LIBRARY,
+    VALIDATION_LOGICAL_MANIFEST,
 )
-TEST_EVALUATION_SUITE = EvaluationSuite(
-    "sealed-test-v1",
+TEST_EVALUATION_SUITE = _phase_suite(
     "test",
-    ("test-snapshot",),
     512,
     71,
-    1,
-    1,
-    "1" * 64,
-    "2" * 64,
-    _PORTABLE_TEST_LIBRARY.sha256,
-    "4" * 64,
-    _ACTION_SHA256,
-    (_PORTABLE_TEST_RECIPE.sha256,),
-    TEST_LOGICAL_CELL_IDS,
-    "portable",
-    TEST_LOGICAL_MANIFEST.sha256,
+    _PORTABLE_TEST_RECIPE,
+    _PORTABLE_TEST_LIBRARY,
+    TEST_LOGICAL_MANIFEST,
 )
 EXACT_TEST_EVALUATION_SUITE = replace(
     TEST_EVALUATION_SUITE,
     suite_id="sealed-test-exact-v1",
-    snapshot_ids=("exact-test-snapshot",),
+    snapshot_ids=(_EXACT_TEST_RECIPE.snapshot_id,),
     recipe_sha256s=(_EXACT_TEST_RECIPE.sha256,),
     runtime_identity_sha256="6" * 64,
+    assignment_sha256="7" * 64,
     library_sha256=_EXACT_TEST_LIBRARY.sha256,
     snapshot_store_sha256="8" * 64,
     backend="exact",
 )
-CALIBRATION_EVALUATION_SUITE = EvaluationSuite(
-    "calibration-v1",
+CALIBRATION_EVALUATION_SUITE = _phase_suite(
     "calibration",
-    ("calibration-snapshot",),
     10,
     51,
-    1,
-    1,
-    "1" * 64,
-    "2" * 64,
-    _PORTABLE_TEST_LIBRARY.sha256,
-    "4" * 64,
-    _ACTION_SHA256,
-    ("e" * 64,),
+    _PORTABLE_CALIBRATION_RECIPE,
+    _PORTABLE_CALIBRATION_LIBRARY,
+    CALIBRATION_LOGICAL_MANIFEST,
 )
 
 
@@ -160,65 +201,35 @@ def suite_identity(phase: str) -> str:
     return CALIBRATION_EVALUATION_SUITE.sha256
 
 
-@functools.lru_cache(maxsize=None)
 def parity_artifact(
-    policy_sha256: str, phase: str, seed: int
+    portable_suite: EvaluationSuite,
+    portable_report: EvaluationReport,
+    phase: str,
 ) -> LearnedPolicyBackendParityArtifact:
-    split = phase
-    portable_recipe = SnapshotRecipe(
-        f"parity-{phase}-portable",
-        f"parity-{phase}",
-        split,
-        f"parity-{phase}",
-        f"parity-{phase}-portable-pool",
-        "a" * 64,
-        1,
-        seed % (2**32),
-        _ACTION_SHA256,
-        (),
-        0,
-        0,
-        seed % (2**64),
-        hashlib.sha256(f"parity:{phase}:{seed}:portable".encode()).hexdigest(),
-        "1" * 64,
-        "test-generator",
-    )
-    exact_recipe = replace(
-        portable_recipe,
-        snapshot_id=f"parity-{phase}-exact",
-        environment_pool=f"parity-{phase}-exact-pool",
-        snapshot_sha256=hashlib.sha256(
-            f"parity:{phase}:{seed}:exact".encode()
-        ).hexdigest(),
-        runtime_identity_sha256="6" * 64,
-    )
-    portable_library = SnapshotLibrary((portable_recipe,))
-    exact_library = SnapshotLibrary((exact_recipe,))
-    logical_manifest = CrossBackendEvaluationManifest(
-        (CrossBackendCellPair.from_recipes(portable_recipe, exact_recipe),)
-    )
-    logical_ids = (logical_manifest.pairs[0].logical_cell.sha256,)
-    portable_suite = EvaluationSuite(
-        f"parity-{phase}-portable",
-        split,
-        (portable_recipe.snapshot_id,),
-        1,
-        seed,
-        1,
-        1,
-        "1" * 64,
-        "2" * 64,
-        portable_library.sha256,
-        "4" * 64,
-        _ACTION_SHA256,
-        (portable_recipe.sha256,),
-        logical_ids,
-        "portable",
-        logical_manifest.sha256,
-    )
+    fixtures = {
+        "calibration": (
+            _EXACT_CALIBRATION_RECIPE,
+            _PORTABLE_CALIBRATION_LIBRARY,
+            _EXACT_CALIBRATION_LIBRARY,
+            CALIBRATION_LOGICAL_MANIFEST,
+        ),
+        "validation": (
+            _EXACT_VALIDATION_RECIPE,
+            _PORTABLE_VALIDATION_LIBRARY,
+            _EXACT_VALIDATION_LIBRARY,
+            VALIDATION_LOGICAL_MANIFEST,
+        ),
+        "test": (
+            _EXACT_TEST_RECIPE,
+            _PORTABLE_TEST_LIBRARY,
+            _EXACT_TEST_LIBRARY,
+            TEST_LOGICAL_MANIFEST,
+        ),
+    }
+    exact_recipe, portable_library, exact_library, logical_manifest = fixtures[phase]
     exact_suite = replace(
         portable_suite,
-        suite_id=f"parity-{phase}-exact",
+        suite_id=f"{phase}-exact-v1",
         snapshot_ids=(exact_recipe.snapshot_id,),
         recipe_sha256s=(exact_recipe.sha256,),
         runtime_identity_sha256="6" * 64,
@@ -227,39 +238,22 @@ def parity_artifact(
         snapshot_store_sha256="8" * 64,
         backend="exact",
     )
-
-    def report(suite: EvaluationSuite, execution: str) -> EvaluationReport:
-        snapshot_id = suite.snapshot_ids[0]
-        return EvaluationReport(
-            suite.sha256,
-            policy_sha256,
-            "e" * 64,
-            suite.runtime_identity_sha256,
-            hashlib.sha256(execution.encode()).hexdigest(),
-            (
-                EpisodeMetrics(
-                    snapshot_id,
-                    0,
-                    suite.episode_seed(snapshot_id, 0),
-                    0,
-                    0,
-                    0,
-                    1,
-                    1,
-                    False,
-                    True,
-                    0,
-                    100,
-                    100,
-                ),
-            ),
-        )
-
+    exact_report = EvaluationReport(
+        exact_suite.sha256,
+        portable_report.policy_sha256,
+        portable_report.evaluator_sha256,
+        exact_suite.runtime_identity_sha256,
+        hashlib.sha256(f"{portable_report.sha256}:exact".encode()).hexdigest(),
+        tuple(
+            replace(episode, snapshot_id=exact_recipe.snapshot_id)
+            for episode in portable_report.episodes
+        ),
+    )
     return LearnedPolicyBackendParityArtifact(
         portable_suite,
-        report(portable_suite, f"{phase}:{seed}:portable"),
+        portable_report,
         exact_suite,
-        report(exact_suite, f"{phase}:{seed}:exact"),
+        exact_report,
         logical_manifest,
         portable_library,
         exact_library,
@@ -387,17 +381,19 @@ def outcomes(
                 metrics_sha256=artifact.sha256,
                 evaluation_suite_sha256=artifact.suite.sha256,
                 evaluation_report_sha256=artifact.final_report.sha256,
-                checkpoint_resume_artifact=ExactResumeArtifact(
+                final_checkpoint_artifact=artifact.checkpoints[-1].checkpoint,
+                resume_checkpoint_artifact=artifact.checkpoints[-2].checkpoint,
+                checkpoint_resume_artifact=_verified_exact_resume_artifact(
                     identity(seed, "trial-manifest"),
-                    artifact.checkpoints[-1].checkpoint.checkpoint_manifest_sha256,
-                    artifact.final_report.policy_sha256,
+                    artifact.checkpoints[-2].checkpoint.checkpoint_manifest_sha256,
+                    artifact.checkpoints[-2].checkpoint.model_sha256,
                     identity(seed, f"resume-next:{arm_id}"),
                     identity(seed, f"resume-next:{arm_id}"),
                     identity(seed, f"resume-state:{arm_id}"),
                     identity(seed, f"resume-state:{arm_id}"),
                 ),
                 exact_backend_parity_artifact=parity_artifact(
-                    artifact.final_report.policy_sha256, phase, seed
+                    artifact.suite, artifact.final_report, phase
                 ),
                 tail_state_sha256=(
                     None if phase == "calibration" else identity(seed, "tail")
@@ -628,6 +624,40 @@ def authorization_validation_results(
 
 
 class R3BExperimentPlanTests(unittest.TestCase):
+    def test_engineering_evidence_rejects_unbound_parity_and_resume(self) -> None:
+        outcome = outcomes(
+            (self.plan.calibration_learner_seeds[0],),
+            auc=100,
+            final=100,
+            phase="calibration",
+            budget=self.plan.calibration_budgets_updates[0],
+        )[0]
+        evidence = outcome.engineering_evidence
+        assert evidence is not None
+        with self.assertRaisesRegex(ValueError, "disagree with the trial"):
+            replace(evidence, evaluation_suite_sha256="f" * 64)
+        forged_resume = _verified_exact_resume_artifact(
+            evidence.trial_manifest_sha256,
+            "a" * 64,
+            "b" * 64,
+            "c" * 64,
+            "c" * 64,
+            "d" * 64,
+            "d" * 64,
+        )
+        with self.assertRaisesRegex(ValueError, "disagree with the trial"):
+            replace(evidence, checkpoint_resume_artifact=forged_resume)
+        with self.assertRaisesRegex(ValueError, "does not prove"):
+            ExactResumeArtifact(
+                evidence.trial_manifest_sha256,
+                "a" * 64,
+                "b" * 64,
+                "c" * 64,
+                "c" * 64,
+                "d" * 64,
+                "d" * 64,
+            )
+
     def setUp(self) -> None:
         self.plan = load_plan(PLAN_PATH)
 
@@ -830,6 +860,8 @@ class R3BExperimentPlanTests(unittest.TestCase):
                     outcome.engineering_evidence,
                     runner_spec_sha256=wrong_runner,
                     metrics_sha256=metrics.sha256,
+                    final_checkpoint_artifact=metrics.checkpoints[-1].checkpoint,
+                    resume_checkpoint_artifact=metrics.checkpoints[-2].checkpoint,
                 ),
             )
 
@@ -1235,13 +1267,29 @@ class R3BExperimentPlanTests(unittest.TestCase):
                     if outcome.learner_seed == job.learner_seed
                 )
                 assert source.engineering_evidence is not None
+                metrics = replace(
+                    source.metrics_artifact,
+                    checkpoints=tuple(
+                        replace(
+                            evaluated,
+                            checkpoint=replace(
+                                evaluated.checkpoint, job_sha256=job.sha256
+                            ),
+                        )
+                        for evaluated in source.metrics_artifact.checkpoints
+                    ),
+                )
                 bound = replace(
                     source,
                     seed_plan_sha256=job.seed_plan_sha256,
+                    metrics_artifact=metrics,
                     engineering_evidence=replace(
                         source.engineering_evidence,
                         job_sha256=job.sha256,
                         sealed_job_lease_sha256=lease.sha256,
+                        metrics_sha256=metrics.sha256,
+                        final_checkpoint_artifact=metrics.checkpoints[-1].checkpoint,
+                        resume_checkpoint_artifact=metrics.checkpoints[-2].checkpoint,
                     ),
                 )
                 ledger.complete_job(lease, bound)

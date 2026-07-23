@@ -18,6 +18,7 @@ from irisu_rl.encoding import TeacherStateEncoder
 from irisu_rl.models import RecurrentActorCritic, RecurrentModelConfig
 from irisu_rl.ppo import PPOConfig, PPOTrainer
 from irisu_rl.r3b_runner import verify_exact_resume_continuation
+from irisu_rl.r3b_experiments import TrainingCheckpointArtifact
 from irisu_rl.r3b_tail import ScoreOnlyTailController
 from irisu_rl.rewards import (
     LinearGaugePotential,
@@ -85,7 +86,10 @@ def build_tail_session() -> R3ATrainingSession:
 
 class TailSessionIntegrationTests(unittest.TestCase):
     def test_resume_is_exact_mid_sweep_drain_and_score_only(self) -> None:
-        identity = {"test": "r3b-tail-boundary-resume"}
+        identity = {
+            "test": "r3b-tail-boundary-resume",
+            "trial_manifest_sha256": "a" * 64,
+        }
         with tempfile.TemporaryDirectory() as directory:
             source = build_tail_session()
             source.initialize()
@@ -93,15 +97,29 @@ class TailSessionIntegrationTests(unittest.TestCase):
 
             def assert_next_update_exact(generation: str) -> None:
                 destination = source.save(directory, generation, identity=identity)
-                restored = build_tail_session()
-                restored.restore(directory, generation=generation, identity=identity)
+                manifest_sha256 = hashlib.sha256(
+                    (destination / "manifest.json").read_bytes()
+                ).hexdigest()
+                checkpoint = TrainingCheckpointArtifact(
+                    11,
+                    source.trainer.schedule.completed_updates,
+                    source.collector.simulated_ticks,
+                    "b" * 64,
+                    "c" * 64,
+                    "a" * 64,
+                    "d" * 64,
+                    manifest_sha256,
+                    source.policy_sha256,
+                    "e" * 64,
+                )
                 artifact = verify_exact_resume_continuation(
                     trial_manifest_sha256="a" * 64,
-                    checkpoint_manifest_sha256=hashlib.sha256(
-                        (destination / "manifest.json").read_bytes()
-                    ).hexdigest(),
+                    checkpoint=checkpoint,
+                    checkpoint_directory=directory,
+                    generation=generation,
+                    checkpoint_identity=identity,
                     source=source,
-                    restored=restored,
+                    restored_factory=build_tail_session,
                 )
                 self.assertEqual(
                     artifact.source_next_update_sha256,
