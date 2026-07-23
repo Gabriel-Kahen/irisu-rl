@@ -175,6 +175,8 @@ def pack_adapter_checkpoint(
         "raw_scores": list(checkpoint.raw_scores),
         "seeds": list(checkpoint.seeds),
         "episode_ids": list(checkpoint.episode_ids),
+        "episode_initializer_sha256": checkpoint.episode_initializer_sha256,
+        "episode_labels": list(checkpoint.episode_labels),
         "seed_allocator": checkpoint.seed_allocator,
         "state_hashes": list(checkpoint.state_hashes),
         "snapshot_names": [
@@ -212,6 +214,8 @@ def unpack_adapter_checkpoint(
         "raw_scores",
         "seeds",
         "episode_ids",
+        "episode_initializer_sha256",
+        "episode_labels",
         "seed_allocator",
         "state_hashes",
         "snapshot_names",
@@ -219,7 +223,7 @@ def unpack_adapter_checkpoint(
     }
     if set(state) != expected:
         raise ValueError("adapter checkpoint state keys do not match the version")
-    if state["version"] != "macro-vector-adapter-checkpoint-v2":
+    if state["version"] != "macro-vector-adapter-checkpoint-v3":
         raise ValueError("adapter checkpoint version mismatch")
     if (
         state["schema_sha256"] != schema.sha256
@@ -240,6 +244,25 @@ def unpack_adapter_checkpoint(
     canonical_names = [f"lane-{lane:04d}.snapshot" for lane in range(lane_count)]
     if names != canonical_names or set(names) != set(blobs):
         raise ValueError("adapter checkpoint snapshot set mismatch")
+    initializer_sha256 = state["episode_initializer_sha256"]
+    episode_labels = state["episode_labels"]
+    if initializer_sha256 is not None and (
+        not isinstance(initializer_sha256, str)
+        or len(initializer_sha256) != 64
+        or any(character not in "0123456789abcdef" for character in initializer_sha256)
+    ):
+        raise ValueError("adapter checkpoint episode initializer identity is invalid")
+    if (
+        not isinstance(episode_labels, list)
+        or len(episode_labels) != lane_count
+        or any(not isinstance(value, str) for value in episode_labels)
+        or (initializer_sha256 is None and any(episode_labels))
+        or (
+            initializer_sha256 is not None
+            and any(not value for value in episode_labels)
+        )
+    ):
+        raise ValueError("adapter checkpoint episode labels are invalid")
     current = state["current"]
     if not isinstance(current, dict):
         raise ValueError("adapter current observation payload is malformed")
@@ -273,6 +296,8 @@ def unpack_adapter_checkpoint(
         tuple(int(value) for value in state["raw_scores"]),
         tuple(int(value) for value in state["seeds"]),
         tuple(int(value) for value in state["episode_ids"]),
+        (None if initializer_sha256 is None else initializer_sha256),
+        tuple(episode_labels),
         dict(state["seed_allocator"]),
         tuple(blobs[name] for name in names),
         tuple(int(value) for value in state["state_hashes"]),

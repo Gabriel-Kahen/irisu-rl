@@ -218,20 +218,16 @@ def _gym_observation(value: dict[str, Any]) -> dict[str, Any]:
             "rot_timer": np.uint64(body["rot_timer"]),
             **{
                 key: np.float64(body[key])
-                for key in (
-                    "x", "y", "vx", "vy", "angle", "angular_velocity", "size"
-                )
+                for key in ("x", "y", "vx", "vy", "angle", "angular_velocity", "size")
             },
         }
         for body in result["bodies"]
     )
     result["field"] = {
-        key: np.float64(number)
-        for key, number in result["field"].items()
+        key: np.float64(number) for key, number in result["field"].items()
     }
     result["difficulty"] = {
-        key: np.uint32(number)
-        for key, number in result["difficulty"].items()
+        key: np.uint32(number) for key, number in result["difficulty"].items()
     }
     return result
 
@@ -239,9 +235,7 @@ def _gym_observation(value: dict[str, Any]) -> dict[str, Any]:
 class IrisuFastCheckpoint:
     """IrisuEnv-shaped owner for one exact fork/COW checkpoint."""
 
-    def __init__(
-        self, source: IrisuEnv, checkpoint: ExactFastCheckpoint
-    ) -> None:
+    def __init__(self, source: IrisuEnv, checkpoint: ExactFastCheckpoint) -> None:
         self._checkpoint = checkpoint
         self._render_mode = source.render_mode
         self._diagnostic_hashes = source.diagnostic_hashes
@@ -400,12 +394,18 @@ class IrisuEnv(_BaseEnv):
         import numpy as np
 
         scalar_f64 = _gym.spaces.Box(-np.inf, np.inf, shape=(), dtype=np.float64)
-        scalar_u32 = _gym.spaces.Box(0, np.iinfo(np.uint32).max, shape=(), dtype=np.uint32)
-        scalar_u64 = _gym.spaces.Box(0, np.iinfo(np.uint64).max, shape=(), dtype=np.uint64)
-        scalar_i32 = _gym.spaces.Box(np.iinfo(np.int32).min, np.iinfo(np.int32).max,
-                                     shape=(), dtype=np.int32)
-        scalar_i64 = _gym.spaces.Box(np.iinfo(np.int64).min, np.iinfo(np.int64).max,
-                                     shape=(), dtype=np.int64)
+        scalar_u32 = _gym.spaces.Box(
+            0, np.iinfo(np.uint32).max, shape=(), dtype=np.uint32
+        )
+        scalar_u64 = _gym.spaces.Box(
+            0, np.iinfo(np.uint64).max, shape=(), dtype=np.uint64
+        )
+        scalar_i32 = _gym.spaces.Box(
+            np.iinfo(np.int32).min, np.iinfo(np.int32).max, shape=(), dtype=np.int32
+        )
+        scalar_i64 = _gym.spaces.Box(
+            np.iinfo(np.int64).min, np.iinfo(np.int64).max, shape=(), dtype=np.int64
+        )
         body = _gym.spaces.Dict(
             {
                 "id": scalar_u32,
@@ -433,7 +433,12 @@ class IrisuEnv(_BaseEnv):
             {
                 key: scalar_f64
                 for key in (
-                    "x", "y", "width", "height", "side_wall_top", "side_wall_bottom"
+                    "x",
+                    "y",
+                    "width",
+                    "height",
+                    "side_wall_top",
+                    "side_wall_bottom",
                 )
             }
         )
@@ -472,6 +477,18 @@ class IrisuEnv(_BaseEnv):
         if self._physics_backend != "exact":
             return None
         return self._native.worker_path
+
+    def runner_identity_manifest(self) -> dict[str, object]:
+        """Immutable behavior configuration, excluding live simulator ownership."""
+
+        return {
+            "version": "irisu-env-runner-identity-v1",
+            "environment_type": f"{type(self).__module__}.{type(self).__qualname__}",
+            "physics_backend": self._physics_backend,
+            "render_mode": self.render_mode,
+            "diagnostic_hashes": self.diagnostic_hashes,
+            "config_hash": int(self._native.config_hash()),
+        }
 
     @property
     def config(self) -> dict[str, Any]:
@@ -604,9 +621,7 @@ class IrisuEnv(_BaseEnv):
         if self._physics_backend != "exact" or not isinstance(
             self._native, ExactSimulator
         ):
-            raise NativeError(
-                "fast checkpoints require physics_backend='exact'"
-            )
+            raise NativeError("fast checkpoints require physics_backend='exact'")
         if not self._has_reset:
             raise RuntimeError("reset must be called before fast_checkpoint")
         return IrisuFastCheckpoint(self, self._native.fast_checkpoint())

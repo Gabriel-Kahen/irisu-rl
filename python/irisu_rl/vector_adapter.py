@@ -19,6 +19,34 @@ class Encoder(Protocol):
 
 
 @dataclass(frozen=True, slots=True)
+class EpisodeInitialization:
+    """Verified policy-boundary states restored for a lane subset."""
+
+    lane_ids: tuple[int, ...]
+    observations: tuple[object, ...]
+    episode_seeds: tuple[int, ...]
+    episode_labels: tuple[str, ...]
+
+
+class EpisodeInitializer(Protocol):
+    @property
+    def sha256(self) -> str: ...
+
+    @property
+    def has_pending(self) -> bool: ...
+
+    def initialize(
+        self, env: Any, lane_ids: Sequence[int], *, defer_commit: bool
+    ) -> EpisodeInitialization: ...
+
+    def commit_pending(self, lane_ids: Sequence[int]) -> None: ...
+
+    def rollback_pending(self, env: Any, lane_ids: Sequence[int]) -> None: ...
+
+    def validate_active(self, episode_labels: Sequence[str]) -> None: ...
+
+
+@dataclass(frozen=True, slots=True)
 class ObservationInput:
     lane_id: int
     phase: str
@@ -71,6 +99,7 @@ class MacroTransition:
     bootstrap_mask: bool
     trace_mask: bool
     diagnostics: OwnedDiagnostics
+    episode_label: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,6 +114,8 @@ class AdapterCheckpoint:
     raw_scores: tuple[int, ...]
     seeds: tuple[int, ...]
     episode_ids: tuple[int, ...]
+    episode_initializer_sha256: str | None
+    episode_labels: tuple[str, ...]
     seed_allocator: dict[str, int | str]
     snapshots: tuple[bytes, ...]
     state_hashes: tuple[int, ...]
@@ -108,6 +139,7 @@ class MacroVectorAdapter:
         seed_allocator: SeedAllocator | None = None,
         action_spec: ActionSpec | None = None,
         capture_events: bool = False,
+        episode_initializer: EpisodeInitializer | None = None,
     ) -> None:
         self.env = env
         self.encoder = encoder
@@ -115,6 +147,7 @@ class MacroVectorAdapter:
         self.seed_allocator = seed_allocator or SeedAllocator()
         self.action_spec = action_spec or ActionSpec()
         self.capture_events = bool(capture_events)
+        self.episode_initializer = episode_initializer
         self.num_envs = int(env.num_envs)
         self._poisoned = False
         self._initialized = False
@@ -126,6 +159,7 @@ class MacroVectorAdapter:
         self._raw_gauge_maxes = [0] * self.num_envs
         self._seeds = [0] * self.num_envs
         self._episode_ids = [0] * self.num_envs
+        self._episode_labels = [""] * self.num_envs
         self._mutation_generation = 0
 
     @property
@@ -228,17 +262,44 @@ class MacroVectorAdapter:
             raise TypeError("backend gauge fields must be canonical integers")
         return int(gauge), int(gauge_max)
 
-    def reset(self) -> EncodedBatch:
+    def reset(self, *, disposable: bool = False) -> EncodedBatch:
+        """Initialize all lanes.
+
+        ``disposable`` performs only a backend reset and is reserved for the
+        checkpoint restore preflight. Normal collection restores and verifies
+        curriculum snapshots when an episode initializer is configured.
+        """
+
         if self._poisoned:
             raise RuntimeError("poisoned adapter must be recreated")
+        if not isinstance(disposable, bool):
+            raise TypeError("disposable reset flag must be boolean")
+        if (
+            self.episode_initializer is not None
+            and self.episode_initializer.has_pending
+        ):
+            raise RuntimeError("cannot reset with an uncommitted episode assignment")
         reservation = self.seed_allocator.reserve(self.num_envs)
         try:
             observations, infos = self.env.reset(seed=reservation.seeds)
             self._require_lengths(self.num_envs, observations, infos)
+            episode_seeds = tuple(reservation.seeds)
+            episode_labels = ("",) * self.num_envs
+            if self.episode_initializer is not None and not disposable:
+                initialized = self.episode_initializer.initialize(
+                    self.env, tuple(range(self.num_envs)), defer_commit=True
+                )
+                if initialized.lane_ids != tuple(range(self.num_envs)):
+                    raise RuntimeError(
+                        "episode initializer changed full reset lane order"
+                    )
+                observations = list(initialized.observations)
+                episode_seeds = initialized.episode_seeds
+                episode_labels = initialized.episode_labels
             encoded = self._encode(
                 observations, lane_ids=range(self.num_envs), phase="reset"
             )
-            if any(
+            if (self.episode_initializer is None or disposable) and any(
                 int(info.get("seed", seed)) != seed
                 for info, seed in zip(infos, reservation.seeds)
             ):
@@ -250,7 +311,19 @@ class MacroVectorAdapter:
             raw_gauge_maxes = [value[1] for value in gauge_fields]
             if any(value <= 0 for value in raw_gauge_maxes):
                 raise RuntimeError("backend reset returned a nonpositive gauge maximum")
+            if self.episode_initializer is not None and not disposable:
+                self.episode_initializer.commit_pending(range(self.num_envs))
         except BaseException as exc:
+            if (
+                self.episode_initializer is not None
+                and self.episode_initializer.has_pending
+            ):
+                try:
+                    self.episode_initializer.rollback_pending(
+                        self.env, range(self.num_envs)
+                    )
+                except BaseException as rollback_error:
+                    self._fail_closed(rollback_error)
             self._fail_closed(exc)
         self.seed_allocator.commit(reservation)
         if self._schema is None:
@@ -260,8 +333,9 @@ class MacroVectorAdapter:
         self._raw_scores = raw_scores
         self._raw_gauges = raw_gauges
         self._raw_gauge_maxes = raw_gauge_maxes
-        self._seeds = list(reservation.seeds)
+        self._seeds = list(episode_seeds)
         self._episode_ids = [0] * self.num_envs
+        self._episode_labels = list(episode_labels)
         self._initialized = True
         self._mutation_generation += 1
         return encoded.copy()
@@ -277,11 +351,17 @@ class MacroVectorAdapter:
             raise RuntimeError(
                 "stateful observation transforms need an explicit checkpoint contract"
             )
+        if self.episode_initializer is not None:
+            if self.episode_initializer.has_pending:
+                raise RuntimeError(
+                    "cannot checkpoint an uncommitted episode assignment"
+                )
+            self.episode_initializer.validate_active(self._episode_labels)
         snapshots = tuple(self.env.clone_state())
         state_hashes = tuple(int(value) for value in self.env.state_hash())
         self._require_lengths(self.num_envs, snapshots, state_hashes)
         return AdapterCheckpoint(
-            "macro-vector-adapter-checkpoint-v2",
+            "macro-vector-adapter-checkpoint-v3",
             self._schema.sha256,
             self.action_spec.sha256,
             self.num_envs,
@@ -291,6 +371,12 @@ class MacroVectorAdapter:
             tuple(self._raw_scores),
             tuple(self._seeds),
             tuple(self._episode_ids),
+            (
+                None
+                if self.episode_initializer is None
+                else self.episode_initializer.sha256
+            ),
+            tuple(self._episode_labels),
             self.seed_allocator.state_dict(),
             snapshots,
             state_hashes,
@@ -303,7 +389,7 @@ class MacroVectorAdapter:
             raise RuntimeError("cannot restore a poisoned adapter")
         if not self._initialized:
             raise RuntimeError("reset the fresh backend once before checkpoint restore")
-        if checkpoint.version != "macro-vector-adapter-checkpoint-v2":
+        if checkpoint.version != "macro-vector-adapter-checkpoint-v3":
             raise ValueError("adapter checkpoint version mismatch")
         if checkpoint.num_envs != self.num_envs:
             raise ValueError("adapter checkpoint lane count mismatch")
@@ -323,6 +409,7 @@ class MacroVectorAdapter:
             checkpoint.raw_scores,
             checkpoint.seeds,
             checkpoint.episode_ids,
+            checkpoint.episode_labels,
             checkpoint.snapshots,
             checkpoint.state_hashes,
         )
@@ -343,6 +430,19 @@ class MacroVectorAdapter:
             )
         if any(not isinstance(value, bytes) for value in checkpoint.snapshots):
             raise TypeError("adapter checkpoint snapshots must be owned bytes")
+        expected_initializer = (
+            None
+            if self.episode_initializer is None
+            else self.episode_initializer.sha256
+        )
+        if checkpoint.episode_initializer_sha256 != expected_initializer:
+            raise ValueError("adapter checkpoint episode initializer mismatch")
+        if any(not isinstance(value, str) for value in checkpoint.episode_labels):
+            raise TypeError("adapter checkpoint episode labels must be strings")
+        if self.episode_initializer is not None:
+            if self.episode_initializer.has_pending:
+                raise RuntimeError("cannot restore with a pending episode assignment")
+            self.episode_initializer.validate_active(checkpoint.episode_labels)
         if not np.array_equal(
             checkpoint.current.source_tick,
             np.asarray(checkpoint.raw_ticks, dtype=np.int64),
@@ -365,9 +465,7 @@ class MacroVectorAdapter:
                 self._gauge_fields(value) for value in observations
             )
             restored_gauges = tuple(value[0] for value in restored_gauge_fields)
-            restored_gauge_maxes = tuple(
-                value[1] for value in restored_gauge_fields
-            )
+            restored_gauge_maxes = tuple(value[1] for value in restored_gauge_fields)
             if restored_ticks != checkpoint.raw_ticks:
                 raise ValueError(
                     "restored raw ticks do not match checkpoint bookkeeping"
@@ -408,6 +506,7 @@ class MacroVectorAdapter:
         self._raw_gauge_maxes = list(restored_gauge_maxes)
         self._seeds = list(checkpoint.seeds)
         self._episode_ids = list(checkpoint.episode_ids)
+        self._episode_labels = list(checkpoint.episode_labels)
         self._initialized = True
         self._mutation_generation += 1
         return encoded.copy()
@@ -417,6 +516,11 @@ class MacroVectorAdapter:
             raise RuntimeError("poisoned adapter must be recreated")
         if not self._initialized or self._current is None:
             raise RuntimeError("adapter must be reset first")
+        if (
+            self.episode_initializer is not None
+            and self.episode_initializer.has_pending
+        ):
+            raise RuntimeError("previous episode assignments have not been committed")
         if len(actions) != self.num_envs:
             raise ValueError(f"actions must contain exactly {self.num_envs} items")
         # Entire-batch validation happens before any backend mutation.
@@ -561,8 +665,7 @@ class MacroVectorAdapter:
             self._poisoned = True
             raise RuntimeError("macro reward does not equal raw score delta")
         if any(value <= 0 for value in end_gauge_maxes) or any(
-            start != end
-            for start, end in zip(start_gauge_maxes, end_gauge_maxes)
+            start != end for start, end in zip(start_gauge_maxes, end_gauge_maxes)
         ):
             self._poisoned = True
             raise RuntimeError("gauge maximum changed within an episode")
@@ -578,19 +681,35 @@ class MacroVectorAdapter:
         reset_score_by_lane: dict[int, int] = {}
         reset_gauge_by_lane: dict[int, int] = {}
         reset_gauge_max_by_lane: dict[int, int] = {}
+        reset_label_by_lane: dict[int, str] = {}
         if done_lanes:
-            reservation = self.seed_allocator.reserve(len(done_lanes))
             try:
-                reset_observations = self.env.reset_many(
-                    done_lanes, seeds=reservation.seeds
-                )
+                if self.episode_initializer is None:
+                    reservation = self.seed_allocator.reserve(len(done_lanes))
+                    reset_observations = self.env.reset_many(
+                        done_lanes, seeds=reservation.seeds
+                    )
+                    reset_seeds = tuple(reservation.seeds)
+                    reset_labels = ("",) * len(done_lanes)
+                else:
+                    initialized = self.episode_initializer.initialize(
+                        self.env, done_lanes, defer_commit=True
+                    )
+                    if initialized.lane_ids != tuple(done_lanes):
+                        raise RuntimeError(
+                            "episode initializer changed autoreset lane order"
+                        )
+                    reset_observations = list(initialized.observations)
+                    reset_seeds = initialized.episode_seeds
+                    reset_labels = initialized.episode_labels
                 self._require_lengths(len(done_lanes), reset_observations)
                 reset_encoded = self._encode(
                     reset_observations, lane_ids=done_lanes, phase="reset"
                 )
                 for offset, lane in enumerate(done_lanes):
                     reset_encoded_by_lane[lane] = reset_encoded.row(offset)
-                    new_seed_by_lane[lane] = reservation.seeds[offset]
+                    new_seed_by_lane[lane] = reset_seeds[offset]
+                    reset_label_by_lane[lane] = reset_labels[offset]
                     reset_tick_by_lane[lane] = int(
                         getattr(reset_observations[offset], "tick", 0)
                     )
@@ -607,8 +726,17 @@ class MacroVectorAdapter:
                             "backend reset returned a nonpositive gauge maximum"
                         )
             except BaseException as exc:
+                if (
+                    self.episode_initializer is not None
+                    and self.episode_initializer.has_pending
+                ):
+                    try:
+                        self.episode_initializer.rollback_pending(self.env, done_lanes)
+                    except BaseException as rollback_error:
+                        self._fail_closed(rollback_error)
                 self._fail_closed(exc)
-            self.seed_allocator.commit(reservation)
+            if self.episode_initializer is None:
+                self.seed_allocator.commit(reservation)
 
         try:
             transitions: list[MacroTransition] = []
@@ -658,6 +786,7 @@ class MacroVectorAdapter:
                             event_counts[lane],
                             total_events[lane],
                         ),
+                        episode_label=self._episode_labels[lane],
                     )
                 )
             for lane, transition in enumerate(transitions):
@@ -669,6 +798,7 @@ class MacroVectorAdapter:
                 self._current.health_flags[lane] = next_policy.health_flags[0]
                 if transition.terminated or transition.truncated:
                     self._seeds[lane] = new_seed_by_lane[lane]
+                    self._episode_labels[lane] = reset_label_by_lane[lane]
                     self._episode_ids[lane] += 1
                     self._raw_ticks[lane] = reset_tick_by_lane[lane]
                     self._raw_scores[lane] = reset_score_by_lane[lane]

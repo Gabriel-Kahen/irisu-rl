@@ -8,7 +8,12 @@ from .actions import (
 )
 from .encoding import ActorTrackEncoder, EncodedBatch, TeacherStateEncoder
 from .rollout_buffer import RolloutBuffer
-from .runtime_identity import ACCEPTED_EXACT_RUNTIME_2026_07_21, ExactRuntimeIdentity
+from .runtime_identity import (
+    ACCEPTED_EXACT_RUNTIME_2026_07_21,
+    ExactRuntimeIdentity,
+    SimulatorRuntimeAttestation,
+    attest_simulator_runtime,
+)
 from .schema import ACTOR_VISION_V1, TEACHER_V1, TensorSchema
 from .seeds import SEED_SPLITS_V1, SeedAllocator, SeedReservation
 from .vector_adapter import (
@@ -34,9 +39,11 @@ __all__ = [
     "SEED_SPLITS_V1",
     "SemanticAction",
     "SemanticActionKind",
+    "SimulatorRuntimeAttestation",
     "SeedAllocator",
     "SeedReservation",
     "TEACHER_V1",
     "TeacherStateEncoder",
     "TensorSchema",
+    "attest_simulator_runtime",
 ]

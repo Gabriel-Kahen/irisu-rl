@@ -107,8 +107,7 @@ if (
     ctypes.sizeof(ExactPaddedBody) != _BODY.size
     or ExactPaddedObservation.bodies.offset != _OBSERVATION_HEADER.size
     or ExactPaddedTransition.reward.offset != ctypes.sizeof(ExactPaddedObservation)
-    or ctypes.sizeof(ExactPaddedTransition)
-    - ExactPaddedTransition.reward.offset
+    or ctypes.sizeof(ExactPaddedTransition) - ExactPaddedTransition.reward.offset
     != _TRANSITION.size
 ):
     raise RuntimeError("exact padded ctypes layout does not match the worker protocol")
@@ -167,23 +166,17 @@ def _decode_exact_transition(
 
     body_count = _OBSERVATION_HEADER.unpack_from(payload)[15]
     body_end = _OBSERVATION_HEADER.size + body_count * _BODY.size
-    ctypes.memmove(
-        ctypes.addressof(destination.observation), payload, body_end
-    )
+    ctypes.memmove(ctypes.addressof(destination.observation), payload, body_end)
     ctypes.memmove(
         ctypes.addressof(destination) + ExactPaddedTransition.reward.offset,
         payload[body_end : body_end + _TRANSITION.size],
         _TRANSITION.size,
     )
-    generation = _EVENT_GENERATION.unpack_from(
-        payload, body_end + _TRANSITION.size
-    )[0]
+    generation = _EVENT_GENERATION.unpack_from(payload, body_end + _TRANSITION.size)[0]
     return destination, int(generation)
 
 
-def _decode_exact_events(
-    payload: bytes, count: int
-) -> ctypes.Array[PaddedEvent]:
+def _decode_exact_events(payload: bytes, count: int) -> ctypes.Array[PaddedEvent]:
     offset = _EVENT_COUNT.size
     event_type = PaddedEvent * count
     events = event_type()
@@ -208,9 +201,7 @@ def _decode_exact_events(
 class ExactPaddedEvents(Sequence[PaddedEvent]):
     """Lazy event view tied to one exact worker generation."""
 
-    def __init__(
-        self, simulator: ExactSimulator, count: int, generation: int
-    ) -> None:
+    def __init__(self, simulator: ExactSimulator, count: int, generation: int) -> None:
         self._simulator = simulator
         self._client = simulator._client
         self._count = count
@@ -268,10 +259,16 @@ class PaddedVectorEnv:
         physics_backend: str = "portable",
         worker_path: str | PathLike[str] | None = None,
     ) -> None:
-        if not isinstance(num_envs, Integral) or isinstance(num_envs, bool) or num_envs <= 0:
+        if (
+            not isinstance(num_envs, Integral)
+            or isinstance(num_envs, bool)
+            or num_envs <= 0
+        ):
             raise ValueError("num_envs must be a positive integer")
         if workers is not None and (
-            not isinstance(workers, Integral) or isinstance(workers, bool) or workers <= 0
+            not isinstance(workers, Integral)
+            or isinstance(workers, bool)
+            or workers <= 0
         ):
             raise ValueError("workers must be a positive integer or None")
         if not isinstance(physics_backend, str):
@@ -289,24 +286,29 @@ class PaddedVectorEnv:
         if self._physics_backend == "portable" and worker_path is not None:
             raise ValueError("worker_path is only valid for physics_backend='exact'")
         if self._physics_backend == "exact" and library_path is not None:
-            raise ValueError("library_path is only valid for physics_backend='portable'")
+            raise ValueError(
+                "library_path is only valid for physics_backend='portable'"
+            )
         self._lock = RLock()
         self._envs: tuple[NativeSimulator | ExactSimulator, ...] = ()
         self._num_envs = int(num_envs)
-        requested_workers = int(workers) if workers is not None else (
-            _default_exact_workers(self._num_envs)
-            if self._physics_backend == "exact"
-            else self._num_envs
+        requested_workers = (
+            int(workers)
+            if workers is not None
+            else (
+                _default_exact_workers(self._num_envs)
+                if self._physics_backend == "exact"
+                else self._num_envs
+            )
         )
         # Portable lanes share one native process and retain the eight-thread
         # ceiling. Exact lanes are independent worker processes; their adaptive
         # default keeps several runnable worlds per visible CPU to cover uneven
         # solver times, while an explicit request remains authoritative.
-        worker_ceiling = (
-            self._num_envs if self._physics_backend == "exact" else 8
-        )
+        worker_ceiling = self._num_envs if self._physics_backend == "exact" else 8
         self._workers = min(self._num_envs, worker_ceiling, requested_workers)
         self._executor: ThreadPoolExecutor | None = None
+        self._poisoned = False
         self._has_reset = [False] * self._num_envs
         self._config_hashes: tuple[int, ...] = ()
         self._batch_buffers: dict[str, Any] | None = None
@@ -366,7 +368,27 @@ class PaddedVectorEnv:
     def physics_backend(self) -> str:
         return self._physics_backend
 
+    @property
+    def poisoned(self) -> bool:
+        return self._poisoned
+
+    def runner_identity_manifest(self) -> dict[str, object]:
+        """Immutable vector behavior configuration without live worker state."""
+
+        return {
+            "version": "irisu-padded-vector-runner-identity-v1",
+            "vector_type": f"{type(self).__module__}.{type(self).__qualname__}",
+            "coordination": "padded-threaded",
+            "num_envs": self._num_envs,
+            "workers": self._workers,
+            "physics_backend": self._physics_backend,
+            "body_capacity": self.body_capacity,
+            "config_hashes": list(self._config_hashes),
+        }
+
     def _require_open(self) -> ThreadPoolExecutor:
+        if self._poisoned:
+            raise RuntimeError("padded vector environment is poisoned")
         executor = self._executor
         if executor is None:
             raise RuntimeError("padded vector environment is closed")
@@ -385,6 +407,24 @@ class PaddedVectorEnv:
             raise ValueError(
                 f"{label} must contain exactly {self._num_envs} items"
             ) from exc
+
+    def _subset_indices(self, indices: Sequence[int]) -> tuple[int, ...]:
+        if not isinstance(indices, Sequence) or isinstance(
+            indices, (str, bytes, bytearray)
+        ):
+            raise TypeError("lane indices must be a sequence")
+        lanes = tuple(indices)
+        if any(
+            not isinstance(index, Integral) or isinstance(index, bool)
+            for index in lanes
+        ):
+            raise TypeError("lane indices must be integers")
+        normalized = tuple(int(index) for index in lanes)
+        if len(set(normalized)) != len(normalized):
+            raise ValueError("lane indices must be unique")
+        if any(not 0 <= index < self._num_envs for index in normalized):
+            raise IndexError("lane index out of range")
+        return normalized
 
     @staticmethod
     def _seed(value: int | None) -> int:
@@ -585,9 +625,7 @@ class PaddedVectorEnv:
             env = self._envs[index]
             if isinstance(env, ExactSimulator):
                 source = env.reset_typed(self._seed(seed))
-                observation = _copy_exact_observation(
-                    source, ExactPaddedObservation()
-                )
+                observation = _copy_exact_observation(source, ExactPaddedObservation())
             else:
                 observation = env.reset_padded(self._seed(seed))
             self._has_reset[index] = True
@@ -611,7 +649,10 @@ class PaddedVectorEnv:
                 raise ValueError("indices and seeds must have equal length")
             if len(set(lane_indices)) != len(lane_indices):
                 raise ValueError("reset indices must be unique")
-            if any(not isinstance(index, Integral) or isinstance(index, bool) for index in lane_indices):
+            if any(
+                not isinstance(index, Integral) or isinstance(index, bool)
+                for index in lane_indices
+            ):
                 raise TypeError("reset indices must be integers")
             if any(not 0 <= int(index) < self._num_envs for index in lane_indices):
                 raise IndexError("reset lane index out of range")
@@ -651,8 +692,7 @@ class PaddedVectorEnv:
             if len(encoded) != self._num_envs:
                 raise ValueError(f"actions must contain exactly {self._num_envs} items")
             if any(
-                not math.isfinite(x) or not math.isfinite(y)
-                for _, x, y, _ in encoded
+                not math.isfinite(x) or not math.isfinite(y) for _, x, y, _ in encoded
             ):
                 raise ValueError("cursor coordinates must be finite")
             if self._physics_backend == "exact":
@@ -713,14 +753,19 @@ class PaddedVectorEnv:
                 raise ValueError("indices and actions must have equal length")
             if len(set(lane_indices)) != len(lane_indices):
                 raise ValueError("step indices must be unique")
-            if any(not isinstance(index, Integral) or isinstance(index, bool) for index in lane_indices):
+            if any(
+                not isinstance(index, Integral) or isinstance(index, bool)
+                for index in lane_indices
+            ):
                 raise TypeError("step indices must be integers")
             if any(not 0 <= int(index) < self._num_envs for index in lane_indices):
                 raise IndexError("step lane index out of range")
             if any(not self._has_reset[int(index)] for index in lane_indices):
                 raise RuntimeError("reset must be called before step")
             encoded = [_action(action) for action in supplied_actions]
-            if any(not math.isfinite(x) or not math.isfinite(y) for _, x, y, _ in encoded):
+            if any(
+                not math.isfinite(x) or not math.isfinite(y) for _, x, y, _ in encoded
+            ):
                 raise ValueError("cursor coordinates must be finite")
 
             def step_one(index: int, action: tuple[Any, float, float, int]):
@@ -738,9 +783,7 @@ class PaddedVectorEnv:
                         env, int(transition.event_count), generation
                     )
                 else:
-                    transition, events = env.step_padded(
-                        int(kind), x, y, wait_ticks
-                    )
+                    transition, events = env.step_padded(int(kind), x, y, wait_ticks)
                 return transition, events
 
             futures = [
@@ -773,51 +816,87 @@ class PaddedVectorEnv:
                 raise RuntimeError("reset must be called before clone_state")
             return tuple(env.clone_state() for env in self._envs)
 
-    def restore_state(
-        self, snapshots: Sequence[bytes]
+    def clone_state_many(self, indices: Sequence[int]) -> tuple[bytes, ...]:
+        """Clone a lane subset in supplied order without touching other lanes."""
+
+        with self._lock:
+            self._require_open()
+            lanes = self._subset_indices(indices)
+            if any(not self._has_reset[index] for index in lanes):
+                raise RuntimeError("reset must be called before clone_state")
+            return tuple(self._envs[index].clone_state() for index in lanes)
+
+    def restore_many(
+        self, indices: Sequence[int], snapshots: Sequence[bytes]
     ) -> list[PaddedObservation | ExactPaddedObservation]:
+        """Transactionally restore a lane subset in supplied order.
+
+        Validation completes before mutation. If one restore fails after another
+        lane has committed, every targeted lane is rolled back to its byte-exact
+        pre-call state. A rollback failure is surfaced distinctly so owners can
+        fail closed and recreate the vector.
+        """
+
         with self._lock:
             executor = self._require_open()
-            supplied = self._items(snapshots, "snapshots")
-            try:
-                snapshots = [supplied[index] for index in range(self._num_envs)]
-            except IndexError as exc:
-                raise ValueError(
-                    f"snapshots must contain exactly {self._num_envs} items"
-                ) from exc
-            backups = tuple(env.clone_state() for env in self._envs)
-            prior_has_reset = self._has_reset.copy()
+            lanes = self._subset_indices(indices)
+            if not isinstance(snapshots, Sequence) or isinstance(
+                snapshots, (str, bytes, bytearray)
+            ):
+                raise TypeError("snapshots must be a sequence")
+            supplied = tuple(snapshots)
+            if len(supplied) != len(lanes):
+                raise ValueError("indices and snapshots must have equal length")
+            if any(not isinstance(snapshot, bytes) for snapshot in supplied):
+                raise TypeError("snapshots must be owned bytes")
+            if not lanes:
+                return []
+            backups = tuple(self._envs[index].clone_state() for index in lanes)
+            prior_has_reset = tuple(self._has_reset[index] for index in lanes)
 
-            def restore(
-                env: NativeSimulator | ExactSimulator, snapshot: bytes
+            def restore_one(
+                index: int, snapshot: bytes
             ) -> PaddedObservation | ExactObservation:
+                env = self._envs[index]
                 if isinstance(env, ExactSimulator):
                     return env.restore_state_typed(snapshot)
                 return env.restore_state_padded(snapshot)
 
             futures = [
-                executor.submit(restore, env, snapshot)
-                for env, snapshot in zip(self._envs, snapshots)
+                executor.submit(restore_one, index, snapshot)
+                for index, snapshot in zip(lanes, supplied)
             ]
             try:
                 observations = self._drain(futures)
             except BaseException:
-                rollback_futures = [
-                    executor.submit(restore, env, snapshot)
-                    for env, snapshot in zip(self._envs, backups)
+                rollback = [
+                    executor.submit(restore_one, index, snapshot)
+                    for index, snapshot in zip(lanes, backups)
                 ]
                 try:
-                    self._drain(rollback_futures)
+                    self._drain(rollback)
                 except BaseException as rollback_error:
+                    self._poisoned = True
                     raise RuntimeError(
-                        "padded vector snapshot rollback failed"
+                        "padded vector subset snapshot rollback failed"
                     ) from rollback_error
-                self._has_reset = prior_has_reset
+                for index, has_reset in zip(lanes, prior_has_reset):
+                    self._has_reset[index] = has_reset
                 raise
-            self._has_reset = [True] * self._num_envs
+            for index in lanes:
+                self._has_reset[index] = True
             if self._physics_backend == "exact":
-                observations = self._pack_exact_observations(observations)
+                return [
+                    _copy_exact_observation(value, ExactPaddedObservation())
+                    for value in observations
+                ]
             return observations
+
+    def restore_state(
+        self, snapshots: Sequence[bytes]
+    ) -> list[PaddedObservation | ExactPaddedObservation]:
+        supplied = self._items(snapshots, "snapshots")
+        return self.restore_many(range(self._num_envs), supplied)
 
     def state_hash(self) -> tuple[int, ...]:
         with self._lock:
@@ -825,6 +904,24 @@ class PaddedVectorEnv:
             if not all(self._has_reset):
                 raise RuntimeError("reset must be called before state_hash")
             return tuple(env.state_hash() for env in self._envs)
+
+    def state_hash_many(self, indices: Sequence[int]) -> tuple[int, ...]:
+        """Return state hashes for a lane subset in supplied order."""
+
+        with self._lock:
+            self._require_open()
+            lanes = self._subset_indices(indices)
+            if any(not self._has_reset[index] for index in lanes):
+                raise RuntimeError("reset must be called before state_hash")
+            return tuple(self._envs[index].state_hash() for index in lanes)
+
+    def config_hash_many(self, indices: Sequence[int]) -> tuple[int, ...]:
+        """Return immutable config hashes for a lane subset in supplied order."""
+
+        with self._lock:
+            self._require_open()
+            lanes = self._subset_indices(indices)
+            return tuple(self._config_hashes[index] for index in lanes)
 
     def close(self) -> None:
         lock = getattr(self, "_lock", None)
@@ -849,11 +946,15 @@ class PaddedVectorEnv:
         self.close()
 
     def __copy__(self) -> PaddedVectorEnv:
-        raise TypeError("PaddedVectorEnv owns mutable simulator state and cannot be copied")
+        raise TypeError(
+            "PaddedVectorEnv owns mutable simulator state and cannot be copied"
+        )
 
     def __deepcopy__(self, memo: dict[int, object]) -> PaddedVectorEnv:
         del memo
-        raise TypeError("PaddedVectorEnv owns mutable simulator state and cannot be copied")
+        raise TypeError(
+            "PaddedVectorEnv owns mutable simulator state and cannot be copied"
+        )
 
     def __del__(self) -> None:
         try:

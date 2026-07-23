@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ctypes
 import ctypes.util
+import hashlib
 import json
 import os
 import struct
@@ -11,6 +12,7 @@ import sys
 import threading
 from contextlib import ExitStack
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from numbers import Integral, Real
 from pathlib import Path
 from typing import Any
@@ -167,7 +169,9 @@ class PaddedObservation(ctypes.Structure):
                 "active_colors": int(self.active_colors),
                 "spawn_interval_ticks": int(self.spawn_interval_ticks),
             },
-            "bodies": [self.bodies[index].to_dict() for index in range(self.body_count)],
+            "bodies": [
+                self.bodies[index].to_dict() for index in range(self.body_count)
+            ],
         }
 
 
@@ -302,7 +306,9 @@ def _flatten_config(config: Mapping[str, Any]) -> list[tuple[str, float]]:
             raise TypeError("configuration keys must be non-empty strings")
         if "\0" in key:
             raise ValueError("configuration keys must not contain NUL characters")
-        if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        if isinstance(value, Sequence) and not isinstance(
+            value, (str, bytes, bytearray)
+        ):
             for index, item in enumerate(value):
                 label = f"{key}[{index}]"
                 flattened.append((label, encoded_number(item, label)))
@@ -314,7 +320,16 @@ def _flatten_config(config: Mapping[str, Any]) -> list[tuple[str, float]]:
 
 _SNAPSHOT_HEADER = struct.Struct("<IIQ")
 _SNAPSHOT_MAGIC = 0x49524953
-_LIBRARY_CACHE: dict[str, ctypes.CDLL] = {}
+
+
+@dataclass(frozen=True, slots=True)
+class _LoadedLibrary:
+    library: ctypes.CDLL
+    descriptor: int
+    provenance: dict[str, Any]
+
+
+_LIBRARY_CACHE: dict[tuple[object, ...], _LoadedLibrary] = {}
 _LIBRARY_CACHE_LOCK = threading.Lock()
 _PADDED_BUFFER_TOKEN = object()
 _RLOCK_TYPE = type(threading.RLock())
@@ -372,6 +387,71 @@ def _library_name() -> str:
     return "libirisu_clone.so"
 
 
+def _file_identity(value: os.stat_result) -> tuple[int, int, int, int, int]:
+    return (
+        value.st_dev,
+        value.st_ino,
+        value.st_size,
+        value.st_mtime_ns,
+        value.st_ctime_ns,
+    )
+
+
+def _capture_descriptor(descriptor: int, path: Path) -> dict[str, Any]:
+    before = os.fstat(descriptor)
+    digest = hashlib.sha256()
+    byte_count = 0
+    if hasattr(os, "pread"):
+        while block := os.pread(descriptor, 1 << 20, byte_count):
+            byte_count += len(block)
+            digest.update(block)
+    else:
+        prior_offset = os.lseek(descriptor, 0, os.SEEK_CUR)
+        try:
+            os.lseek(descriptor, 0, os.SEEK_SET)
+            while block := os.read(descriptor, 1 << 20):
+                byte_count += len(block)
+                digest.update(block)
+        finally:
+            os.lseek(descriptor, prior_offset, os.SEEK_SET)
+    after = os.fstat(descriptor)
+    if _file_identity(before) != _file_identity(after) or byte_count != after.st_size:
+        raise NativeError("portable library changed while its inode was captured")
+    return {
+        "status": "captured",
+        "path": str(path),
+        "bytes": byte_count,
+        "sha256": digest.hexdigest(),
+        "file_identity": {
+            "device": after.st_dev,
+            "inode": after.st_ino,
+            "mtime_ns": after.st_mtime_ns,
+            "ctime_ns": after.st_ctime_ns,
+        },
+    }
+
+
+def _open_library_artifact(path_value: Path | str) -> tuple[Path, int, dict[str, Any]]:
+    supplied = Path(path_value).expanduser()
+    if not supplied.is_absolute():
+        raise LibraryNotFoundError(
+            "portable runtime requires an absolute shared-library artifact path"
+        )
+    try:
+        path = supplied.resolve(strict=True)
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_CLOEXEC", 0))
+    except OSError as exc:
+        raise LibraryNotFoundError(
+            f"cannot open portable shared-library artifact {supplied}: {exc}"
+        ) from exc
+    try:
+        provenance = _capture_descriptor(descriptor, path)
+    except BaseException:
+        os.close(descriptor)
+        raise
+    return path, descriptor, provenance
+
+
 def find_library(explicit: str | os.PathLike[str] | None = None) -> Path | str:
     """Resolve an explicit path, environment override, or workspace build."""
 
@@ -415,20 +495,65 @@ class NativeSimulator:
     ) -> None:
         self._lock = threading.RLock()
         self._handle: int | None = None
-        self._path = find_library(library_path)
-        cache_key = str(self._path)
+        resolved = find_library(library_path)
+        path, descriptor, provenance = _open_library_artifact(resolved)
+        self._path = path
+        file_identity = provenance["file_identity"]
+        cache_key = (
+            provenance["sha256"],
+            provenance["bytes"],
+            file_identity["device"],
+            file_identity["inode"],
+            file_identity["mtime_ns"],
+            file_identity["ctime_ns"],
+        )
         try:
             with _LIBRARY_CACHE_LOCK:
-                library = _LIBRARY_CACHE.get(cache_key)
-                if library is None:
-                    library = ctypes.CDLL(cache_key)
-                    _LIBRARY_CACHE[cache_key] = library
-                self._library = library
-                self._configure_abi()
+                loaded = _LIBRARY_CACHE.get(cache_key)
+                if loaded is None:
+                    try:
+                        library = ctypes.CDLL(f"/proc/self/fd/{descriptor}")
+                    except OSError:
+                        library = ctypes.CDLL(str(path))
+                        current = path.stat()
+                        if _file_identity(current) != (
+                            file_identity["device"],
+                            file_identity["inode"],
+                            provenance["bytes"],
+                            file_identity["mtime_ns"],
+                            file_identity["ctime_ns"],
+                        ):
+                            raise NativeError(
+                                "portable library path changed before it was loaded"
+                            )
+                    loaded = _LoadedLibrary(library, descriptor, provenance)
+                    self._loaded_library = loaded
+                    self._library = loaded.library
+                    self._configure_abi()
+                    _LIBRARY_CACHE[cache_key] = loaded
+                    descriptor = -1
+                else:
+                    self._loaded_library = loaded
+                    self._library = loaded.library
+                    self._configure_abi()
+            if descriptor >= 0:
+                os.close(descriptor)
         except OSError as exc:
-            raise LibraryNotFoundError(f"failed to load clone library {self._path}: {exc}") from exc
+            if descriptor >= 0:
+                os.close(descriptor)
+            raise LibraryNotFoundError(
+                f"failed to load clone library {self._path}: {exc}"
+            ) from exc
         except AttributeError as exc:
-            raise NativeError(f"clone library has an incompatible C ABI: {exc}") from exc
+            if descriptor >= 0:
+                os.close(descriptor)
+            raise NativeError(
+                f"clone library has an incompatible C ABI: {exc}"
+            ) from exc
+        except BaseException:
+            if descriptor >= 0:
+                os.close(descriptor)
+            raise
         self._handle = self._library.irisu_create()
         if not self._handle:
             raise NativeError("native simulator allocation failed")
@@ -443,6 +568,26 @@ class NativeSimulator:
     @property
     def library_path(self) -> str:
         return str(self._path)
+
+    def portable_library_provenance(self) -> dict[str, Any]:
+        """Revalidate the exact shared-library inode retained at load time."""
+
+        with self._lock:
+            self._require_open()
+            loaded = self._loaded_library
+            with _LIBRARY_CACHE_LOCK:
+                current = _capture_descriptor(loaded.descriptor, self._path)
+            expected = loaded.provenance
+            if (
+                current["bytes"] != expected["bytes"]
+                or current["sha256"] != expected["sha256"]
+                or any(
+                    current["file_identity"][key] != expected["file_identity"][key]
+                    for key in ("device", "inode", "mtime_ns")
+                )
+            ):
+                raise NativeError("loaded portable library inode changed")
+            return json.loads(json.dumps(current, sort_keys=True))
 
     @property
     def closed(self) -> bool:
@@ -581,7 +726,9 @@ class NativeSimulator:
     def _error(self, operation: str) -> NativeError:
         handle = getattr(self, "_handle", None)
         raw = self._library.irisu_last_error(handle) if handle else None
-        detail = raw.decode("utf-8", errors="replace") if raw else "unknown native error"
+        detail = (
+            raw.decode("utf-8", errors="replace") if raw else "unknown native error"
+        )
         return NativeError(f"{operation} failed: {detail}")
 
     def _check(self, result: int, operation: str) -> None:
@@ -626,7 +773,10 @@ class NativeSimulator:
         flattened = _flatten_config(config)
         encoded = [key.encode("utf-8") for key, _ in flattened]
         overrides = (_ConfigOverride * len(flattened))(
-            *(_ConfigOverride(key, value) for key, (_, value) in zip(encoded, flattened))
+            *(
+                _ConfigOverride(key, value)
+                for key, (_, value) in zip(encoded, flattened)
+            )
         )
         pointer = overrides if flattened else None
         with self._lock:
@@ -638,10 +788,10 @@ class NativeSimulator:
             self._padded_generation += 1
             return self.config()
 
-    def step(self, action_kind: int, x: float, y: float, wait_ticks: int) -> dict[str, Any]:
-        kind, cursor_x, cursor_y, wait = _native_action(
-            action_kind, x, y, wait_ticks
-        )
+    def step(
+        self, action_kind: int, x: float, y: float, wait_ticks: int
+    ) -> dict[str, Any]:
+        kind, cursor_x, cursor_y, wait = _native_action(action_kind, x, y, wait_ticks)
         with self._lock:
             handle = self._require_open()
             self._check(
@@ -654,9 +804,7 @@ class NativeSimulator:
     def step_padded(
         self, action_kind: int, x: float, y: float, wait_ticks: int
     ) -> tuple[PaddedTransition, PaddedEvents]:
-        kind, cursor_x, cursor_y, wait = _native_action(
-            action_kind, x, y, wait_ticks
-        )
+        kind, cursor_x, cursor_y, wait = _native_action(action_kind, x, y, wait_ticks)
         with self._lock:
             transition = PaddedTransition()
             self._check(
@@ -839,7 +987,9 @@ class NativeSimulator:
     def observation(self) -> dict[str, Any]:
         with self._lock:
             handle = self._require_open()
-            return self._json(self._library.irisu_observation_json(handle), "observation")
+            return self._json(
+                self._library.irisu_observation_json(handle), "observation"
+            )
 
     def observation_padded(self) -> PaddedObservation:
         with self._lock:
@@ -931,11 +1081,15 @@ class NativeSimulator:
         self.close()
 
     def __copy__(self) -> NativeSimulator:
-        raise TypeError("NativeSimulator owns a unique native handle and cannot be copied")
+        raise TypeError(
+            "NativeSimulator owns a unique native handle and cannot be copied"
+        )
 
     def __deepcopy__(self, memo: dict[int, object]) -> NativeSimulator:
         del memo
-        raise TypeError("NativeSimulator owns a unique native handle and cannot be copied")
+        raise TypeError(
+            "NativeSimulator owns a unique native handle and cannot be copied"
+        )
 
     def __del__(self) -> None:
         try:
