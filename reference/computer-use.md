@@ -17,6 +17,18 @@ If `session_status` reports `native_plugin_loaded: false` while all native build
 7. Send one causal action or deliberately specified short sequence, then recapture and verify the result. Start a new setup with a harmless capture and single-input smoke test.
 8. Renew the claim before it expires. Release it in cleanup even after an error.
 
+The R4a live gameplay executor additionally requires a provider operation that
+can target and timestamp explicit button down, button up, and release-all on the
+claimed window, enforce a caller-supplied automatic-release deadline
+independently of the calling thread, and neutralize buttons on claim release or
+expiry. At implementation time the installed `targeted_pointer_click`
+operation was atomic and did not expose that contract. It remains suitable for
+a deliberately labeled harmless broker smoke, but must not be treated as a
+measured gameplay press/release or used to enable live policy input. Re-check
+current provider capabilities each turn; if any targeted-edge or broker release
+guarantee is absent, keep gameplay input fail-closed. Do not bypass this requirement with
+PyAutoGUI, raw `xdotool`, a drag disguised as a click, or global input.
+
 Do not inspect or control unrelated windows. Do not share fencing or lease tokens in logs. Do not use the headless coordinate lease unless normal exact capture plus targeted input has failed; that fallback temporarily takes global focus and requires the tool's explicit interference acknowledgment. Never drive global physical input as a shortcut.
 
 Native injection will refuse unsafe conditions such as a locked session, held pointer buttons, an active pointer constraint or lock, or drag-and-drop. If safety changes, stop the probe, preserve the partial artifacts, and retry only after `session_status` becomes safe. The physical pointer seat is not independent even though ordinary targeted actions preserve the physical cursor, keyboard focus, and workspace.

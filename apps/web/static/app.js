@@ -1,5 +1,5 @@
 import {BrowserGame} from "./wasm-runtime.js";
-import {colorFor} from "./colors.mjs";
+import {activatedBlockBlurFor, colorFor} from "./colors.mjs";
 
 const canvas = document.querySelector("#game");
 const ctx = canvas.getContext("2d");
@@ -103,6 +103,11 @@ function drawBody(body, now) {
   ctx.rotate(body.angle || 0);
   ctx.globalAlpha = body.lifecycle === "scripted_falling" ? .62 : 1;
   bodyPath(body, size);
+  const blur = activatedBlockBlurFor(body);
+  if (blur) {
+    ctx.shadowColor = color;
+    ctx.shadowBlur = blur;
+  }
   ctx.fillStyle = color;
   ctx.fill();
 

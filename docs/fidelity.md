@@ -498,6 +498,18 @@ Still not claimed:
 - statistically validated original-game spawn/difficulty distributions;
 - correctness of deprecated compatibility knobs as original mechanics.
 
+The R4a harness foundation now validates exact claimed-window identities,
+completed-frame ordering, affine crop/input geometry, causal cadence/phase
+posteriors, broker-deadlined targeted down/up cleanup, and aggregate soak evidence with
+deterministic fixtures. This is implementation evidence, not a live-game
+measurement. `configs/rl/actions/deployment-v1.toml` intentionally removes
+numeric zero placeholders for capture/effect timing, remains
+`provisional_unmeasured`, and disables live deployment until complete measured
+evidence is finalized. The currently inspected same-session atomic-click
+surface cannot establish an independently timed press/release macro or
+broker-enforced release guarantee; R4a does
+not substitute global input or fabricate a hold duration.
+
 Long-horizon replay disagreement in the portable backend remains useful
 diagnostic evidence, but the exact-forward comparisons show that it is an
 engine-integration issue rather than uncertainty in score arithmetic.

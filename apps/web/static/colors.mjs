@@ -15,12 +15,20 @@ export const bonusPalette = [
 
 export const bonusColorIntervalMs = 400;
 
+function isActivatedBlock(body) {
+  return body.kind === "piece" &&
+    (body.lifecycle === "dynamic_fresh" || body.lifecycle === "confirmed");
+}
+
+export function activatedBlockBlurFor(body) {
+  return body.kind === "piece" && body.lifecycle === "confirmed" ? 10 : 0;
+}
+
 export function colorFor(body, now = 0) {
   if (body.kind === "projectile") return "#d9dcda";
   if (body.kind === "bonus") {
     return bonusPalette[Math.floor(now / bonusColorIntervalMs) % bonusPalette.length];
   }
   const index = ((body.color % palette.length) + palette.length) % palette.length;
-  const active = body.lifecycle === "dynamic_fresh" || body.lifecycle === "confirmed";
-  return (active ? activatedPalette : palette)[index];
+  return (isActivatedBlock(body) ? activatedPalette : palette)[index];
 }
