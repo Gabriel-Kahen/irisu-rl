@@ -379,7 +379,9 @@ def replay_snapshot_recipe(
     observation = reset_result[0] if isinstance(reset_result, tuple) else reset_result
     if int(simulator.config_hash()) != recipe.config_hash:
         raise ValueError("snapshot recipe simulator config mismatch")
-    if _canonical_sha256(simulator.config()) != recipe.config_sha256:
+    config = simulator.config
+    config = config() if callable(config) else config
+    if _canonical_sha256(config) != recipe.config_sha256:
         raise ValueError("snapshot recipe canonical config mismatch")
     done = False
     for payload in recipe.semantic_actions_hex:
@@ -391,8 +393,15 @@ def replay_snapshot_recipe(
             primitives.append(action_spec.release())
         for primitive in primitives:
             result = simulator.step(primitive)
-            if not isinstance(result, tuple) or len(result) < 4:
+            if not isinstance(result, tuple) or len(result) != 5:
                 raise TypeError("snapshot replay simulator returned a malformed step")
+            info = result[4]
+            if not isinstance(info, Mapping):
+                raise TypeError(
+                    "snapshot replay simulator returned malformed step info"
+                )
+            if bool(info.get("invalid_action", False)):
+                raise ValueError("snapshot recipe replay produced an invalid action")
             observation = result[0]
             done = bool(result[2]) or bool(result[3])
             if done:

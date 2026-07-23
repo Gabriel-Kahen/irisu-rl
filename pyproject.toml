@@ -10,6 +10,9 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = []
 
+[project.scripts]
+irisu-r3 = "irisu_rl.r3b_cli:main"
+
 [project.optional-dependencies]
 gymnasium = ["gymnasium>=1.0"]
 training = [

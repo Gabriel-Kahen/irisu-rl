@@ -105,6 +105,7 @@ class TailSessionIntegrationTests(unittest.TestCase):
                     11,
                     source.trainer.schedule.completed_updates,
                     source.collector.simulated_ticks,
+                    source.collector.simulated_ticks,
                     "b" * 64,
                     "c" * 64,
                     "a" * 64,

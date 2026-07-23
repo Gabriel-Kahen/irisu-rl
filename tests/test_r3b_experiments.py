@@ -136,6 +136,7 @@ def _phase_suite(
     library: SnapshotLibrary,
     logical: CrossBackendEvaluationManifest,
 ) -> EvaluationSuite:
+    exact = recipe.runtime_identity_sha256 == "6" * 64
     return EvaluationSuite(
         f"{phase}-v1",
         phase,
@@ -144,14 +145,14 @@ def _phase_suite(
         policy_seed,
         1,
         1,
-        "1" * 64,
-        "2" * 64,
+        recipe.runtime_identity_sha256,
+        "7" * 64 if exact else "2" * 64,
         library.sha256,
-        "4" * 64,
+        "8" * 64 if exact else "4" * 64,
         _ACTION_SHA256,
         (recipe.sha256,),
         (logical.pairs[0].logical_cell.sha256,),
-        "portable",
+        "exact" if exact else "portable",
         logical.sha256,
     )
 
@@ -160,35 +161,36 @@ VALIDATION_EVALUATION_SUITE = _phase_suite(
     "validation",
     TEST_PLAN.validation_episodes_per_policy,
     61,
-    _PORTABLE_VALIDATION_RECIPE,
-    _PORTABLE_VALIDATION_LIBRARY,
+    _EXACT_VALIDATION_RECIPE,
+    _EXACT_VALIDATION_LIBRARY,
     VALIDATION_LOGICAL_MANIFEST,
 )
 TEST_EVALUATION_SUITE = _phase_suite(
     "test",
     512,
     71,
-    _PORTABLE_TEST_RECIPE,
-    _PORTABLE_TEST_LIBRARY,
+    _EXACT_TEST_RECIPE,
+    _EXACT_TEST_LIBRARY,
     TEST_LOGICAL_MANIFEST,
 )
-EXACT_TEST_EVALUATION_SUITE = replace(
+PORTABLE_TEST_EVALUATION_SUITE = replace(
     TEST_EVALUATION_SUITE,
-    suite_id="sealed-test-exact-v1",
-    snapshot_ids=(_EXACT_TEST_RECIPE.snapshot_id,),
-    recipe_sha256s=(_EXACT_TEST_RECIPE.sha256,),
-    runtime_identity_sha256="6" * 64,
-    assignment_sha256="7" * 64,
-    library_sha256=_EXACT_TEST_LIBRARY.sha256,
-    snapshot_store_sha256="8" * 64,
-    backend="exact",
+    suite_id="sealed-test-portable-v1",
+    snapshot_ids=(_PORTABLE_TEST_RECIPE.snapshot_id,),
+    recipe_sha256s=(_PORTABLE_TEST_RECIPE.sha256,),
+    runtime_identity_sha256="1" * 64,
+    assignment_sha256="2" * 64,
+    library_sha256=_PORTABLE_TEST_LIBRARY.sha256,
+    snapshot_store_sha256="4" * 64,
+    backend="portable",
 )
+EXACT_TEST_EVALUATION_SUITE = TEST_EVALUATION_SUITE
 CALIBRATION_EVALUATION_SUITE = _phase_suite(
     "calibration",
     10,
     51,
-    _PORTABLE_CALIBRATION_RECIPE,
-    _PORTABLE_CALIBRATION_LIBRARY,
+    _EXACT_CALIBRATION_RECIPE,
+    _EXACT_CALIBRATION_LIBRARY,
     CALIBRATION_LOGICAL_MANIFEST,
 )
 
@@ -202,51 +204,51 @@ def suite_identity(phase: str) -> str:
 
 
 def parity_artifact(
-    portable_suite: EvaluationSuite,
-    portable_report: EvaluationReport,
+    exact_suite: EvaluationSuite,
+    exact_report: EvaluationReport,
     phase: str,
 ) -> LearnedPolicyBackendParityArtifact:
     fixtures = {
         "calibration": (
-            _EXACT_CALIBRATION_RECIPE,
+            _PORTABLE_CALIBRATION_RECIPE,
             _PORTABLE_CALIBRATION_LIBRARY,
             _EXACT_CALIBRATION_LIBRARY,
             CALIBRATION_LOGICAL_MANIFEST,
         ),
         "validation": (
-            _EXACT_VALIDATION_RECIPE,
+            _PORTABLE_VALIDATION_RECIPE,
             _PORTABLE_VALIDATION_LIBRARY,
             _EXACT_VALIDATION_LIBRARY,
             VALIDATION_LOGICAL_MANIFEST,
         ),
         "test": (
-            _EXACT_TEST_RECIPE,
+            _PORTABLE_TEST_RECIPE,
             _PORTABLE_TEST_LIBRARY,
             _EXACT_TEST_LIBRARY,
             TEST_LOGICAL_MANIFEST,
         ),
     }
-    exact_recipe, portable_library, exact_library, logical_manifest = fixtures[phase]
-    exact_suite = replace(
-        portable_suite,
-        suite_id=f"{phase}-exact-v1",
-        snapshot_ids=(exact_recipe.snapshot_id,),
-        recipe_sha256s=(exact_recipe.sha256,),
-        runtime_identity_sha256="6" * 64,
-        assignment_sha256="7" * 64,
-        library_sha256=exact_library.sha256,
-        snapshot_store_sha256="8" * 64,
-        backend="exact",
+    portable_recipe, portable_library, exact_library, logical_manifest = fixtures[phase]
+    portable_suite = replace(
+        exact_suite,
+        suite_id=f"{phase}-portable-v1",
+        snapshot_ids=(portable_recipe.snapshot_id,),
+        recipe_sha256s=(portable_recipe.sha256,),
+        runtime_identity_sha256="1" * 64,
+        assignment_sha256="2" * 64,
+        library_sha256=portable_library.sha256,
+        snapshot_store_sha256="4" * 64,
+        backend="portable",
     )
-    exact_report = EvaluationReport(
-        exact_suite.sha256,
-        portable_report.policy_sha256,
-        portable_report.evaluator_sha256,
-        exact_suite.runtime_identity_sha256,
-        hashlib.sha256(f"{portable_report.sha256}:exact".encode()).hexdigest(),
+    portable_report = EvaluationReport(
+        portable_suite.sha256,
+        exact_report.policy_sha256,
+        exact_report.evaluator_sha256,
+        portable_suite.runtime_identity_sha256,
+        hashlib.sha256(f"{exact_report.sha256}:portable".encode()).hexdigest(),
         tuple(
-            replace(episode, snapshot_id=exact_recipe.snapshot_id)
-            for episode in portable_report.episodes
+            replace(episode, snapshot_id=portable_recipe.snapshot_id)
+            for episode in exact_report.episodes
         ),
     )
     return LearnedPolicyBackendParityArtifact(
@@ -330,6 +332,7 @@ def outcomes(
                 seed,
                 tick_index * TEST_PLAN.checkpoint_interval_updates,
                 tick,
+                tick,
                 PLAN_SHA256,
                 identity(seed, f"job:{arm_id}"),
                 identity(seed, "trial-manifest"),
@@ -351,7 +354,9 @@ def outcomes(
                     ),
                 )
             )
-        return RawScoreMetricsArtifact(seed, suite, tuple(reports))
+        return RawScoreMetricsArtifact(
+            seed, suite, suite, tuple(reports), reports[-1].report
+        )
 
     values = []
     for seed in seeds:
@@ -487,9 +492,9 @@ def valid_baseline_artifacts(
 ) -> tuple[BaselineArtifactBundle, ...]:
     episodes = tuple(
         EpisodeMetrics(
-            "test-snapshot",
+            "exact-test-snapshot",
             repetition,
-            TEST_EVALUATION_SUITE.episode_seed("test-snapshot", repetition),
+            TEST_EVALUATION_SUITE.episode_seed("exact-test-snapshot", repetition),
             0,
             raw_score,
             raw_score,
@@ -507,37 +512,40 @@ def valid_baseline_artifacts(
     for baseline_id in plan.required_baselines:
         baseline = ScriptedBaselineSpec(baseline_id)
 
-        def report(execution_domain: str) -> EvaluationReport:
+        def portable_report(execution_domain: str) -> EvaluationReport:
             return EvaluationReport(
-                TEST_EVALUATION_SUITE.sha256,
+                PORTABLE_TEST_EVALUATION_SUITE.sha256,
                 baseline.sha256,
                 "e" * 64,
-                TEST_EVALUATION_SUITE.runtime_identity_sha256,
+                PORTABLE_TEST_EVALUATION_SUITE.runtime_identity_sha256,
+                hashlib.sha256(
+                    f"{baseline_id}:{execution_domain}".encode()
+                ).hexdigest(),
+                tuple(
+                    replace(value, snapshot_id="test-snapshot") for value in episodes
+                ),
+            )
+
+        def exact_report(execution_domain: str) -> EvaluationReport:
+            return EvaluationReport(
+                EXACT_TEST_EVALUATION_SUITE.sha256,
+                baseline.sha256,
+                "e" * 64,
+                EXACT_TEST_EVALUATION_SUITE.runtime_identity_sha256,
                 hashlib.sha256(
                     f"{baseline_id}:{execution_domain}".encode()
                 ).hexdigest(),
                 episodes,
             )
 
-        exact_report = EvaluationReport(
-            EXACT_TEST_EVALUATION_SUITE.sha256,
-            baseline.sha256,
-            "e" * 64,
-            EXACT_TEST_EVALUATION_SUITE.runtime_identity_sha256,
-            hashlib.sha256(f"{baseline_id}:exact".encode()).hexdigest(),
-            tuple(
-                replace(value, snapshot_id="exact-test-snapshot") for value in episodes
-            ),
-        )
-
         bundles.append(
             BaselineArtifactBundle(
                 baseline,
-                TEST_EVALUATION_SUITE,
-                report("primary"),
-                report("replay"),
                 EXACT_TEST_EVALUATION_SUITE,
-                exact_report,
+                exact_report("exact-primary"),
+                exact_report("exact-replay"),
+                PORTABLE_TEST_EVALUATION_SUITE,
+                portable_report("portable-diagnostic"),
                 TEST_LOGICAL_MANIFEST,
                 _PORTABLE_TEST_LIBRARY,
                 _EXACT_TEST_LIBRARY,
@@ -678,7 +686,7 @@ class R3BExperimentPlanTests(unittest.TestCase):
         self.assertEqual(self.plan.sha256, load_plan(PLAN_PATH).sha256)
         self.assertEqual(
             self.plan.tick_grid(100),
-            (0, 1_638_400, 3_276_800),
+            (0, 102_400, 204_800),
         )
 
     def test_plan_parser_rejects_unknown_fields_and_weak_tail(self) -> None:
@@ -698,10 +706,12 @@ class R3BExperimentPlanTests(unittest.TestCase):
                 test_updates=999,
             )
 
-    def test_auc_requires_exact_tick_alignment(self) -> None:
+    def test_auc_interpolates_observed_overshoot_to_target_grid(self) -> None:
         points = (CurvePoint(0, 0), CurvePoint(10, 10), CurvePoint(20, 30))
         self.assertEqual(tick_aligned_raw_score_auc(points, (0, 10, 20)), 12.5)
-        with self.assertRaisesRegex(ValueError, "exactly match"):
+        overshot = (CurvePoint(0, 0), CurvePoint(12, 12), CurvePoint(24, 36))
+        self.assertEqual(tick_aligned_raw_score_auc(overshot, (0, 10, 20)), 12.0)
+        with self.assertRaisesRegex(ValueError, "bracketed"):
             tick_aligned_raw_score_auc(points, (0, 10, 30))
 
     def test_outcome_aggregates_are_derived_from_typed_reports(self) -> None:
@@ -728,8 +738,11 @@ class R3BExperimentPlanTests(unittest.TestCase):
             )
             for checkpoint in artifact.checkpoints
         )
-        with self.assertRaisesRegex(ValueError, "reused an artifact"):
-            replace(artifact, checkpoints=reused)
+        plateau = replace(artifact, checkpoints=reused)
+        self.assertEqual(
+            {checkpoint.report.sha256 for checkpoint in plateau.checkpoints},
+            {artifact.final_report.sha256},
+        )
 
     def test_calibration_selects_one_lr_per_alpha_with_stable_ties(self) -> None:
         results: list[ArmPhaseResult] = []
@@ -1116,7 +1129,6 @@ class R3BExperimentPlanTests(unittest.TestCase):
             first.ppo_minibatching,
             first.assignment,
             first.session_numpy,
-            first.evaluation,
         )
         self.assertEqual(len(streams), len(set(streams)))
 
@@ -1232,6 +1244,29 @@ class R3BExperimentPlanTests(unittest.TestCase):
                     alternate,
                 )
 
+            baseline_lease = ledger.claim_baseline_batch(first)
+            resumed_baseline_lease = SealedTestLedger(path).resume_baseline_batch(
+                first, lease_token=baseline_lease.lease_token
+            )
+            self.assertEqual(resumed_baseline_lease, baseline_lease)
+            with self.assertRaisesRegex(RuntimeError, "recovery token"):
+                ledger.resume_baseline_batch(first, lease_token="f" * 64)
+            ledger.begin_baseline_batch(baseline_lease)
+            with self.assertRaisesRegex(RuntimeError, "recovery token"):
+                ledger.resume_baseline_batch(
+                    first, lease_token=baseline_lease.lease_token
+                )
+            baseline_artifacts = valid_baseline_artifacts(self.plan)
+            evidence = ledger.complete_baseline_batch(
+                baseline_lease, baseline_artifacts
+            )
+            self.assertEqual(
+                tuple(item.baseline_id for item in evidence),
+                self.plan.required_baselines,
+            )
+            with self.assertRaisesRegex(RuntimeError, "already claimed"):
+                ledger.claim_baseline_batch(first)
+
             candidate_result = phase_result(
                 candidate,
                 "test",
@@ -1302,11 +1337,18 @@ class R3BExperimentPlanTests(unittest.TestCase):
                 control_result,
                 outcomes=tuple(recorded_outcomes[control.arm_id]),
             )
+            with self.assertRaisesRegex(ValueError, "differs"):
+                ledger.finalize_once(
+                    first,
+                    candidate_result,
+                    control_result,
+                    valid_baseline_artifacts(self.plan, raw_score=26),
+                )
             report = ledger.finalize_once(
                 first,
                 candidate_result,
                 control_result,
-                valid_baseline_artifacts(self.plan),
+                baseline_artifacts,
             )
             self.assertTrue(ledger.verify_finalized(report))
             with self.assertRaisesRegex(RuntimeError, "receipt is not active"):

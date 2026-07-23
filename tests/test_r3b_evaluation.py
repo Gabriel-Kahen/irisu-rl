@@ -19,6 +19,7 @@ from irisu_rl.r3b_evaluation import (
     DeploymentPolicyIdentity,
     EvaluationReport,
     EvaluationSuite,
+    LearnedPolicyBackendParityArtifact,
     ScriptedBaselineSpec,
     RecurrentSemanticPolicy,
     behavior_build_identity_manifest,
@@ -88,6 +89,25 @@ class FakeSingleSimulator:
         self.gauge = max(0, self.gauge - int(delta))
         self.hash += int(delta)
         return self._observation(), int(delta), False, False, {"invalid_action": False}
+
+
+class FakeTerminalUnderflowSimulator(FakeSingleSimulator):
+    def restore_state(self, snapshot: bytes):
+        self.steps = 0
+        return super().restore_state(snapshot)
+
+    def step(self, action: Action):
+        self.steps += 1
+        self.tick += 1
+        self.score += 1
+        self.gauge = -48 if self.steps == 1 else 1
+        return (
+            self._observation(),
+            1,
+            self.steps == 2,
+            False,
+            {"invalid_action": False},
+        )
 
 
 class ConfiguredTeacherEncoder(TeacherStateEncoder):
@@ -194,11 +214,15 @@ class R3BEvaluationTests(unittest.TestCase):
             portable_recipe,
             snapshot_id="exact-validation",
             environment_pool="exact-validation",
+            expected_state_hash=portable_recipe.expected_state_hash + 1,
             snapshot_sha256="c" * 64,
             runtime_identity_sha256="b" * 64,
         )
         logical_manifest = CrossBackendEvaluationManifest(
             (CrossBackendCellPair.from_recipes(portable_recipe, exact_recipe),)
+        )
+        self.assertNotEqual(
+            portable_recipe.expected_state_hash, exact_recipe.expected_state_hash
         )
         exact_library = SnapshotLibrary((exact_recipe,))
         logical_ids = tuple(pair.logical_cell.sha256 for pair in logical_manifest.pairs)
@@ -231,6 +255,10 @@ class R3BEvaluationTests(unittest.TestCase):
             expected_assignment_sha256=spec.assignment_sha256,
             **evaluation_identity(execution="d"),
         )
+        self.assertEqual(
+            report.episode_content_sha256,
+            replay.episode_content_sha256,
+        )
         exact_suite = replace(
             suite,
             suite_id="validation-exact-v1",
@@ -249,17 +277,37 @@ class R3BEvaluationTests(unittest.TestCase):
             exact_suite.runtime_identity_sha256,
             "f" * 64,
             tuple(
-                replace(value, snapshot_id="exact-validation")
+                replace(
+                    value,
+                    snapshot_id="exact-validation",
+                    final_score=value.final_score + 1,
+                    raw_score=value.raw_score + 1,
+                )
                 for value in report.episodes
             ),
         )
-        evidence = build_baseline_evidence(
-            baseline,
+        exact_replay = replace(exact, execution_identity_sha256="a" * 64)
+        parity = LearnedPolicyBackendParityArtifact(
             suite,
             report,
-            replay,
             exact_suite,
             exact,
+            logical_manifest,
+            store.library,
+            exact_library,
+        )
+        self.assertEqual(
+            parity.cross_backend_diagnostics[0]["exact_minus_portable"]["raw_score"],
+            1,
+        )
+        self.assertEqual(parity.version, "r3b-learned-policy-backend-parity-v2")
+        evidence = build_baseline_evidence(
+            baseline,
+            exact_suite,
+            exact,
+            exact_replay,
+            suite,
+            report,
             logical_manifest,
             store.library,
             exact_library,
@@ -282,11 +330,11 @@ class R3BEvaluationTests(unittest.TestCase):
             forged_suite = replace(exact_suite, logical_cell_ids=("forged",))
             build_baseline_evidence(
                 baseline,
-                suite,
-                report,
-                replay,
                 forged_suite,
                 replace(exact, suite_sha256=forged_suite.sha256),
+                replace(exact_replay, suite_sha256=forged_suite.sha256),
+                suite,
+                report,
                 logical_manifest,
                 store.library,
                 exact_library,
@@ -328,11 +376,11 @@ class R3BEvaluationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "shared recipe provenance"):
             build_baseline_evidence(
                 baseline,
-                forged_portable_suite,
-                replace(report, suite_sha256=forged_portable_suite.sha256),
-                replace(replay, suite_sha256=forged_portable_suite.sha256),
                 forged_exact_suite,
                 replace(exact, suite_sha256=forged_exact_suite.sha256),
+                replace(exact_replay, suite_sha256=forged_exact_suite.sha256),
+                forged_portable_suite,
+                replace(report, suite_sha256=forged_portable_suite.sha256),
                 forged_manifest,
                 store.library,
                 exact_library,
@@ -542,6 +590,51 @@ class R3BEvaluationTests(unittest.TestCase):
         )
         self.assertEqual(report.episodes[0].elapsed_ticks, 3)
         self.assertEqual(report.episodes[0].raw_score, 3)
+
+    def test_terminal_underflow_is_preserved_as_signed_minimum_gauge(self) -> None:
+        torch.manual_seed(41)
+        model = RecurrentActorCritic(
+            TEACHER_V1,
+            config=RecurrentModelConfig(8, 8, 12, 12, 1),
+        )
+        spec, blobs = _fixture()
+        store = SnapshotBlobStore(spec.library, blobs)
+        suite = EvaluationSuite(
+            "terminal-underflow-v1",
+            "validation",
+            ("validation",),
+            1,
+            41,
+            4,
+            4,
+            _RUNTIME_SHA256,
+            spec.assignment_sha256,
+            store.library.sha256,
+            store.sha256,
+            model.action_spec.sha256,
+            (spec.library["validation"].sha256,),
+        )
+        kind_mask = torch.zeros((1, 3), dtype=torch.bool)
+        kind_mask[:, 1] = True
+        wait_mask = torch.ones(
+            (1, len(model.action_spec.wait_choices)), dtype=torch.bool
+        )
+        report = evaluate_recurrent_policy(
+            FakeTerminalUnderflowSimulator(),
+            store,
+            suite,
+            model,
+            TeacherStateEncoder(),
+            kind_mask,
+            wait_mask,
+            evaluator_sha256="e" * 64,
+            expected_assignment_sha256=spec.assignment_sha256,
+            **evaluation_identity(),
+        )
+        episode = report.episodes[0]
+        self.assertTrue(episode.terminated)
+        self.assertEqual(episode.minimum_gauge, -48)
+        self.assertEqual(episode.final_gauge, 1)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,34 @@
+version = "r3b-snapshot-source-plan-v1"
+plan_id = "r3b-source-v1"
+master_seed = 2026072201
+stage_id = "full-game"
+max_wait_ticks = 12
+action_spec_sha256 = "8a56771aaa174d0eca7e0ebab21f3148417aa6f40e693e50524cdc17a5a5437d"
+
+[backends]
+portable_environment_pool = "r3b-portable-v1"
+exact_environment_pool = "r3b-exact-v1"
+
+[splits.train]
+count = 64
+trace_actions_min = 4
+trace_actions_max = 24
+scenario_family_namespace = "r3b-train-v1"
+
+[splits.calibration]
+count = 64
+trace_actions_min = 8
+trace_actions_max = 24
+scenario_family_namespace = "r3b-calibration-v1"
+
+[splits.validation]
+count = 512
+trace_actions_min = 8
+trace_actions_max = 24
+scenario_family_namespace = "r3b-validation-v1"
+
+[splits.test]
+count = 512
+trace_actions_min = 8
+trace_actions_max = 24
+scenario_family_namespace = "r3b-test-v1"

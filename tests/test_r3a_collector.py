@@ -6,7 +6,7 @@ import unittest
 
 import torch
 
-from irisu_rl.actions import ActionSpec, SemanticAction
+from irisu_rl.actions import ActionSpec
 from irisu_rl.collector import (
     CollectorConfig,
     CurriculumTaskContract,
@@ -28,8 +28,6 @@ from irisu_rl.ppo import PPOConfig, PPOTrainer
 from irisu_rl.rewards import (
     LinearGaugePotential,
     RewardComposer,
-    RewardKnot,
-    RewardSchedule,
 )
 from irisu_rl.schema import TEACHER_V1
 from irisu_rl.torch_distribution import TorchConditionalActionDistribution
@@ -170,9 +168,7 @@ class MixedGaugeResetVector(FakeActiveVector):
     """Gauge-changing lanes with lane zero ending on each semantic wait."""
 
     def _step(self, indices, actions):
-        output, rewards, terminated, truncated, infos = super()._step(
-            indices, actions
-        )
+        output, rewards, terminated, truncated, infos = super()._step(indices, actions)
         for offset, lane in enumerate(indices):
             output[offset].gauge = max(1, 100 - self.ticks[lane] * (lane + 1))
             if lane == 0:
@@ -189,6 +185,72 @@ class WeakOnlyTask(ScoreTaskContract):
             (self.lanes, len(action_spec.wait_choices)), dtype=torch.bool
         )
         return kind, wait
+
+
+class WaitOnlyTask(ScoreTaskContract):
+    def action_masks(self, action_spec: ActionSpec):
+        kind = torch.zeros((self.lanes, 3), dtype=torch.bool)
+        kind[:, 0] = True
+        wait = torch.ones((self.lanes, len(action_spec.wait_choices)), dtype=torch.bool)
+        return kind, wait
+
+
+class DeterministicWaitModel(RecurrentActorCritic):
+    def __init__(self, *, prefer_long: bool) -> None:
+        super().__init__(
+            TEACHER_V1,
+            config=RecurrentModelConfig(8, 8, 12, 12, 1),
+        )
+        self.prefer_long = prefer_long
+
+    def forward(
+        self,
+        global_features,
+        body_features,
+        body_mask,
+        recurrent_state,
+        *,
+        reset_before=None,
+    ):
+        time, batch, _ = global_features.shape
+        device = global_features.device
+        direction = 1.0 if self.prefer_long else -1.0
+        waits = (
+            torch.arange(
+                len(self.action_spec.wait_choices),
+                dtype=torch.float32,
+                device=device,
+            )
+            * direction
+        ).expand(time, batch, -1)
+        kind = torch.full((time, batch, 3), -100.0, device=device)
+        kind[..., 0] = 100.0
+        concentration = torch.full((time, batch, 2, 2), 2.0, device=device)
+        return PolicyValueOutput(
+            kind,
+            waits,
+            concentration,
+            concentration,
+            torch.zeros((time, batch), device=device),
+            recurrent_state,
+        )
+
+
+class BudgetVector(FakeActiveVector):
+    def _step(self, indices, actions):
+        output, rewards, terminated, truncated, infos = [], [], [], [], []
+        self.calls.append(
+            (tuple(indices), tuple(int(action.kind) for action in actions))
+        )
+        for lane, action in zip(indices, actions):
+            delta = action.wait_ticks if int(action.kind) == 0 else 1
+            self.ticks[lane] += delta
+            output.append(observation(self.ticks[lane]))
+            rewards.append(delta)
+            terminated.append(False)
+            truncated.append(False)
+            infos.append({"events": (), "invalid_action": False, "config_hash": 99})
+        return output, rewards, terminated, truncated, infos
 
 
 def make_collector(model, env, *, decisions: int, sampler_seed: int = 13):
@@ -211,9 +273,7 @@ class R3ACollectorTests(unittest.TestCase):
         composer = RewardComposer(shaping_spec=LinearGaugePotential())
         coordinator = CurriculumCoordinator(base, 4, learner_seed=19)
         task = CurriculumTaskContract(coordinator, composer, capture_events=False)
-        adapter = MacroVectorAdapter(
-            FakeActiveVector(), encoder=TeacherStateEncoder()
-        )
+        adapter = MacroVectorAdapter(FakeActiveVector(), encoder=TeacherStateEncoder())
         with self.assertRaisesRegex(ValueError, "critic-condition width"):
             RecurrentCollector(
                 small_model(),
@@ -224,9 +284,7 @@ class R3ACollectorTests(unittest.TestCase):
 
         conditioned = RecurrentActorCritic(
             TEACHER_V1,
-            config=RecurrentModelConfig(
-                8, 8, 12, 12, 1, critic_condition_features=1
-            ),
+            config=RecurrentModelConfig(8, 8, 12, 12, 1, critic_condition_features=1),
         )
         RecurrentCollector(
             conditioned,
@@ -275,9 +333,7 @@ class R3ACollectorTests(unittest.TestCase):
         )
         model = RecurrentActorCritic(
             TEACHER_V1,
-            config=RecurrentModelConfig(
-                8, 8, 12, 12, 1, critic_condition_features=1
-            ),
+            config=RecurrentModelConfig(8, 8, 12, 12, 1, critic_condition_features=1),
         )
         collector = RecurrentCollector(
             model,
@@ -304,9 +360,7 @@ class R3ACollectorTests(unittest.TestCase):
         )
         model = RecurrentActorCritic(
             TEACHER_V1,
-            config=RecurrentModelConfig(
-                8, 8, 12, 12, 1, critic_condition_features=1
-            ),
+            config=RecurrentModelConfig(8, 8, 12, 12, 1, critic_condition_features=1),
         )
         collector = RecurrentCollector(
             model,
@@ -336,15 +390,11 @@ class R3ACollectorTests(unittest.TestCase):
         )
         model = RecurrentActorCritic(
             TEACHER_V1,
-            config=RecurrentModelConfig(
-                8, 8, 12, 12, 1, critic_condition_features=1
-            ),
+            config=RecurrentModelConfig(8, 8, 12, 12, 1, critic_condition_features=1),
         )
         collector = RecurrentCollector(
             model,
-            MacroVectorAdapter(
-                MixedGaugeResetVector(), encoder=TeacherStateEncoder()
-            ),
+            MacroVectorAdapter(MixedGaugeResetVector(), encoder=TeacherStateEncoder()),
             task,
             config=CollectorConfig(max_decisions=2),
             policy_sampler_seed=7,
@@ -374,9 +424,7 @@ class R3ACollectorTests(unittest.TestCase):
         )
         trainer = PPOTrainer(
             model,
-            config=PPOConfig(
-                epochs=1, lane_minibatch_size=4, target_kl=1.0
-            ),
+            config=PPOConfig(epochs=1, lane_minibatch_size=4, target_kl=1.0),
             total_updates=1,
             sampler_seed=11,
         )
@@ -603,7 +651,7 @@ class R3ACollectorTests(unittest.TestCase):
         self.assertIsNotNone(trained.optimizer)
         self.assertEqual(trainer.schedule.completed_updates, 1)
 
-    def test_tick_budget_stops_only_after_a_complete_synchronous_row(self) -> None:
+    def test_tick_budget_rejects_a_task_without_a_bounded_action(self) -> None:
         model = small_model()
         adapter = MacroVectorAdapter(FakeActiveVector(), encoder=TeacherStateEncoder())
         collector = RecurrentCollector(
@@ -616,11 +664,48 @@ class R3ACollectorTests(unittest.TestCase):
             policy_sampler_seed=5,
         )
         collector.initialize()
+        with self.assertRaisesRegex(ValueError, "no legal action"):
+            collector.collect()
+
+    def test_tick_budget_masks_long_waits_and_reaches_target_at_capacity(self) -> None:
+        for prefer_long in (False, True):
+            collector = RecurrentCollector(
+                DeterministicWaitModel(prefer_long=prefer_long),
+                MacroVectorAdapter(BudgetVector(), encoder=TeacherStateEncoder()),
+                WaitOnlyTask(4),
+                config=CollectorConfig(
+                    max_decisions=16,
+                    target_simulated_ticks=64,
+                    lambda_tick=0.9,
+                ),
+                policy_sampler_seed=5,
+            )
+            collector.initialize()
+            result = collector.collect()
+            self.assertGreaterEqual(result.audit.simulated_ticks, 64)
+            self.assertLess(result.audit.simulated_ticks - 64, 4)
+            self.assertLessEqual(result.audit.decision_rows, 16)
+
+    def test_tick_budget_handles_remaining_less_than_lane_count(self) -> None:
+        collector = RecurrentCollector(
+            DeterministicWaitModel(prefer_long=True),
+            MacroVectorAdapter(BudgetVector(), encoder=TeacherStateEncoder()),
+            WaitOnlyTask(4),
+            config=CollectorConfig(
+                max_decisions=18,
+                target_simulated_ticks=70,
+                lambda_tick=0.9,
+            ),
+            policy_sampler_seed=5,
+        )
+        collector.initialize()
         result = collector.collect()
-        self.assertEqual(result.audit.decision_rows, 1)
-        self.assertEqual(result.audit.simulated_ticks, 12)
-        self.assertEqual(result.audit.tick_target_overshoot, 2)
-        self.assertEqual(result.audit.transitions, 4)
+        self.assertEqual(result.audit.simulated_ticks, 71)
+        self.assertEqual(result.audit.tick_target_overshoot, 1)
+        self.assertEqual(
+            result.audit.decisions[-1].elapsed_ticks,
+            (1, 1, 1, 1),
+        )
 
     def test_policy_sampler_does_not_change_global_torch_rng(self) -> None:
         torch.manual_seed(29)

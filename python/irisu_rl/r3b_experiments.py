@@ -10,15 +10,17 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
 import random
 import secrets
 import sqlite3
+import stat
 import statistics
 import tomllib
 from contextlib import closing
 from dataclasses import InitVar, asdict, dataclass
 from pathlib import Path
-from typing import Mapping, Sequence
+from typing import Callable, Mapping, Sequence
 
 
 _RESULT_STATUSES = frozenset(
@@ -26,6 +28,20 @@ _RESULT_STATUSES = frozenset(
 )
 _PHASES = frozenset({"calibration", "validation", "test"})
 _EXACT_RESUME_VERIFICATION_TOKEN = object()
+_COMMITTED_BASELINE_EVIDENCE_TOKEN = object()
+_SEALED_AUTHORIZATION_KIND = "irisu.r3b.sealed-test-run-authorization"
+_SEALED_BASELINE_EVIDENCE_KIND = "irisu.r3b.sealed-baseline-evidence"
+_SEALED_OUTCOME_REFERENCE_KIND = "irisu.r3b.sealed-learner-outcome-reference"
+_SEALED_CONFIRMATION_KIND = "irisu.r3b.sealed-confirmation-report"
+_CONFIRMATION_GATE_ORDER = (
+    "complete_exact_test_results",
+    "engineering_audits",
+    "required_baselines",
+    "relative_auc_gain_lcb",
+    "final_mean_retention_lcb",
+    "p10_noninferiority_lcb",
+    "trivial_baseline_margin_lcb",
+)
 
 
 def _canonical_sha256(value: object) -> str:
@@ -44,17 +60,82 @@ def _is_nonzero_sha256(value: object) -> bool:
     )
 
 
+def _bearer_sha256(token: str) -> str:
+    if not _is_nonzero_sha256(token):
+        raise ValueError("bearer token must be a nonzero lowercase SHA-256 value")
+    return hashlib.sha256(token.encode()).hexdigest()
+
+
+def _assert_private_ledger_path(path: Path) -> None:
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError as exc:
+        raise RuntimeError("sealed-test ledger is missing") from exc
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or stat.S_ISLNK(metadata.st_mode)
+        or metadata.st_uid != os.geteuid()
+        or stat.S_IMODE(metadata.st_mode) != 0o600
+        or metadata.st_nlink != 1
+    ):
+        raise RuntimeError(
+            "sealed-test ledger must be an owned, private, singly-linked regular file"
+        )
+
+
+def _connect_private_ledger(path: str | Path) -> sqlite3.Connection:
+    ledger = Path(path)
+    _assert_private_ledger_path(ledger)
+    before = ledger.stat()
+    connection = sqlite3.connect(ledger, timeout=30.0)
+    after = ledger.stat()
+    if (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino):
+        connection.close()
+        raise RuntimeError("sealed-test ledger changed while opening")
+    connection.execute("PRAGMA foreign_keys=ON")
+    check = connection.execute("PRAGMA quick_check").fetchone()
+    if check != ("ok",):
+        connection.close()
+        raise RuntimeError("sealed-test ledger integrity check failed")
+    return connection
+
+
 def _require_keys(
     value: object, expected: set[str], *, location: str
 ) -> Mapping[str, object]:
-    if not isinstance(value, Mapping):
-        raise ValueError(f"{location} must be a table")
+    if not isinstance(value, Mapping) or any(type(key) is not str for key in value):
+        raise ValueError(f"{location} must be a string-keyed table")
     actual = set(value)
     if actual != expected:
         missing = sorted(expected - actual)
         extra = sorted(actual - expected)
         raise ValueError(f"{location} keys differ: missing={missing}, extra={extra}")
     return value
+
+
+def _manifest_list(value: object, *, location: str) -> list[object]:
+    if type(value) is not list:
+        raise ValueError(f"{location} must be an array")
+    return value
+
+
+def _require_manifest_round_trip(
+    original: Mapping[str, object],
+    reconstructed: Mapping[str, object],
+    *,
+    location: str,
+) -> None:
+    try:
+        left = json.dumps(
+            original, sort_keys=True, separators=(",", ":"), allow_nan=False
+        )
+        right = json.dumps(
+            reconstructed, sort_keys=True, separators=(",", ":"), allow_nan=False
+        )
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{location} must be finite JSON") from exc
+    if left != right:
+        raise ValueError(f"{location} is not a canonical serialization")
 
 
 def _positive_int(value: object, *, name: str) -> int:
@@ -139,6 +220,31 @@ class CandidateArm:
             "learning_rate": self.learning_rate,
         }
 
+    @classmethod
+    def from_manifest(cls, value: object) -> CandidateArm:
+        manifest = _require_keys(
+            value,
+            {"arm_id", "alpha_weight_ppm", "learning_rate"},
+            location="candidate arm",
+        )
+        if (
+            type(manifest["arm_id"]) is not str
+            or type(manifest["alpha_weight_ppm"]) is not int
+            or type(manifest["learning_rate"]) is not float
+        ):
+            raise ValueError("candidate arm field types are malformed")
+        try:
+            result = cls(
+                manifest["alpha_weight_ppm"],  # type: ignore[arg-type]
+                manifest["learning_rate"],  # type: ignore[arg-type]
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError("candidate arm is malformed") from exc
+        _require_manifest_round_trip(
+            manifest, result.manifest(), location="candidate arm"
+        )
+        return result
+
 
 @dataclass(frozen=True, slots=True)
 class TrialSeedPlan:
@@ -150,7 +256,6 @@ class TrialSeedPlan:
     ppo_minibatching: int
     assignment: int
     session_numpy: int
-    evaluation: int
 
     @classmethod
     def derive(cls, experiment_sha256: str, learner_seed: int) -> TrialSeedPlan:
@@ -181,19 +286,17 @@ class TrialSeedPlan:
             derive("ppo-minibatching"),
             derive("assignment"),
             derive("session-numpy"),
-            derive("evaluation"),
         )
 
     def manifest(self) -> dict[str, int | str]:
         return {
-            "version": "r3b-trial-seed-plan-v1",
+            "version": "r3b-trial-seed-plan-v2",
             "learner_seed": self.learner_seed,
             "model_initialization": self.model_initialization,
             "policy_sampling": self.policy_sampling,
             "ppo_minibatching": self.ppo_minibatching,
             "assignment": self.assignment,
             "session_numpy": self.session_numpy,
-            "evaluation": self.evaluation,
         }
 
     @property
@@ -223,6 +326,9 @@ class R3BExperimentPlan:
     calibration_learner_seeds: tuple[int, ...]
     validation_learner_seeds: tuple[int, ...]
     test_learner_seeds: tuple[int, ...]
+    calibration_evaluation_seed: int
+    validation_evaluation_seed: int
+    test_evaluation_seed: int
     calibration_budgets_updates: tuple[int, ...]
     calibration_elimination_metric: str
     validation_updates: int
@@ -233,6 +339,7 @@ class R3BExperimentPlan:
     test_sealed: bool
     test_reuse_after_rejection: bool
     auc_definition: str
+    maximum_cumulative_tick_overshoot_fraction: float
     bootstrap_unit: str
     bootstrap_samples: int
     bootstrap_seed: int
@@ -316,7 +423,7 @@ class R3BExperimentPlan:
             self.total_updates != 1000
             or self.shaped_updates != 600
             or self.zero_tail_updates != 400
-            or self.ticks_per_update != 32768
+            or self.ticks_per_update != 2048
             or self.checkpoint_interval_updates != 50
             or self.calibration_budgets_updates != (100, 300)
         ):
@@ -372,10 +479,31 @@ class R3BExperimentPlan:
             for seed in all_seeds
         ):
             raise ValueError("learner seeds must be uint64")
+        evaluation_seeds = (
+            self.calibration_evaluation_seed,
+            self.validation_evaluation_seed,
+            self.test_evaluation_seed,
+        )
         if (
-            self.calibration_elimination_metric != "paired_tick_aligned_raw_score_auc"
+            len(set(evaluation_seeds)) != 3
+            or set(evaluation_seeds) & set(all_seeds)
+            or any(
+                isinstance(seed, bool)
+                or not isinstance(seed, int)
+                or not 0 <= seed < 2**64
+                for seed in evaluation_seeds
+            )
+        ):
+            raise ValueError(
+                "phase evaluation seeds must be distinct uint64 values "
+                "disjoint from learner seeds"
+            )
+        if (
+            self.calibration_elimination_metric
+            != "final_rung_paired_tick_aligned_raw_score_auc_no_early_elimination"
             or self.auc_definition
-            != "trapezoid_on_exact_simulated_tick_grid_normalized_by_horizon"
+            != "linear_interpolation_to_target_tick_grid_normalized_by_horizon"
+            or self.maximum_cumulative_tick_overshoot_fraction != 0.01
             or self.bootstrap_unit != "paired_learner_seed"
             or self.validation_selection_data != "fresh_unsealed_validation"
             or not isinstance(self.test_sealed, bool)
@@ -401,6 +529,7 @@ class R3BExperimentPlan:
             "confidence_level": self.confidence_level,
             "final_learning_rate_fraction": self.final_learning_rate_fraction,
             "relative_score_denominator_floor": self.relative_score_denominator_floor,
+            "maximum_cumulative_tick_overshoot_fraction": self.maximum_cumulative_tick_overshoot_fraction,
             "minimum_relative_auc_gain": self.minimum_relative_auc_gain,
             "minimum_final_mean_retention": self.minimum_final_mean_retention,
             "minimum_p10_retention": self.minimum_p10_retention,
@@ -476,6 +605,16 @@ class R3BExperimentPlan:
             update * self.ticks_per_update
             for update in range(0, updates + 1, self.checkpoint_interval_updates)
         )
+
+    def evaluation_seed(self, phase: str) -> int:
+        try:
+            return {
+                "calibration": self.calibration_evaluation_seed,
+                "validation": self.validation_evaluation_seed,
+                "test": self.test_evaluation_seed,
+            }[phase]
+        except KeyError as exc:
+            raise ValueError("unknown evaluation phase") from exc
 
     def trial_jobs(
         self,
@@ -597,6 +736,9 @@ class R3BExperimentPlan:
                 "calibration_learner": list(self.calibration_learner_seeds),
                 "validation_learner": list(self.validation_learner_seeds),
                 "test_learner": list(self.test_learner_seeds),
+                "calibration_evaluation": self.calibration_evaluation_seed,
+                "validation_evaluation": self.validation_evaluation_seed,
+                "test_evaluation": self.test_evaluation_seed,
             },
             "calibration": {
                 "budgets_updates": list(self.calibration_budgets_updates),
@@ -615,6 +757,7 @@ class R3BExperimentPlan:
             },
             "statistics": {
                 "auc": self.auc_definition,
+                "maximum_cumulative_tick_overshoot_fraction": self.maximum_cumulative_tick_overshoot_fraction,
                 "bootstrap_unit": self.bootstrap_unit,
                 "bootstrap_samples": self.bootstrap_samples,
                 "bootstrap_seed": self.bootstrap_seed,
@@ -646,6 +789,19 @@ class R3BExperimentPlan:
     @property
     def sha256(self) -> str:
         return _canonical_sha256(self.manifest())
+
+    @classmethod
+    def from_manifest(cls, value: object) -> R3BExperimentPlan:
+        result = cls.from_mapping(value)
+        manifest = _require_keys(
+            value,
+            set(result.manifest()),
+            location="R3b experiment plan",
+        )
+        _require_manifest_round_trip(
+            manifest, result.manifest(), location="R3b experiment plan"
+        )
+        return result
 
     @classmethod
     def from_mapping(cls, value: object) -> R3BExperimentPlan:
@@ -692,7 +848,14 @@ class R3BExperimentPlan:
         )
         seeds = _require_keys(
             root["seeds"],
-            {"calibration_learner", "validation_learner", "test_learner"},
+            {
+                "calibration_learner",
+                "validation_learner",
+                "test_learner",
+                "calibration_evaluation",
+                "validation_evaluation",
+                "test_evaluation",
+            },
             location="seeds",
         )
         calibration = _require_keys(
@@ -719,6 +882,7 @@ class R3BExperimentPlan:
             root["statistics"],
             {
                 "auc",
+                "maximum_cumulative_tick_overshoot_fraction",
                 "bootstrap_unit",
                 "bootstrap_samples",
                 "bootstrap_seed",
@@ -822,6 +986,15 @@ class R3BExperimentPlan:
                 seeds["validation_learner"], name="validation"
             ),
             test_learner_seeds=_seed_tuple(seeds["test_learner"], name="test"),
+            calibration_evaluation_seed=_positive_int(
+                seeds["calibration_evaluation"], name="calibration evaluation seed"
+            ),
+            validation_evaluation_seed=_positive_int(
+                seeds["validation_evaluation"], name="validation evaluation seed"
+            ),
+            test_evaluation_seed=_positive_int(
+                seeds["test_evaluation"], name="test evaluation seed"
+            ),
             calibration_budgets_updates=integer_tuple(
                 calibration["budgets_updates"], name="calibration budgets"
             ),
@@ -849,6 +1022,10 @@ class R3BExperimentPlan:
             ),
             auc_definition=_nonempty_string(
                 statistics_table["auc"], name="AUC definition"
+            ),
+            maximum_cumulative_tick_overshoot_fraction=_finite_float(
+                statistics_table["maximum_cumulative_tick_overshoot_fraction"],
+                name="maximum cumulative tick overshoot fraction",
             ),
             bootstrap_unit=_nonempty_string(
                 statistics_table["bootstrap_unit"], name="bootstrap unit"
@@ -972,6 +1149,54 @@ class TrialJob:
             "authorization_sha256": self.authorization_sha256,
         }
 
+    @classmethod
+    def from_manifest(cls, value: object) -> TrialJob:
+        manifest = _require_keys(
+            value,
+            {
+                "version",
+                "plan_sha256",
+                "phase",
+                "arm",
+                "learner_seed",
+                "budget_updates",
+                "sealed",
+                "seed_plan_sha256",
+                "authorization_sha256",
+            },
+            location="trial job",
+        )
+        if (
+            any(
+                type(manifest[name]) is not str
+                for name in ("version", "plan_sha256", "phase", "seed_plan_sha256")
+            )
+            or type(manifest["learner_seed"]) is not int
+            or type(manifest["budget_updates"]) is not int
+            or type(manifest["sealed"]) is not bool
+            or (
+                manifest["authorization_sha256"] is not None
+                and type(manifest["authorization_sha256"]) is not str
+            )
+        ):
+            raise ValueError("trial job field types are malformed")
+        try:
+            result = cls(
+                plan_sha256=manifest["plan_sha256"],  # type: ignore[arg-type]
+                phase=manifest["phase"],  # type: ignore[arg-type]
+                arm=CandidateArm.from_manifest(manifest["arm"]),
+                learner_seed=manifest["learner_seed"],  # type: ignore[arg-type]
+                budget_updates=manifest["budget_updates"],  # type: ignore[arg-type]
+                sealed=manifest["sealed"],  # type: ignore[arg-type]
+                seed_plan_sha256=manifest["seed_plan_sha256"],  # type: ignore[arg-type]
+                authorization_sha256=manifest["authorization_sha256"],  # type: ignore[arg-type]
+                version=manifest["version"],  # type: ignore[arg-type]
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError("trial job is malformed") from exc
+        _require_manifest_round_trip(manifest, result.manifest(), location="trial job")
+        return result
+
     @property
     def sha256(self) -> str:
         return _canonical_sha256(self.manifest())
@@ -1011,6 +1236,56 @@ class CalibrationSelectionAuthorization:
             "evaluation_suite_sha256": self.evaluation_suite_sha256,
         }
 
+    @classmethod
+    def from_manifest(cls, value: object) -> CalibrationSelectionAuthorization:
+        manifest = _require_keys(
+            value,
+            {
+                "version",
+                "plan_sha256",
+                "arms",
+                "calibration_results_sha256",
+                "runner_spec_sha256",
+                "evaluation_suite_sha256",
+            },
+            location="calibration-selection authorization",
+        )
+        arms = _manifest_list(
+            manifest["arms"], location="calibration-selection authorization arms"
+        )
+        if any(
+            type(manifest[name]) is not str
+            for name in (
+                "version",
+                "plan_sha256",
+                "calibration_results_sha256",
+                "runner_spec_sha256",
+                "evaluation_suite_sha256",
+            )
+        ):
+            raise ValueError(
+                "calibration-selection authorization field types are malformed"
+            )
+        try:
+            result = cls(
+                plan_sha256=manifest["plan_sha256"],  # type: ignore[arg-type]
+                arms=tuple(CandidateArm.from_manifest(arm) for arm in arms),
+                calibration_results_sha256=manifest["calibration_results_sha256"],  # type: ignore[arg-type]
+                runner_spec_sha256=manifest["runner_spec_sha256"],  # type: ignore[arg-type]
+                evaluation_suite_sha256=manifest["evaluation_suite_sha256"],  # type: ignore[arg-type]
+                version=manifest["version"],  # type: ignore[arg-type]
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "calibration-selection authorization is malformed"
+            ) from exc
+        _require_manifest_round_trip(
+            manifest,
+            result.manifest(),
+            location="calibration-selection authorization",
+        )
+        return result
+
     @property
     def sha256(self) -> str:
         return _canonical_sha256(self.manifest())
@@ -1036,6 +1311,21 @@ class TestSuiteCommitment:
 
     def manifest(self) -> dict[str, object]:
         return asdict(self)
+
+    @classmethod
+    def from_manifest(cls, value: object) -> TestSuiteCommitment:
+        expected = {"plan_sha256", "test_suite_sha256", "ledger_nonce", "version"}
+        manifest = _require_keys(value, expected, location="test-suite commitment")
+        if any(type(manifest[name]) is not str for name in expected):
+            raise ValueError("test-suite commitment field types are malformed")
+        try:
+            result = cls(**manifest)  # type: ignore[arg-type]
+        except (TypeError, ValueError) as exc:
+            raise ValueError("test-suite commitment is malformed") from exc
+        _require_manifest_round_trip(
+            manifest, result.manifest(), location="test-suite commitment"
+        )
+        return result
 
     @property
     def sha256(self) -> str:
@@ -1064,7 +1354,7 @@ class CurvePoint:
 def tick_aligned_raw_score_auc(
     points: Sequence[CurvePoint], expected_ticks: Sequence[int]
 ) -> float:
-    """Trapezoidal AUC divided by horizon; interpolation is forbidden."""
+    """Interpolate observed checkpoints to the target tick grid and normalize."""
 
     ticks = tuple(expected_ticks)
     if (
@@ -1078,16 +1368,39 @@ def tick_aligned_raw_score_auc(
         raise ValueError("expected tick grid must start at zero and have a horizon")
     if any(right <= left for left, right in zip(ticks, ticks[1:])):
         raise ValueError("expected tick grid must be strictly increasing")
+    if len(points) != len(ticks):
+        raise ValueError("raw-score curve must match the target-grid cardinality")
+    observed_ticks = tuple(point.simulated_ticks for point in points)
     if (
-        len(points) != len(ticks)
-        or tuple(point.simulated_ticks for point in points) != ticks
+        observed_ticks[0] != 0
+        or any(right <= left for left, right in zip(observed_ticks, observed_ticks[1:]))
+        or any(
+            not (observed_ticks[index - 1] < target <= observed_ticks[index])
+            for index, target in enumerate(ticks[1:], start=1)
+        )
     ):
-        raise ValueError("raw-score curve must exactly match the planned tick grid")
+        raise ValueError(
+            "each target tick must be bracketed by adjacent observed checkpoints"
+        )
+    aligned = [points[0]]
+    for index, target in enumerate(ticks[1:], start=1):
+        left = points[index - 1]
+        right = points[index]
+        fraction = (target - left.simulated_ticks) / (
+            right.simulated_ticks - left.simulated_ticks
+        )
+        aligned.append(
+            CurvePoint(
+                target,
+                left.mean_raw_score
+                + fraction * (right.mean_raw_score - left.mean_raw_score),
+            )
+        )
     area = sum(
         (right.simulated_ticks - left.simulated_ticks)
         * (left.mean_raw_score + right.mean_raw_score)
         / 2.0
-        for left, right in zip(points, points[1:])
+        for left, right in zip(aligned, aligned[1:])
     )
     return area / ticks[-1]
 
@@ -1099,6 +1412,7 @@ class TrainingCheckpointArtifact:
     learner_seed: int
     completed_updates: int
     simulated_ticks: int
+    target_simulated_ticks: int
     plan_sha256: str
     job_sha256: str
     trial_manifest_sha256: str
@@ -1106,11 +1420,11 @@ class TrainingCheckpointArtifact:
     checkpoint_manifest_sha256: str
     model_sha256: str
     deployment_policy_sha256: str
-    version: str = "r3b-training-checkpoint-artifact-v1"
+    version: str = "r3b-training-checkpoint-artifact-v2"
 
     def __post_init__(self) -> None:
         if (
-            self.version != "r3b-training-checkpoint-artifact-v1"
+            self.version != "r3b-training-checkpoint-artifact-v2"
             or isinstance(self.learner_seed, bool)
             or not isinstance(self.learner_seed, int)
             or not 0 <= self.learner_seed < 2**64
@@ -1120,6 +1434,10 @@ class TrainingCheckpointArtifact:
             or isinstance(self.simulated_ticks, bool)
             or not isinstance(self.simulated_ticks, int)
             or self.simulated_ticks < 0
+            or isinstance(self.target_simulated_ticks, bool)
+            or not isinstance(self.target_simulated_ticks, int)
+            or self.target_simulated_ticks < 0
+            or self.simulated_ticks < self.target_simulated_ticks
             or any(
                 not _is_nonzero_sha256(value)
                 for value in (
@@ -1137,6 +1455,53 @@ class TrainingCheckpointArtifact:
 
     def manifest(self) -> dict[str, object]:
         return asdict(self)
+
+    @classmethod
+    def from_manifest(cls, value: object) -> TrainingCheckpointArtifact:
+        expected = {
+            "learner_seed",
+            "completed_updates",
+            "simulated_ticks",
+            "target_simulated_ticks",
+            "plan_sha256",
+            "job_sha256",
+            "trial_manifest_sha256",
+            "runner_spec_sha256",
+            "checkpoint_manifest_sha256",
+            "model_sha256",
+            "deployment_policy_sha256",
+            "version",
+        }
+        manifest = _require_keys(
+            value, expected, location="training checkpoint artifact"
+        )
+        if any(
+            type(manifest[name]) is not int
+            for name in (
+                "learner_seed",
+                "completed_updates",
+                "simulated_ticks",
+                "target_simulated_ticks",
+            )
+        ) or any(
+            type(manifest[name]) is not str
+            for name in expected
+            - {
+                "learner_seed",
+                "completed_updates",
+                "simulated_ticks",
+                "target_simulated_ticks",
+            }
+        ):
+            raise ValueError("training checkpoint artifact field types are malformed")
+        try:
+            result = cls(**manifest)  # type: ignore[arg-type]
+        except (TypeError, ValueError) as exc:
+            raise ValueError("training checkpoint artifact is malformed") from exc
+        _require_manifest_round_trip(
+            manifest, result.manifest(), location="training checkpoint artifact"
+        )
+        return result
 
     @property
     def sha256(self) -> str:
@@ -1171,6 +1536,10 @@ class CheckpointEvaluation:
         return self.checkpoint.simulated_ticks
 
     @property
+    def target_simulated_ticks(self) -> int:
+        return self.checkpoint.target_simulated_ticks
+
+    @property
     def checkpoint_artifact_sha256(self) -> str:
         return self.checkpoint.sha256
 
@@ -1185,6 +1554,35 @@ class CheckpointEvaluation:
             "report_sha256": self.report.sha256,
         }
 
+    @classmethod
+    def from_manifest(cls, value: object, *, report: object) -> CheckpointEvaluation:
+        from .r3b_evaluation import EvaluationReport
+
+        manifest = _require_keys(
+            value,
+            {"version", "checkpoint", "report_sha256"},
+            location="checkpoint evaluation",
+        )
+        if (
+            type(manifest["version"]) is not str
+            or type(manifest["report_sha256"]) is not str
+            or not isinstance(report, EvaluationReport)
+            or manifest["report_sha256"] != report.sha256
+        ):
+            raise ValueError("checkpoint evaluation report reference mismatch")
+        try:
+            result = cls(
+                TrainingCheckpointArtifact.from_manifest(manifest["checkpoint"]),
+                report,
+                manifest["version"],  # type: ignore[arg-type]
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError("checkpoint evaluation is malformed") from exc
+        _require_manifest_round_trip(
+            manifest, result.manifest(), location="checkpoint evaluation"
+        )
+        return result
+
     @property
     def sha256(self) -> str:
         return _canonical_sha256(self.manifest())
@@ -1195,29 +1593,52 @@ class RawScoreMetricsArtifact:
     """Canonical checkpoint reports from which every selection metric is derived."""
 
     learner_seed: int
-    suite: object
+    curve_suite: object
+    final_suite: object
     checkpoints: tuple[CheckpointEvaluation, ...]
-    version: str = "r3b-raw-score-metrics-v2"
+    final_report: object
+    version: str = "r3b-raw-score-metrics-v3"
 
     def __post_init__(self) -> None:
         from .r3b_evaluation import EvaluationReport, EvaluationSuite
 
         if (
-            self.version != "r3b-raw-score-metrics-v2"
+            self.version != "r3b-raw-score-metrics-v3"
             or isinstance(self.learner_seed, bool)
             or not isinstance(self.learner_seed, int)
             or not 0 <= self.learner_seed < 2**64
-            or not isinstance(self.suite, EvaluationSuite)
+            or not isinstance(self.curve_suite, EvaluationSuite)
+            or not isinstance(self.final_suite, EvaluationSuite)
+            or not isinstance(self.final_report, EvaluationReport)
             or not isinstance(self.checkpoints, tuple)
             or len(self.checkpoints) < 2
         ):
             raise ValueError("raw-score metrics artifact is malformed")
+        if (
+            self.curve_suite.split != self.final_suite.split
+            or self.curve_suite.backend != self.final_suite.backend
+            or self.curve_suite.runtime_identity_sha256
+            != self.final_suite.runtime_identity_sha256
+            or self.curve_suite.assignment_sha256 != self.final_suite.assignment_sha256
+            or self.curve_suite.action_spec_sha256
+            != self.final_suite.action_spec_sha256
+            or self.curve_suite.policy_seed != self.final_suite.policy_seed
+            or self.curve_suite.repetitions != self.final_suite.repetitions
+            or not set(self.curve_suite.logical_cell_ids).issubset(
+                self.final_suite.logical_cell_ids
+            )
+            or self.final_report.suite_sha256 != self.final_suite.sha256
+            or self.final_report.backend_identity_sha256
+            != self.final_suite.runtime_identity_sha256
+        ):
+            raise ValueError("curve and final evaluation suites disagree")
         ticks: list[int] = []
+        target_ticks: list[int] = []
         reports: list[EvaluationReport] = []
         expected_cells = {
             (snapshot_id, repetition)
-            for snapshot_id in self.suite.snapshot_ids
-            for repetition in range(self.suite.repetitions)
+            for snapshot_id in self.curve_suite.snapshot_ids
+            for repetition in range(self.curve_suite.repetitions)
         }
         updates: list[int] = []
         for checkpoint in self.checkpoints:
@@ -1232,14 +1653,17 @@ class RawScoreMetricsArtifact:
                 (episode.snapshot_id, episode.repetition) for episode in report.episodes
             }
             if (
-                report.suite_sha256 != self.suite.sha256
-                or report.backend_identity_sha256 != self.suite.runtime_identity_sha256
+                report.suite_sha256 != self.curve_suite.sha256
+                or report.backend_identity_sha256
+                != self.curve_suite.runtime_identity_sha256
                 or cells != expected_cells
                 or any(
                     episode.policy_seed
-                    != self.suite.episode_seed(episode.snapshot_id, episode.repetition)
-                    or episode.decisions > self.suite.max_decisions
-                    or episode.elapsed_ticks > self.suite.max_simulated_ticks
+                    != self.curve_suite.episode_seed(
+                        episode.snapshot_id, episode.repetition
+                    )
+                    or episode.decisions > self.curve_suite.max_decisions
+                    or episode.elapsed_ticks > self.curve_suite.max_simulated_ticks
                     or not (episode.terminated or episode.truncated)
                     or episode.invalid_actions != 0
                     for episode in report.episodes
@@ -1248,18 +1672,54 @@ class RawScoreMetricsArtifact:
                 raise ValueError("checkpoint report cells do not match the suite")
             updates.append(checkpoint.completed_updates)
             ticks.append(tick)
+            target_ticks.append(checkpoint.target_simulated_ticks)
             reports.append(report)
+        final_cells = {
+            (episode.snapshot_id, episode.repetition)
+            for episode in self.final_report.episodes
+        }
+        expected_final_cells = {
+            (snapshot_id, repetition)
+            for snapshot_id in self.final_suite.snapshot_ids
+            for repetition in range(self.final_suite.repetitions)
+        }
+        if (
+            final_cells != expected_final_cells
+            or self.final_report.policy_sha256 != self.checkpoints[-1].policy_sha256
+            or self.final_report.evaluator_sha256
+            != self.checkpoints[-1].report.evaluator_sha256
+            or any(
+                episode.policy_seed
+                != self.final_suite.episode_seed(
+                    episode.snapshot_id, episode.repetition
+                )
+                or episode.decisions > self.final_suite.max_decisions
+                or episode.elapsed_ticks > self.final_suite.max_simulated_ticks
+                or not (episode.terminated or episode.truncated)
+                or episode.invalid_actions != 0
+                for episode in self.final_report.episodes
+            )
+        ):
+            raise ValueError("final checkpoint report cells do not match its suite")
         if (
             updates[0] != 0
             or ticks[0] != 0
+            or target_ticks[0] != 0
             or any(right <= left for left, right in zip(updates, updates[1:]))
             or any(right <= left for left, right in zip(ticks, ticks[1:]))
+            or any(right <= left for left, right in zip(target_ticks, target_ticks[1:]))
+            or any(
+                ticks[index - 1] >= target_ticks[index]
+                or target_ticks[index] > ticks[index]
+                for index in range(1, len(ticks))
+            )
         ):
-            raise ValueError("checkpoint report ticks must start at zero and increase")
+            raise ValueError(
+                "checkpoint reports must bracket an increasing target tick grid"
+            )
         if (
             len({report.evaluator_sha256 for report in reports}) != 1
             or len({report.backend_identity_sha256 for report in reports}) != 1
-            or len({report.sha256 for report in reports}) != len(reports)
             or len(
                 {
                     checkpoint.checkpoint_artifact_sha256
@@ -1269,7 +1729,7 @@ class RawScoreMetricsArtifact:
             != len(self.checkpoints)
         ):
             raise ValueError(
-                "checkpoint reports changed evaluator/backend or reused an artifact"
+                "checkpoint reports changed evaluator/backend or reused a checkpoint"
             )
 
     @property
@@ -1297,14 +1757,17 @@ class RawScoreMetricsArtifact:
         )
 
     @property
-    def final_report(self):
-        return self.checkpoints[-1].report
+    def suite(self):
+        """Compatibility view: selection gates use the full final suite."""
+
+        return self.final_suite
 
     @property
     def raw_score_auc(self) -> float:
         points = self.points
         return tick_aligned_raw_score_auc(
-            points, tuple(point.simulated_ticks for point in points)
+            points,
+            tuple(checkpoint.target_simulated_ticks for checkpoint in self.checkpoints),
         )
 
     @property
@@ -1322,9 +1785,95 @@ class RawScoreMetricsArtifact:
         return {
             "version": self.version,
             "learner_seed": self.learner_seed,
-            "suite_sha256": self.suite.sha256,
+            "curve_suite_sha256": self.curve_suite.sha256,
+            "final_suite_sha256": self.final_suite.sha256,
             "checkpoints": [checkpoint.manifest() for checkpoint in self.checkpoints],
+            "final_report_sha256": self.final_report.sha256,
         }
+
+    @classmethod
+    def from_manifest(
+        cls,
+        value: object,
+        *,
+        curve_suite: object,
+        final_suite: object,
+        reports: Sequence[object],
+        final_report: object,
+    ) -> RawScoreMetricsArtifact:
+        from .r3b_evaluation import EvaluationReport, EvaluationSuite
+
+        manifest = _require_keys(
+            value,
+            {
+                "version",
+                "learner_seed",
+                "curve_suite_sha256",
+                "final_suite_sha256",
+                "checkpoints",
+                "final_report_sha256",
+            },
+            location="raw-score metrics artifact",
+        )
+        checkpoints = _manifest_list(
+            manifest["checkpoints"], location="raw-score metrics checkpoints"
+        )
+        if (
+            type(manifest["version"]) is not str
+            or type(manifest["learner_seed"]) is not int
+            or type(manifest["curve_suite_sha256"]) is not str
+            or type(manifest["final_suite_sha256"]) is not str
+            or type(manifest["final_report_sha256"]) is not str
+            or not isinstance(curve_suite, EvaluationSuite)
+            or not isinstance(final_suite, EvaluationSuite)
+            or not isinstance(final_report, EvaluationReport)
+            or manifest["curve_suite_sha256"] != curve_suite.sha256
+            or manifest["final_suite_sha256"] != final_suite.sha256
+            or manifest["final_report_sha256"] != final_report.sha256
+        ):
+            raise ValueError("raw-score metrics suite reference mismatch")
+        supplied = tuple(reports)
+        if any(not isinstance(report, EvaluationReport) for report in supplied):
+            raise TypeError("raw-score metrics reports must be evaluation reports")
+        reports_by_sha256 = {report.sha256: report for report in supplied}
+        if len(reports_by_sha256) != len(supplied):
+            raise ValueError("raw-score metrics supplied duplicate reports")
+        referenced: list[str] = []
+        for checkpoint in checkpoints:
+            table = _require_keys(
+                checkpoint,
+                {"version", "checkpoint", "report_sha256"},
+                location="raw-score checkpoint evaluation",
+            )
+            report_sha256 = table["report_sha256"]
+            if type(report_sha256) is not str:
+                raise ValueError("raw-score checkpoint report hash is malformed")
+            referenced.append(report_sha256)
+        if set(referenced) != set(reports_by_sha256) or len(referenced) != len(
+            reports_by_sha256
+        ):
+            raise ValueError("raw-score metrics report references mismatch")
+        try:
+            result = cls(
+                learner_seed=manifest["learner_seed"],  # type: ignore[arg-type]
+                curve_suite=curve_suite,
+                final_suite=final_suite,
+                checkpoints=tuple(
+                    CheckpointEvaluation.from_manifest(
+                        checkpoint,
+                        report=reports_by_sha256[report_sha256],
+                    )
+                    for checkpoint, report_sha256 in zip(checkpoints, referenced)
+                ),
+                final_report=final_report,
+                version=manifest["version"],  # type: ignore[arg-type]
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError("raw-score metrics artifact is malformed") from exc
+        _require_manifest_round_trip(
+            manifest, result.manifest(), location="raw-score metrics artifact"
+        )
+        return result
 
     @property
     def sha256(self) -> str:
@@ -1504,9 +2053,9 @@ class EngineeringEvidence:
             or self.checkpoint_resume_artifact.checkpoint_model_sha256
             != self.resume_checkpoint_artifact.model_sha256
             or self.exact_backend_parity_artifact.policy_sha256 != self.policy_sha256
-            or self.exact_backend_parity_artifact.portable_suite.sha256
+            or self.exact_backend_parity_artifact.exact_suite.sha256
             != self.evaluation_suite_sha256
-            or self.exact_backend_parity_artifact.portable_report.sha256
+            or self.exact_backend_parity_artifact.exact_report.sha256
             != self.evaluation_report_sha256
         ):
             raise ValueError("engineering audit artifacts disagree with the trial")
@@ -1543,6 +2092,69 @@ class EngineeringEvidence:
             self.exact_backend_parity_artifact.manifest()
         )
         return value
+
+    @classmethod
+    def from_manifest(
+        cls,
+        value: object,
+        *,
+        checkpoint_resume_artifact: ExactResumeArtifact,
+        exact_backend_parity_artifact: object,
+    ) -> EngineeringEvidence:
+        expected = {
+            "phase",
+            "completed_updates",
+            "plan_sha256",
+            "job_sha256",
+            "arm_id",
+            "learner_seed",
+            "authorization_sha256",
+            "sealed_job_lease_sha256",
+            "policy_sha256",
+            "trial_manifest_sha256",
+            "runner_spec_sha256",
+            "pairing_sha256",
+            "metrics_sha256",
+            "evaluation_suite_sha256",
+            "evaluation_report_sha256",
+            "final_checkpoint_artifact",
+            "resume_checkpoint_artifact",
+            "checkpoint_resume_artifact",
+            "exact_backend_parity_artifact",
+            "tail_state_sha256",
+            "tail_phase",
+            "score_only_updates",
+            "version",
+        }
+        manifest = _require_keys(value, expected, location="engineering evidence")
+        if (
+            manifest["checkpoint_resume_artifact"]
+            != checkpoint_resume_artifact.manifest()
+            or manifest["exact_backend_parity_artifact"]
+            != exact_backend_parity_artifact.manifest()
+        ):
+            raise ValueError("engineering evidence audit dependencies differ")
+        arguments = dict(manifest)
+        arguments["final_checkpoint_artifact"] = (
+            TrainingCheckpointArtifact.from_manifest(
+                manifest["final_checkpoint_artifact"]
+            )
+        )
+        arguments["resume_checkpoint_artifact"] = (
+            TrainingCheckpointArtifact.from_manifest(
+                manifest["resume_checkpoint_artifact"]
+            )
+        )
+        arguments["checkpoint_resume_artifact"] = checkpoint_resume_artifact
+        arguments["exact_backend_parity_artifact"] = exact_backend_parity_artifact
+        try:
+            result = cls(**arguments)  # type: ignore[arg-type]
+        except (TypeError, ValueError) as exc:
+            raise ValueError("engineering evidence is malformed") from exc
+        _require_manifest_round_trip(
+            manifest, result.manifest(), location="engineering evidence"
+        )
+        return result
 
     @property
     def sha256(self) -> str:
@@ -1656,6 +2268,47 @@ class LearnerOutcome:
             ),
         }
 
+    @classmethod
+    def from_manifest(
+        cls,
+        value: object,
+        *,
+        metrics_artifact: RawScoreMetricsArtifact,
+        engineering_evidence: EngineeringEvidence | None,
+    ) -> LearnerOutcome:
+        manifest = _require_keys(
+            value,
+            {
+                "learner_seed",
+                "raw_score_auc",
+                "final_mean_raw_score",
+                "p10_raw_score",
+                "initial_model_sha256",
+                "assignment_sha256",
+                "seed_plan_sha256",
+                "metrics_artifact",
+                "engineering_evidence",
+            },
+            location="learner outcome",
+        )
+        if manifest["metrics_artifact"] != metrics_artifact.manifest() or manifest[
+            "engineering_evidence"
+        ] != (
+            None if engineering_evidence is None else engineering_evidence.manifest()
+        ):
+            raise ValueError("learner outcome dependencies differ")
+        arguments = dict(manifest)
+        arguments["metrics_artifact"] = metrics_artifact
+        arguments["engineering_evidence"] = engineering_evidence
+        try:
+            result = cls(**arguments)  # type: ignore[arg-type]
+        except (TypeError, ValueError) as exc:
+            raise ValueError("learner outcome is malformed") from exc
+        _require_manifest_round_trip(
+            manifest, result.manifest(), location="learner outcome"
+        )
+        return result
+
     @property
     def engineering_pass(self) -> bool:
         return self.engineering_evidence is not None
@@ -1715,6 +2368,39 @@ class ArmPhaseResult:
             "outcomes": [outcome.manifest() for outcome in self.outcomes],
             "failure_reason": self.failure_reason,
         }
+
+    @classmethod
+    def from_manifest(
+        cls,
+        value: object,
+        *,
+        outcomes: Sequence[LearnerOutcome],
+    ) -> ArmPhaseResult:
+        manifest = _require_keys(
+            value,
+            {
+                "arm_id",
+                "phase",
+                "status",
+                "budget_updates",
+                "outcomes",
+                "failure_reason",
+            },
+            location="arm phase result",
+        )
+        supplied = tuple(outcomes)
+        if manifest["outcomes"] != [outcome.manifest() for outcome in supplied]:
+            raise ValueError("arm phase result outcome dependencies differ")
+        arguments = dict(manifest)
+        arguments["outcomes"] = supplied
+        try:
+            result = cls(**arguments)  # type: ignore[arg-type]
+        except (TypeError, ValueError) as exc:
+            raise ValueError("arm phase result is malformed") from exc
+        _require_manifest_round_trip(
+            manifest, result.manifest(), location="arm phase result"
+        )
+        return result
 
     @property
     def sha256(self) -> str:
@@ -1791,7 +2477,14 @@ def _require_runner_spec(results: Sequence[ArmPhaseResult]) -> str:
     return next(iter(identities))
 
 
-def _require_evaluation_suite(results: Sequence[ArmPhaseResult]) -> str:
+def _require_evaluation_suite(
+    plan: R3BExperimentPlan, results: Sequence[ArmPhaseResult]
+) -> str:
+    for result in results:
+        for outcome in result.outcomes:
+            suite = outcome.metrics_artifact.suite
+            if suite.policy_seed != plan.evaluation_seed(result.phase):
+                raise ValueError("evaluation suite policy seed differs from the plan")
     identities = {
         outcome.metrics_artifact.suite.sha256
         for result in results
@@ -1822,6 +2515,12 @@ def _require_metric_artifacts(
         for outcome in result.outcomes:
             artifact = outcome.metrics_artifact
             evidence = outcome.engineering_evidence
+            observed_ticks = tuple(
+                checkpoint.simulated_ticks for checkpoint in artifact.checkpoints
+            )
+            target_ticks = tuple(
+                checkpoint.target_simulated_ticks for checkpoint in artifact.checkpoints
+            )
             if (
                 evidence is None
                 or artifact.suite.split != result.phase
@@ -1829,10 +2528,12 @@ def _require_metric_artifacts(
                     checkpoint.completed_updates for checkpoint in artifact.checkpoints
                 )
                 != expected_updates
-                or tuple(
-                    checkpoint.simulated_ticks for checkpoint in artifact.checkpoints
+                or target_ticks != expected_ticks
+                or any(
+                    observed
+                    > target * (1.0 + plan.maximum_cumulative_tick_overshoot_fraction)
+                    for observed, target in zip(observed_ticks[1:], target_ticks[1:])
                 )
-                != expected_ticks
                 or any(
                     checkpoint.checkpoint.plan_sha256 != plan.sha256
                     or checkpoint.checkpoint.job_sha256 != evidence.job_sha256
@@ -1871,7 +2572,7 @@ def select_calibrated_learning_rates(
     )
     _require_plan_evidence(plan, tuple(indexed.values()))
     _require_runner_spec(tuple(indexed.values()))
-    _require_evaluation_suite(tuple(indexed.values()))
+    _require_evaluation_suite(plan, tuple(indexed.values()))
     _require_metric_artifacts(plan, tuple(indexed.values()))
     _require_paired_identities(tuple(indexed.values()), plan.calibration_learner_seeds)
     selected: list[CandidateArm] = []
@@ -1916,7 +2617,7 @@ def authorize_validation(
     retained = tuple(results)
     arms = select_calibrated_learning_rates(plan, retained)
     runner_spec_sha256 = _require_runner_spec(retained)
-    evaluation_suite_sha256 = _require_evaluation_suite(retained)
+    evaluation_suite_sha256 = _require_evaluation_suite(plan, retained)
     return CalibrationSelectionAuthorization(
         plan.sha256,
         arms,
@@ -1951,6 +2652,67 @@ class ValidationRunAuthorization:
         expected = authorize_validation(self.plan, self.calibration_results)
         if expected != self.authorization:
             raise ValueError("validation-run calibration artifacts disagree")
+
+    def manifest(self) -> dict[str, object]:
+        return {
+            "version": self.version,
+            "plan_sha256": self.plan.sha256,
+            "authorization": self.authorization.manifest(),
+            "calibration_result_sha256s": [
+                result.sha256 for result in self.calibration_results
+            ],
+            "test_commitment": self.test_commitment.manifest(),
+        }
+
+    @classmethod
+    def from_manifest(
+        cls,
+        value: object,
+        *,
+        plan: R3BExperimentPlan,
+        calibration_results: Sequence[ArmPhaseResult],
+    ) -> ValidationRunAuthorization:
+        manifest = _require_keys(
+            value,
+            {
+                "version",
+                "plan_sha256",
+                "authorization",
+                "calibration_result_sha256s",
+                "test_commitment",
+            },
+            location="validation-run authorization",
+        )
+        retained = tuple(calibration_results)
+        result_sha256s = _manifest_list(
+            manifest["calibration_result_sha256s"],
+            location="validation-run calibration result identities",
+        )
+        if (
+            type(manifest["version"]) is not str
+            or type(manifest["plan_sha256"]) is not str
+            or manifest["plan_sha256"] != plan.sha256
+            or result_sha256s != [result.sha256 for result in retained]
+        ):
+            raise ValueError("validation-run authorization references differ")
+        try:
+            result = cls(
+                plan=plan,
+                authorization=CalibrationSelectionAuthorization.from_manifest(
+                    manifest["authorization"]
+                ),
+                calibration_results=retained,
+                test_commitment=TestSuiteCommitment.from_manifest(
+                    manifest["test_commitment"]
+                ),
+                version=manifest["version"],
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError("validation-run authorization is malformed") from exc
+        _require_manifest_round_trip(
+            manifest, result.manifest(), location="validation-run authorization"
+        )
+        return result
 
     @property
     def sha256(self) -> str:
@@ -2003,7 +2765,7 @@ def select_validation_candidate(
     )
     _require_plan_evidence(plan, tuple(indexed.values()))
     runner_spec_sha256 = _require_runner_spec(tuple(indexed.values()))
-    _require_evaluation_suite(tuple(indexed.values()))
+    _require_evaluation_suite(plan, tuple(indexed.values()))
     _require_metric_artifacts(plan, tuple(indexed.values()))
     _require_paired_identities(tuple(indexed.values()), plan.validation_learner_seeds)
     if any(
@@ -2092,15 +2854,15 @@ class BaselineEvidence:
     suite_sha256: str
     report_sha256: str
     replay_report_sha256: str
-    exact_report_sha256: str
+    diagnostic_report_sha256: str
     portable_backend_sha256: str
     exact_backend_sha256: str
-    episode_content_sha256: str
-    version: str = "r3b-baseline-evidence-v1"
+    cross_backend_diagnostics_sha256: str
+    version: str = "r3b-baseline-evidence-v2"
 
     def __post_init__(self) -> None:
         if (
-            self.version != "r3b-baseline-evidence-v1"
+            self.version != "r3b-baseline-evidence-v2"
             or not isinstance(self.baseline_id, str)
             or not self.baseline_id
         ):
@@ -2130,10 +2892,10 @@ class BaselineEvidence:
                 self.suite_sha256,
                 self.report_sha256,
                 self.replay_report_sha256,
-                self.exact_report_sha256,
+                self.diagnostic_report_sha256,
                 self.portable_backend_sha256,
                 self.exact_backend_sha256,
-                self.episode_content_sha256,
+                self.cross_backend_diagnostics_sha256,
             )
         ):
             raise ValueError("baseline evidence must bind nonzero report SHA-256s")
@@ -2142,7 +2904,7 @@ class BaselineEvidence:
                 {
                     self.report_sha256,
                     self.replay_report_sha256,
-                    self.exact_report_sha256,
+                    self.diagnostic_report_sha256,
                 }
             )
             != 3
@@ -2153,9 +2915,76 @@ class BaselineEvidence:
     def manifest(self) -> dict[str, object]:
         return asdict(self)
 
+    @classmethod
+    def from_manifest(cls, value: object) -> BaselineEvidence:
+        expected = {
+            "baseline_id",
+            "status",
+            "episodes",
+            "mean_raw_score",
+            "invalid_actions",
+            "suite_sha256",
+            "report_sha256",
+            "replay_report_sha256",
+            "diagnostic_report_sha256",
+            "portable_backend_sha256",
+            "exact_backend_sha256",
+            "cross_backend_diagnostics_sha256",
+            "version",
+        }
+        manifest = _require_keys(value, expected, location="baseline evidence")
+        if (
+            any(
+                type(manifest[name]) is not str
+                for name in expected - {"episodes", "mean_raw_score", "invalid_actions"}
+            )
+            or type(manifest["episodes"]) is not int
+            or type(manifest["mean_raw_score"]) is not float
+            or type(manifest["invalid_actions"]) is not int
+        ):
+            raise ValueError("baseline evidence field types are malformed")
+        try:
+            result = cls(**manifest)  # type: ignore[arg-type]
+        except (TypeError, ValueError) as exc:
+            raise ValueError("baseline evidence is malformed") from exc
+        _require_manifest_round_trip(
+            manifest, result.manifest(), location="baseline evidence"
+        )
+        return result
+
     @property
     def sha256(self) -> str:
         return _canonical_sha256(self.manifest())
+
+
+@dataclass(frozen=True, slots=True)
+class CommittedBaselineEvidence:
+    """Authority-bearing evidence reconstructed from the ledger and artifact store."""
+
+    plan_sha256: str
+    authorization_sha256: str
+    commitment_sha256: str
+    evidence: tuple[BaselineEvidence, ...]
+    _verification_token: InitVar[object]
+
+    def __post_init__(self, _verification_token: object) -> None:
+        if (
+            _verification_token is not _COMMITTED_BASELINE_EVIDENCE_TOKEN
+            or any(
+                not _is_nonzero_sha256(value)
+                for value in (
+                    self.plan_sha256,
+                    self.authorization_sha256,
+                    self.commitment_sha256,
+                )
+            )
+            or not isinstance(self.evidence, tuple)
+            or not self.evidence
+            or any(not isinstance(item, BaselineEvidence) for item in self.evidence)
+        ):
+            raise ValueError(
+                "committed baseline evidence requires verified durable authority"
+            )
 
 
 def baseline_requirements_pass(
@@ -2188,9 +3017,246 @@ def _resolve_baseline_artifacts(
 ) -> tuple[BaselineEvidence, ...]:
     from .r3b_evaluation import BaselineArtifactBundle
 
+    retained = tuple(artifacts)
+    if len(retained) == 1 and isinstance(retained[0], CommittedBaselineEvidence):
+        return retained[0].evidence
     if any(not isinstance(item, BaselineArtifactBundle) for item in artifacts):
         raise TypeError("sealed confirmation requires typed baseline artifacts")
     return tuple(item.evidence() for item in artifacts)
+
+
+@dataclass(frozen=True, slots=True)
+class SealedBaselineBatchCommitment:
+    """Pre-execution contract for the one permitted required-baseline batch."""
+
+    plan_sha256: str
+    test_suite_sha256: str
+    logical_manifest_sha256: str
+    required_baselines: tuple[tuple[str, str], ...]
+    episodes_per_baseline: int
+    primary_backend: str = "exact"
+    replay_backend: str = "exact"
+    diagnostic_backend: str = "portable"
+    version: str = "r3b-sealed-baseline-batch-commitment-v1"
+
+    def __post_init__(self) -> None:
+        if (
+            self.version != "r3b-sealed-baseline-batch-commitment-v1"
+            or not _is_nonzero_sha256(self.plan_sha256)
+            or not _is_nonzero_sha256(self.test_suite_sha256)
+            or not _is_nonzero_sha256(self.logical_manifest_sha256)
+            or not isinstance(self.required_baselines, tuple)
+            or not self.required_baselines
+            or any(
+                not isinstance(item, tuple)
+                or len(item) != 2
+                or not item[0]
+                or not _is_nonzero_sha256(item[1])
+                for item in self.required_baselines
+            )
+            or len({item[0] for item in self.required_baselines})
+            != len(self.required_baselines)
+            or isinstance(self.episodes_per_baseline, bool)
+            or not isinstance(self.episodes_per_baseline, int)
+            or self.episodes_per_baseline <= 0
+            or (
+                self.primary_backend,
+                self.replay_backend,
+                self.diagnostic_backend,
+            )
+            != ("exact", "exact", "portable")
+        ):
+            raise ValueError("sealed baseline-batch commitment is malformed")
+
+    @classmethod
+    def from_plan(
+        cls, plan: R3BExperimentPlan, test_suite: object
+    ) -> SealedBaselineBatchCommitment:
+        from .r3b_evaluation import EvaluationSuite, ScriptedBaselineSpec
+
+        if (
+            not isinstance(plan, R3BExperimentPlan)
+            or not isinstance(test_suite, EvaluationSuite)
+            or test_suite.split != "test"
+            or not _is_nonzero_sha256(test_suite.logical_manifest_sha256)
+            or len(test_suite.snapshot_ids) * test_suite.repetitions
+            != plan.test_episodes_per_policy
+        ):
+            raise ValueError("baseline batch requires the sealed test cells")
+        return cls(
+            plan.sha256,
+            test_suite.sha256,
+            test_suite.logical_manifest_sha256,
+            tuple(
+                (baseline_id, ScriptedBaselineSpec(baseline_id).sha256)
+                for baseline_id in plan.required_baselines
+            ),
+            plan.minimum_baseline_episodes,
+        )
+
+    def manifest(self) -> dict[str, object]:
+        return {
+            "version": self.version,
+            "plan_sha256": self.plan_sha256,
+            "test_suite_sha256": self.test_suite_sha256,
+            "logical_manifest_sha256": self.logical_manifest_sha256,
+            "required_baselines": [
+                {"baseline_id": baseline_id, "policy_sha256": policy_sha256}
+                for baseline_id, policy_sha256 in self.required_baselines
+            ],
+            "episodes_per_baseline": self.episodes_per_baseline,
+            "reports": {
+                "primary_backend": self.primary_backend,
+                "deterministic_replay_backend": self.replay_backend,
+                "diagnostic_backend": self.diagnostic_backend,
+            },
+        }
+
+    @classmethod
+    def from_manifest(cls, value: object) -> SealedBaselineBatchCommitment:
+        manifest = _require_keys(
+            value,
+            {
+                "version",
+                "plan_sha256",
+                "test_suite_sha256",
+                "logical_manifest_sha256",
+                "required_baselines",
+                "episodes_per_baseline",
+                "reports",
+            },
+            location="sealed baseline-batch commitment",
+        )
+        required = _manifest_list(
+            manifest["required_baselines"],
+            location="sealed baseline-batch required baselines",
+        )
+        reports = _require_keys(
+            manifest["reports"],
+            {
+                "primary_backend",
+                "deterministic_replay_backend",
+                "diagnostic_backend",
+            },
+            location="sealed baseline-batch reports",
+        )
+        if (
+            any(
+                type(manifest[name]) is not str
+                for name in (
+                    "version",
+                    "plan_sha256",
+                    "test_suite_sha256",
+                    "logical_manifest_sha256",
+                )
+            )
+            or type(manifest["episodes_per_baseline"]) is not int
+            or any(type(reports[name]) is not str for name in reports)
+        ):
+            raise ValueError("sealed baseline-batch field types are malformed")
+        parsed: list[tuple[str, str]] = []
+        for item in required:
+            table = _require_keys(
+                item,
+                {"baseline_id", "policy_sha256"},
+                location="sealed baseline-batch baseline",
+            )
+            if any(type(table[name]) is not str for name in table):
+                raise ValueError("sealed baseline-batch baseline is malformed")
+            parsed.append((table["baseline_id"], table["policy_sha256"]))  # type: ignore[arg-type]
+        try:
+            result = cls(
+                plan_sha256=manifest["plan_sha256"],  # type: ignore[arg-type]
+                test_suite_sha256=manifest["test_suite_sha256"],  # type: ignore[arg-type]
+                logical_manifest_sha256=manifest["logical_manifest_sha256"],  # type: ignore[arg-type]
+                required_baselines=tuple(parsed),
+                episodes_per_baseline=manifest["episodes_per_baseline"],  # type: ignore[arg-type]
+                primary_backend=reports["primary_backend"],  # type: ignore[arg-type]
+                replay_backend=reports["deterministic_replay_backend"],  # type: ignore[arg-type]
+                diagnostic_backend=reports["diagnostic_backend"],  # type: ignore[arg-type]
+                version=manifest["version"],  # type: ignore[arg-type]
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError("sealed baseline-batch commitment is malformed") from exc
+        _require_manifest_round_trip(
+            manifest,
+            result.manifest(),
+            location="sealed baseline-batch commitment",
+        )
+        return result
+
+    @property
+    def sha256(self) -> str:
+        return _canonical_sha256(self.manifest())
+
+
+def _resolve_sealed_baseline_batch(
+    plan: R3BExperimentPlan,
+    commitment: SealedBaselineBatchCommitment,
+    artifacts: Sequence[object],
+) -> tuple[BaselineEvidence, ...]:
+    from .r3b_evaluation import BaselineArtifactBundle
+
+    bundles = tuple(artifacts)
+    if not isinstance(commitment, SealedBaselineBatchCommitment):
+        raise TypeError("sealed baseline batch requires its typed commitment")
+    if len(bundles) == 1 and isinstance(bundles[0], CommittedBaselineEvidence):
+        committed = bundles[0]
+        if (
+            committed.plan_sha256 != plan.sha256
+            or committed.commitment_sha256 != commitment.sha256
+        ):
+            raise ValueError("committed baseline evidence belongs to another batch")
+        expected = tuple(item[0] for item in commitment.required_baselines)
+        if tuple(
+            item.baseline_id for item in committed.evidence
+        ) != expected or not baseline_requirements_pass(
+            plan,
+            committed.evidence,
+            expected_suite_sha256=commitment.test_suite_sha256,
+        ):
+            raise ValueError("committed baseline evidence violates its commitment")
+        return committed.evidence
+    if commitment.plan_sha256 != plan.sha256 or any(
+        not isinstance(item, BaselineArtifactBundle) for item in bundles
+    ):
+        raise TypeError("sealed baseline batch requires typed baseline artifacts")
+    indexed = {item.baseline.baseline_id: item for item in bundles}
+    expected = tuple(item[0] for item in commitment.required_baselines)
+    if len(indexed) != len(bundles) or set(indexed) != set(expected):
+        raise ValueError("sealed baseline batch differs from its required baseline set")
+    ordered = tuple(indexed[baseline_id] for baseline_id in expected)
+    if any(
+        bundle.baseline.sha256 != dict(commitment.required_baselines)[baseline_id]
+        or bundle.primary_suite.sha256 != commitment.test_suite_sha256
+        or bundle.primary_suite.backend != commitment.primary_backend
+        or bundle.diagnostic_suite.backend != commitment.diagnostic_backend
+        or bundle.primary_suite.split != "test"
+        or bundle.diagnostic_suite.split != "test"
+        or bundle.primary_suite.logical_manifest_sha256
+        != commitment.logical_manifest_sha256
+        or bundle.diagnostic_suite.logical_manifest_sha256
+        != commitment.logical_manifest_sha256
+        or len(bundle.primary_suite.snapshot_ids) * bundle.primary_suite.repetitions
+        != commitment.episodes_per_baseline
+        or len(bundle.diagnostic_suite.snapshot_ids)
+        * bundle.diagnostic_suite.repetitions
+        != commitment.episodes_per_baseline
+        or bundle.primary_report.backend_identity_sha256
+        != bundle.primary_suite.runtime_identity_sha256
+        or bundle.primary_replay_report.backend_identity_sha256
+        != bundle.primary_suite.runtime_identity_sha256
+        or bundle.diagnostic_report.backend_identity_sha256
+        != bundle.diagnostic_suite.runtime_identity_sha256
+        for baseline_id, bundle in zip(expected, ordered)
+    ):
+        raise ValueError("sealed baseline batch violates its backend/report commitment")
+    evidence = tuple(bundle.evidence() for bundle in ordered)
+    if not baseline_requirements_pass(
+        plan, evidence, expected_suite_sha256=commitment.test_suite_sha256
+    ):
+        raise ValueError("sealed baseline batch evidence does not pass requirements")
+    return evidence
 
 
 @dataclass(frozen=True, slots=True)
@@ -2205,12 +3271,13 @@ class SealedTestAuthorization:
     validation_suite_sha256: str
     test_suite_sha256: str
     runner_spec_sha256: str
+    baseline_batch_commitment_sha256: str
     attempt: int = 1
-    version: str = "r3b-sealed-test-authorization-v4"
+    version: str = "r3b-sealed-test-authorization-v5"
 
     def __post_init__(self) -> None:
         if (
-            self.version != "r3b-sealed-test-authorization-v4"
+            self.version != "r3b-sealed-test-authorization-v5"
             or not self.control_arm_id
             or not self.candidate_arm_id
             or self.control_arm_id == self.candidate_arm_id
@@ -2224,6 +3291,7 @@ class SealedTestAuthorization:
                     self.validation_suite_sha256,
                     self.test_suite_sha256,
                     self.runner_spec_sha256,
+                    self.baseline_batch_commitment_sha256,
                 )
             )
         ):
@@ -2231,6 +3299,35 @@ class SealedTestAuthorization:
 
     def manifest(self) -> dict[str, object]:
         return asdict(self)
+
+    @classmethod
+    def from_manifest(cls, value: object) -> SealedTestAuthorization:
+        expected = {
+            "plan_sha256",
+            "validation_run_sha256",
+            "control_arm_id",
+            "candidate_arm_id",
+            "validation_results_sha256",
+            "validation_suite_sha256",
+            "test_suite_sha256",
+            "runner_spec_sha256",
+            "baseline_batch_commitment_sha256",
+            "attempt",
+            "version",
+        }
+        manifest = _require_keys(value, expected, location="sealed-test authorization")
+        if type(manifest["attempt"]) is not int or any(
+            type(manifest[name]) is not str for name in expected - {"attempt"}
+        ):
+            raise ValueError("sealed-test authorization field types are malformed")
+        try:
+            result = cls(**manifest)  # type: ignore[arg-type]
+        except (TypeError, ValueError) as exc:
+            raise ValueError("sealed-test authorization is malformed") from exc
+        _require_manifest_round_trip(
+            manifest, result.manifest(), location="sealed-test authorization"
+        )
+        return result
 
     @property
     def sha256(self) -> str:
@@ -2253,6 +3350,8 @@ def _authorize_sealed_test(
         or not isinstance(test_suite, EvaluationSuite)
         or validation_suite.split != "validation"
         or test_suite.split != "test"
+        or validation_suite.policy_seed != plan.validation_evaluation_seed
+        or test_suite.policy_seed != plan.test_evaluation_seed
         or len(validation_suite.snapshot_ids) * validation_suite.repetitions
         != plan.validation_episodes_per_policy
         or len(test_suite.snapshot_ids) * test_suite.repetitions
@@ -2303,6 +3402,7 @@ def _authorize_sealed_test(
     result_identity = _canonical_sha256(
         [result.sha256 for result in sorted(results, key=lambda x: x.arm_id)]
     )
+    baseline_commitment = SealedBaselineBatchCommitment.from_plan(plan, test_suite)
     return SealedTestAuthorization(
         plan.sha256,
         validation_run.sha256,
@@ -2312,6 +3412,7 @@ def _authorize_sealed_test(
         validation_suite.sha256,
         test_suite.sha256,
         calibration_authorization.runner_spec_sha256,
+        baseline_commitment.sha256,
     )
 
 
@@ -2325,15 +3426,20 @@ class SealedTestRunAuthorization:
     validation_results: tuple[ArmPhaseResult, ...]
     validation_suite: object
     test_suite: object
+    baseline_batch_commitment: SealedBaselineBatchCommitment
     ledger_path: str
     ledger_receipt_token: str
-    version: str = "r3b-sealed-test-run-authorization-v3"
+    version: str = "r3b-sealed-test-run-authorization-v4"
+    allow_finalized: InitVar[bool] = False
 
-    def __post_init__(self) -> None:
+    def __post_init__(self, allow_finalized: bool) -> None:
         if (
-            self.version != "r3b-sealed-test-run-authorization-v3"
+            self.version != "r3b-sealed-test-run-authorization-v4"
             or not isinstance(self.plan, R3BExperimentPlan)
             or not isinstance(self.validation_results, tuple)
+            or not isinstance(
+                self.baseline_batch_commitment, SealedBaselineBatchCommitment
+            )
             or not isinstance(self.ledger_path, str)
             or not Path(self.ledger_path).is_absolute()
             or not _is_nonzero_sha256(self.ledger_receipt_token)
@@ -2348,6 +3454,15 @@ class SealedTestRunAuthorization:
         )
         if expected != self.authorization:
             raise ValueError("sealed-test run authorization artifacts disagree")
+        expected_baselines = SealedBaselineBatchCommitment.from_plan(
+            self.plan, self.test_suite
+        )
+        if (
+            self.baseline_batch_commitment != expected_baselines
+            or self.authorization.baseline_batch_commitment_sha256
+            != expected_baselines.sha256
+        ):
+            raise ValueError("sealed-test run baseline commitment disagrees")
         result_sha256 = _canonical_sha256(
             [
                 result.sha256
@@ -2356,14 +3471,162 @@ class SealedTestRunAuthorization:
                 )
             ]
         )
-        self.assert_authorized(expected_validation_results_sha256=result_sha256)
+        self.assert_authorized(
+            expected_validation_results_sha256=result_sha256,
+            allow_finalized=allow_finalized,
+        )
+
+    def manifest(self) -> dict[str, object]:
+        return {
+            "version": self.version,
+            "plan_sha256": self.plan.sha256,
+            "authorization": self.authorization.manifest(),
+            "validation_run_sha256": self.validation_run.sha256,
+            "validation_result_sha256s": [
+                result.sha256 for result in self.validation_results
+            ],
+            "validation_suite_sha256": self.validation_suite.sha256,
+            "test_suite_sha256": self.test_suite.sha256,
+            "baseline_batch_commitment": self.baseline_batch_commitment.manifest(),
+            "ledger_path": self.ledger_path,
+            # The receipt is a bearer secret. Its artifact store is required to be
+            # private (0700 root, 0600 files), just like the ledger itself.
+            "ledger_receipt_token": self.ledger_receipt_token,
+        }
+
+    @classmethod
+    def from_manifest(
+        cls,
+        value: object,
+        *,
+        plan: R3BExperimentPlan,
+        validation_run: ValidationRunAuthorization,
+        validation_results: Sequence[ArmPhaseResult],
+        validation_suite: object,
+        test_suite: object,
+        allow_finalized: bool = False,
+    ) -> SealedTestRunAuthorization:
+        manifest = _require_keys(
+            value,
+            {
+                "version",
+                "plan_sha256",
+                "authorization",
+                "validation_run_sha256",
+                "validation_result_sha256s",
+                "validation_suite_sha256",
+                "test_suite_sha256",
+                "baseline_batch_commitment",
+                "ledger_path",
+                "ledger_receipt_token",
+            },
+            location="sealed-test run authorization",
+        )
+        retained = tuple(validation_results)
+        result_sha256s = _manifest_list(
+            manifest["validation_result_sha256s"],
+            location="sealed-test validation result identities",
+        )
+        string_fields = (
+            "version",
+            "plan_sha256",
+            "validation_run_sha256",
+            "validation_suite_sha256",
+            "test_suite_sha256",
+            "ledger_path",
+            "ledger_receipt_token",
+        )
+        if (
+            any(type(manifest[name]) is not str for name in string_fields)
+            or manifest["plan_sha256"] != plan.sha256
+            or manifest["validation_run_sha256"] != validation_run.sha256
+            or result_sha256s != [result.sha256 for result in retained]
+            or manifest["validation_suite_sha256"]
+            != getattr(validation_suite, "sha256", None)
+            or manifest["test_suite_sha256"] != getattr(test_suite, "sha256", None)
+        ):
+            raise ValueError("sealed-test run authorization references differ")
+        try:
+            result = cls(
+                plan=plan,
+                authorization=SealedTestAuthorization.from_manifest(
+                    manifest["authorization"]
+                ),
+                validation_run=validation_run,
+                validation_results=retained,
+                validation_suite=validation_suite,
+                test_suite=test_suite,
+                baseline_batch_commitment=(
+                    SealedBaselineBatchCommitment.from_manifest(
+                        manifest["baseline_batch_commitment"]
+                    )
+                ),
+                ledger_path=manifest["ledger_path"],
+                ledger_receipt_token=manifest["ledger_receipt_token"],
+                version=manifest["version"],
+                allow_finalized=allow_finalized,
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError("sealed-test run authorization is malformed") from exc
+        _require_manifest_round_trip(
+            manifest,
+            result.manifest(),
+            location="sealed-test run authorization",
+        )
+        return result
+
+    def publish(self, store: object) -> str:
+        from .r3b_artifacts import ArtifactStore
+
+        if not isinstance(store, ArtifactStore):
+            raise TypeError("sealed authorization requires an ArtifactStore")
+        return store.publish(
+            kind=_SEALED_AUTHORIZATION_KIND,
+            version=self.version,
+            payload=self.manifest(),
+        ).artifact_id
+
+    @classmethod
+    def load(
+        cls,
+        store: object,
+        artifact_id: str,
+        *,
+        plan: R3BExperimentPlan,
+        validation_run: ValidationRunAuthorization,
+        validation_results: Sequence[ArmPhaseResult],
+        validation_suite: object,
+        test_suite: object,
+        allow_finalized: bool = False,
+    ) -> SealedTestRunAuthorization:
+        from .r3b_artifacts import ArtifactStore
+
+        if not isinstance(store, ArtifactStore):
+            raise TypeError("sealed authorization requires an ArtifactStore")
+        envelope = store.load(
+            artifact_id,
+            expected_kind=_SEALED_AUTHORIZATION_KIND,
+            expected_version="r3b-sealed-test-run-authorization-v4",
+        )
+        return cls.from_manifest(
+            envelope.payload,
+            plan=plan,
+            validation_run=validation_run,
+            validation_results=validation_results,
+            validation_suite=validation_suite,
+            test_suite=test_suite,
+            allow_finalized=allow_finalized,
+        )
 
     @property
     def ledger_receipt_sha256(self) -> str:
         return hashlib.sha256(self.ledger_receipt_token.encode()).hexdigest()
 
     def assert_authorized(
-        self, *, expected_validation_results_sha256: str | None = None
+        self,
+        *,
+        expected_validation_results_sha256: str | None = None,
+        allow_finalized: bool = False,
     ) -> None:
         """Verify this opaque receipt against the durable ledger."""
 
@@ -2379,26 +3642,32 @@ class SealedTestRunAuthorization:
             list(_sealed_job_sha256s(self.plan, self.authorization))
         )
         try:
-            with closing(sqlite3.connect(self.ledger_path, timeout=30.0)) as connection:
+            with closing(_connect_private_ledger(self.ledger_path)) as connection:
                 row = connection.execute(
-                    "SELECT state,receipt_token,validation_run_sha256,"
+                    "SELECT state,receipt_token_sha256,validation_run_sha256,"
                     "validation_results_sha256,validation_suite_sha256,"
-                    "authorization_sha256,jobs_sha256 FROM sealed_test_attempt "
+                    "authorization_sha256,jobs_sha256,baseline_batch_sha256 "
+                    "FROM sealed_test_attempt "
                     "WHERE plan_sha256=?",
                     (self.plan.sha256,),
                 ).fetchone()
         except sqlite3.Error as exc:
             raise RuntimeError("sealed-test ledger is unavailable") from exc
-        expected = (
-            "authorized",
-            self.ledger_receipt_token,
+        expected_tail = (
+            _bearer_sha256(self.ledger_receipt_token),
             self.validation_run.sha256,
             result_sha256,
             self.validation_suite.sha256,
             self.authorization.sha256,
             jobs_sha256,
+            self.baseline_batch_commitment.sha256,
         )
-        if row != expected:
+        if (
+            row is None
+            or row[0]
+            not in ({"authorized", "finalized"} if allow_finalized else {"authorized"})
+            or tuple(row[1:]) != expected_tail
+        ):
             raise RuntimeError("sealed-test receipt is not active in its ledger")
 
     @property
@@ -2430,9 +3699,311 @@ def _bind_sealed_test_run(
         results,
         validation_suite,
         test_suite,
+        SealedBaselineBatchCommitment.from_plan(plan, test_suite),
         ledger_path,
         ledger_receipt_token,
     )
+
+
+@dataclass(frozen=True, slots=True)
+class SealedBaselineEvidenceArtifact:
+    """Reloadable summaries for the baseline batch consumed by the ledger."""
+
+    plan_sha256: str
+    authorization_sha256: str
+    commitment_sha256: str
+    evidence: tuple[BaselineEvidence, ...]
+    version: str = "r3b-sealed-baseline-evidence-artifact-v1"
+
+    def __post_init__(self) -> None:
+        if (
+            self.version != "r3b-sealed-baseline-evidence-artifact-v1"
+            or any(
+                not _is_nonzero_sha256(value)
+                for value in (
+                    self.plan_sha256,
+                    self.authorization_sha256,
+                    self.commitment_sha256,
+                )
+            )
+            or not isinstance(self.evidence, tuple)
+            or not self.evidence
+            or any(not isinstance(item, BaselineEvidence) for item in self.evidence)
+            or len({item.baseline_id for item in self.evidence}) != len(self.evidence)
+        ):
+            raise ValueError("sealed baseline evidence artifact is malformed")
+
+    @classmethod
+    def from_artifacts(
+        cls,
+        sealed_run: SealedTestRunAuthorization,
+        baseline_artifacts: Sequence[object],
+    ) -> SealedBaselineEvidenceArtifact:
+        if not isinstance(sealed_run, SealedTestRunAuthorization):
+            raise TypeError("sealed baseline evidence requires its authorization")
+        evidence = _resolve_sealed_baseline_batch(
+            sealed_run.plan,
+            sealed_run.baseline_batch_commitment,
+            tuple(baseline_artifacts),
+        )
+        return cls(
+            sealed_run.plan.sha256,
+            sealed_run.authorization.sha256,
+            sealed_run.baseline_batch_commitment.sha256,
+            evidence,
+        )
+
+    def assert_for(self, sealed_run: SealedTestRunAuthorization) -> None:
+        expected = tuple(
+            baseline_id
+            for baseline_id, _policy_sha256 in (
+                sealed_run.baseline_batch_commitment.required_baselines
+            )
+        )
+        if (
+            not isinstance(sealed_run, SealedTestRunAuthorization)
+            or self.plan_sha256 != sealed_run.plan.sha256
+            or self.authorization_sha256 != sealed_run.authorization.sha256
+            or self.commitment_sha256 != sealed_run.baseline_batch_commitment.sha256
+            or tuple(item.baseline_id for item in self.evidence) != expected
+            or not baseline_requirements_pass(
+                sealed_run.plan,
+                self.evidence,
+                expected_suite_sha256=(
+                    sealed_run.baseline_batch_commitment.test_suite_sha256
+                ),
+            )
+        ):
+            raise ValueError("sealed baseline evidence references another run")
+
+    def manifest(self) -> dict[str, object]:
+        return {
+            "version": self.version,
+            "plan_sha256": self.plan_sha256,
+            "authorization_sha256": self.authorization_sha256,
+            "commitment_sha256": self.commitment_sha256,
+            "evidence": [item.manifest() for item in self.evidence],
+        }
+
+    @classmethod
+    def from_manifest(
+        cls,
+        value: object,
+        *,
+        sealed_run: SealedTestRunAuthorization,
+    ) -> SealedBaselineEvidenceArtifact:
+        manifest = _require_keys(
+            value,
+            {
+                "version",
+                "plan_sha256",
+                "authorization_sha256",
+                "commitment_sha256",
+                "evidence",
+            },
+            location="sealed baseline evidence artifact",
+        )
+        evidence = _manifest_list(
+            manifest["evidence"], location="sealed baseline evidence"
+        )
+        if any(
+            type(manifest[name]) is not str
+            for name in (
+                "version",
+                "plan_sha256",
+                "authorization_sha256",
+                "commitment_sha256",
+            )
+        ):
+            raise ValueError("sealed baseline evidence fields are malformed")
+        try:
+            result = cls(
+                manifest["plan_sha256"],  # type: ignore[arg-type]
+                manifest["authorization_sha256"],  # type: ignore[arg-type]
+                manifest["commitment_sha256"],  # type: ignore[arg-type]
+                tuple(BaselineEvidence.from_manifest(item) for item in evidence),
+                manifest["version"],  # type: ignore[arg-type]
+            )
+            result.assert_for(sealed_run)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("sealed baseline evidence artifact is malformed") from exc
+        _require_manifest_round_trip(
+            manifest,
+            result.manifest(),
+            location="sealed baseline evidence artifact",
+        )
+        return result
+
+    def publish(self, store: object) -> str:
+        from .r3b_artifacts import ArtifactStore
+
+        if not isinstance(store, ArtifactStore):
+            raise TypeError("sealed baseline evidence requires an ArtifactStore")
+        return store.publish(
+            kind=_SEALED_BASELINE_EVIDENCE_KIND,
+            version=self.version,
+            payload=self.manifest(),
+        ).artifact_id
+
+    @classmethod
+    def load_committed(
+        cls,
+        store: object,
+        artifact_id: str,
+        *,
+        ledger: SealedTestLedger,
+        sealed_run: SealedTestRunAuthorization,
+    ) -> CommittedBaselineEvidence:
+        from .r3b_artifacts import ArtifactStore
+
+        if not isinstance(store, ArtifactStore):
+            raise TypeError("sealed baseline evidence requires an ArtifactStore")
+        envelope = store.load(
+            artifact_id,
+            expected_kind=_SEALED_BASELINE_EVIDENCE_KIND,
+            expected_version="r3b-sealed-baseline-evidence-artifact-v1",
+        )
+        result = cls.from_manifest(envelope.payload, sealed_run=sealed_run)
+        if not ledger.verify_completed_baseline_batch(
+            sealed_run, tuple(item.sha256 for item in result.evidence)
+        ):
+            raise RuntimeError("baseline evidence is not committed in the ledger")
+        return CommittedBaselineEvidence(
+            result.plan_sha256,
+            result.authorization_sha256,
+            result.commitment_sha256,
+            result.evidence,
+            _COMMITTED_BASELINE_EVIDENCE_TOKEN,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class SealedLearnerOutcomeReference:
+    """Content-addressed link from a ledger job to its rich outcome package."""
+
+    plan_sha256: str
+    authorization_sha256: str
+    job_sha256: str
+    learner_outcome_sha256: str
+    output_artifact_sha256: str
+    version: str = "r3b-sealed-learner-outcome-reference-v1"
+
+    def __post_init__(self) -> None:
+        if self.version != "r3b-sealed-learner-outcome-reference-v1" or any(
+            not _is_nonzero_sha256(value)
+            for value in (
+                self.plan_sha256,
+                self.authorization_sha256,
+                self.job_sha256,
+                self.learner_outcome_sha256,
+                self.output_artifact_sha256,
+            )
+        ):
+            raise ValueError("sealed learner-outcome reference is malformed")
+
+    @classmethod
+    def capture(
+        cls,
+        sealed_run: SealedTestRunAuthorization,
+        job: TrialJob,
+        outcome: LearnerOutcome,
+        output_artifact_sha256: str,
+    ) -> SealedLearnerOutcomeReference:
+        if (
+            not isinstance(sealed_run, SealedTestRunAuthorization)
+            or job not in sealed_run.plan.trial_jobs("test", sealed_run)
+            or not isinstance(outcome, LearnerOutcome)
+            or outcome.engineering_evidence is None
+            or outcome.engineering_evidence.job_sha256 != job.sha256
+            or outcome.engineering_evidence.authorization_sha256
+            != sealed_run.authorization.sha256
+        ):
+            raise ValueError("sealed learner outcome differs from its authorization")
+        return cls(
+            sealed_run.plan.sha256,
+            sealed_run.authorization.sha256,
+            job.sha256,
+            outcome.sha256,
+            output_artifact_sha256,
+        )
+
+    def manifest(self) -> dict[str, str]:
+        return asdict(self)
+
+    @classmethod
+    def from_manifest(cls, value: object) -> SealedLearnerOutcomeReference:
+        expected = {
+            "version",
+            "plan_sha256",
+            "authorization_sha256",
+            "job_sha256",
+            "learner_outcome_sha256",
+            "output_artifact_sha256",
+        }
+        manifest = _require_keys(
+            value, expected, location="sealed learner-outcome reference"
+        )
+        if any(type(manifest[name]) is not str for name in expected):
+            raise ValueError("sealed learner-outcome reference fields are malformed")
+        try:
+            result = cls(**manifest)  # type: ignore[arg-type]
+        except (TypeError, ValueError) as exc:
+            raise ValueError("sealed learner-outcome reference is malformed") from exc
+        _require_manifest_round_trip(
+            manifest,
+            result.manifest(),
+            location="sealed learner-outcome reference",
+        )
+        return result
+
+    def publish(self, store: object) -> str:
+        from .r3b_artifacts import ArtifactStore
+
+        if not isinstance(store, ArtifactStore):
+            raise TypeError("sealed learner outcome requires an ArtifactStore")
+        return store.publish(
+            kind=_SEALED_OUTCOME_REFERENCE_KIND,
+            version=self.version,
+            payload=self.manifest(),
+        ).artifact_id
+
+    @classmethod
+    def load(cls, store: object, artifact_id: str) -> SealedLearnerOutcomeReference:
+        from .r3b_artifacts import ArtifactStore
+
+        if not isinstance(store, ArtifactStore):
+            raise TypeError("sealed learner outcome requires an ArtifactStore")
+        envelope = store.load(
+            artifact_id,
+            expected_kind=_SEALED_OUTCOME_REFERENCE_KIND,
+            expected_version="r3b-sealed-learner-outcome-reference-v1",
+        )
+        return cls.from_manifest(envelope.payload)
+
+    def resolve(
+        self,
+        *,
+        ledger: SealedTestLedger,
+        sealed_run: SealedTestRunAuthorization,
+        job: TrialJob,
+        loader: Callable[[str], LearnerOutcome],
+    ) -> LearnerOutcome:
+        if (
+            self.plan_sha256 != sealed_run.plan.sha256
+            or self.authorization_sha256 != sealed_run.authorization.sha256
+            or self.job_sha256 != job.sha256
+        ):
+            raise ValueError("sealed learner-outcome reference belongs elsewhere")
+        outcome = loader(self.output_artifact_sha256)
+        if (
+            not isinstance(outcome, LearnerOutcome)
+            or outcome.sha256 != self.learner_outcome_sha256
+            or outcome.engineering_evidence is None
+            or outcome.engineering_evidence.job_sha256 != job.sha256
+            or not ledger.verify_completed_job(sealed_run, job, outcome.sha256)
+        ):
+            raise RuntimeError("sealed learner outcome is not ledger-authorized")
+        return outcome
 
 
 def _sealed_job_sha256s(
@@ -2494,16 +4065,20 @@ class SealedTestJobLease:
         self.sealed_run.assert_authorized()
         try:
             with closing(
-                sqlite3.connect(self.sealed_run.ledger_path, timeout=30.0)
+                _connect_private_ledger(self.sealed_run.ledger_path)
             ) as connection:
                 row = connection.execute(
-                    "SELECT state,lease_token FROM sealed_test_job "
+                    "SELECT state,lease_token_sha256 FROM sealed_test_job "
                     "WHERE plan_sha256=? AND job_sha256=?",
                     (self.sealed_run.plan.sha256, self.job.sha256),
                 ).fetchone()
         except sqlite3.Error as exc:
             raise RuntimeError("sealed-test job ledger is unavailable") from exc
-        if row is None or row[0] not in allowed or row[1] != self.lease_token:
+        if (
+            row is None
+            or row[0] not in allowed
+            or row[1] != _bearer_sha256(self.lease_token)
+        ):
             raise RuntimeError("sealed-test job lease is not active")
 
     @property
@@ -2520,17 +4095,169 @@ class SealedTestJobLease:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class SealedBaselineBatchLease:
+    """Opaque permission to execute the required baselines exactly once."""
+
+    sealed_run: SealedTestRunAuthorization
+    lease_token: str
+    version: str = "r3b-sealed-baseline-batch-lease-v1"
+
+    def __post_init__(self) -> None:
+        if (
+            self.version != "r3b-sealed-baseline-batch-lease-v1"
+            or not isinstance(self.sealed_run, SealedTestRunAuthorization)
+            or not _is_nonzero_sha256(self.lease_token)
+        ):
+            raise ValueError("sealed baseline-batch lease is malformed")
+        self.assert_active()
+
+    def assert_active(self) -> None:
+        self._assert_state({"leased", "running"})
+
+    def assert_running(self) -> None:
+        self._assert_state({"running"})
+
+    def _assert_state(self, allowed: set[str]) -> None:
+        self.sealed_run.assert_authorized()
+        try:
+            with closing(
+                _connect_private_ledger(self.sealed_run.ledger_path)
+            ) as connection:
+                row = connection.execute(
+                    "SELECT state,lease_token_sha256 FROM sealed_baseline_batch "
+                    "WHERE plan_sha256=? AND commitment_sha256=?",
+                    (
+                        self.sealed_run.plan.sha256,
+                        self.sealed_run.baseline_batch_commitment.sha256,
+                    ),
+                ).fetchone()
+        except sqlite3.Error as exc:
+            raise RuntimeError("sealed baseline-batch ledger is unavailable") from exc
+        if (
+            row is None
+            or row[0] not in allowed
+            or row[1] != _bearer_sha256(self.lease_token)
+        ):
+            raise RuntimeError("sealed baseline-batch lease is not active")
+
+    @property
+    def sha256(self) -> str:
+        return _canonical_sha256(
+            {
+                "version": self.version,
+                "authorization_sha256": self.sealed_run.authorization.sha256,
+                "commitment_sha256": (self.sealed_run.baseline_batch_commitment.sha256),
+                "lease_token_sha256": hashlib.sha256(
+                    self.lease_token.encode()
+                ).hexdigest(),
+            }
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class SealedTestJobRecord:
+    job_sha256: str
+    arm_id: str
+    learner_seed: int
+    state: str
+    outcome_sha256: str | None
+    failure_reason: str | None
+
+    def __post_init__(self) -> None:
+        if (
+            not _is_nonzero_sha256(self.job_sha256)
+            or not self.arm_id
+            or isinstance(self.learner_seed, bool)
+            or not isinstance(self.learner_seed, int)
+            or not 0 <= self.learner_seed < 2**64
+            or self.state not in {"complete", "failure"}
+            or (
+                self.state == "complete"
+                and (
+                    not _is_nonzero_sha256(self.outcome_sha256)
+                    or self.failure_reason is not None
+                )
+            )
+            or (
+                self.state == "failure"
+                and (
+                    self.outcome_sha256 is not None
+                    or not isinstance(self.failure_reason, str)
+                    or not self.failure_reason
+                )
+            )
+        ):
+            raise ValueError("sealed-test job record is malformed")
+
+
 class SealedTestLedger:
     """Restart-safe single-attempt ledger for a precommitted test suite."""
 
-    version = "r3b-sealed-test-ledger-v1"
+    version = "r3b-sealed-test-ledger-v3"
+    _SCHEMA = {
+        "sealed_test_attempt": {
+            "plan_sha256",
+            "version",
+            "test_suite_sha256",
+            "ledger_nonce",
+            "state",
+            "validation_run_sha256",
+            "validation_results_sha256",
+            "validation_suite_sha256",
+            "authorization_sha256",
+            "jobs_sha256",
+            "baseline_batch_sha256",
+            "receipt_token_sha256",
+            "confirmation_report_sha256",
+            "accepted",
+        },
+        "sealed_test_job": {
+            "plan_sha256",
+            "job_sha256",
+            "arm_id",
+            "learner_seed",
+            "state",
+            "lease_token_sha256",
+            "outcome_sha256",
+            "failure_reason",
+        },
+        "sealed_baseline_batch": {
+            "plan_sha256",
+            "commitment_sha256",
+            "state",
+            "lease_token_sha256",
+            "evidence_sha256s",
+            "failure_reason",
+        },
+    }
 
     def __init__(self, path: str | Path) -> None:
         supplied = Path(path).expanduser()
         if not supplied.is_absolute():
             raise ValueError("sealed-test ledger path must be absolute")
         self.path = supplied
+        self._schema_ready = False
+        current = Path(self.path.anchor)
+        for component in self.path.parent.parts[1:]:
+            current /= component
+            if current.is_symlink():
+                raise ValueError("sealed-test ledger path crosses a symbolic link")
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        parent = self.path.parent.lstat()
+        if not stat.S_ISDIR(parent.st_mode) or parent.st_uid != os.geteuid():
+            raise ValueError("sealed-test ledger parent must be an owned directory")
+        os.chmod(self.path.parent, 0o700)
+        if self.path.is_symlink():
+            raise ValueError("sealed-test ledger cannot be a symbolic link")
+        if not self.path.exists():
+            descriptor = os.open(
+                self.path,
+                os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                0o600,
+            )
+            os.close(descriptor)
+        _assert_private_ledger_path(self.path)
         with closing(self._connect()) as connection:
             connection.execute(
                 """
@@ -2545,7 +4272,8 @@ class SealedTestLedger:
                     validation_suite_sha256 TEXT,
                     authorization_sha256 TEXT,
                     jobs_sha256 TEXT,
-                    receipt_token TEXT UNIQUE,
+                    baseline_batch_sha256 TEXT,
+                    receipt_token_sha256 TEXT UNIQUE,
                     confirmation_report_sha256 TEXT,
                     accepted INTEGER
                 )
@@ -2561,7 +4289,7 @@ class SealedTestLedger:
                     state TEXT NOT NULL CHECK(
                         state IN ('pending','leased','running','complete','failure')
                     ),
-                    lease_token TEXT UNIQUE,
+                    lease_token_sha256 TEXT UNIQUE,
                     outcome_sha256 TEXT,
                     failure_reason TEXT,
                     PRIMARY KEY(plan_sha256, job_sha256),
@@ -2570,14 +4298,133 @@ class SealedTestLedger:
                 )
                 """
             )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS sealed_baseline_batch (
+                    plan_sha256 TEXT PRIMARY KEY,
+                    commitment_sha256 TEXT NOT NULL,
+                    state TEXT NOT NULL CHECK(
+                        state IN ('pending','leased','running','complete','failure')
+                    ),
+                    lease_token_sha256 TEXT UNIQUE,
+                    evidence_sha256s TEXT,
+                    failure_reason TEXT,
+                    FOREIGN KEY(plan_sha256)
+                        REFERENCES sealed_test_attempt(plan_sha256)
+                )
+                """
+            )
             connection.commit()
+            self._verify_connection(connection)
+            self._schema_ready = True
 
     def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.path, timeout=30.0)
-        connection.execute("PRAGMA journal_mode=WAL")
+        connection = _connect_private_ledger(self.path)
+        connection.execute("PRAGMA journal_mode=DELETE")
         connection.execute("PRAGMA synchronous=FULL")
-        connection.execute("PRAGMA foreign_keys=ON")
+        if self._schema_ready:
+            self._verify_connection(connection)
         return connection
+
+    def _verify_connection(self, connection: sqlite3.Connection) -> None:
+        tables = {
+            str(row[0])
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' "
+                "AND name NOT LIKE 'sqlite_%'"
+            ).fetchall()
+        }
+        columns = {
+            table: {
+                str(row[1])
+                for row in connection.execute(f"PRAGMA table_info({table})").fetchall()
+            }
+            for table in self._SCHEMA
+        }
+        versions = {
+            str(row[0])
+            for row in connection.execute(
+                "SELECT DISTINCT version FROM sealed_test_attempt"
+            ).fetchall()
+        }
+        if (
+            tables != set(self._SCHEMA)
+            or columns != self._SCHEMA
+            or versions - {self.version}
+            or connection.execute("PRAGMA foreign_key_check").fetchall()
+        ):
+            raise RuntimeError(
+                "sealed-test ledger schema, version, or referential integrity "
+                "is unsupported; in-place migrations are forbidden"
+            )
+        attempts = connection.execute(
+            "SELECT state,validation_run_sha256,validation_results_sha256,"
+            "validation_suite_sha256,authorization_sha256,jobs_sha256,"
+            "baseline_batch_sha256,receipt_token_sha256,"
+            "confirmation_report_sha256,accepted FROM sealed_test_attempt"
+        ).fetchall()
+        for row in attempts:
+            state, *fields = row
+            authorization_fields = fields[:7]
+            confirmation_fields = fields[7:]
+            if (
+                (state == "ready" and any(value is not None for value in fields))
+                or (
+                    state == "authorized"
+                    and (
+                        any(value is None for value in authorization_fields)
+                        or any(value is not None for value in confirmation_fields)
+                    )
+                )
+                or (
+                    state == "finalized"
+                    and (
+                        any(value is None for value in fields)
+                        or confirmation_fields[1] not in (0, 1)
+                    )
+                )
+            ):
+                raise RuntimeError("sealed-test attempt state is inconsistent")
+        for state, token, outcome, failure in connection.execute(
+            "SELECT state,lease_token_sha256,outcome_sha256,failure_reason "
+            "FROM sealed_test_job"
+        ):
+            if (
+                (state == "pending" and any((token, outcome, failure)))
+                or (
+                    state in {"leased", "running"}
+                    and (token is None or outcome or failure)
+                )
+                or (
+                    state == "complete"
+                    and (token is None or outcome is None or failure)
+                )
+                or (state == "failure" and (token is None or outcome or not failure))
+            ):
+                raise RuntimeError("sealed-test job state is inconsistent")
+        for state, token, evidence, failure in connection.execute(
+            "SELECT state,lease_token_sha256,evidence_sha256s,failure_reason "
+            "FROM sealed_baseline_batch"
+        ):
+            if (
+                (state == "pending" and any((token, evidence, failure)))
+                or (
+                    state in {"leased", "running"}
+                    and (token is None or evidence or failure)
+                )
+                or (
+                    state == "complete"
+                    and (token is None or evidence is None or failure)
+                )
+                or (state == "failure" and (token is None or evidence or not failure))
+            ):
+                raise RuntimeError("sealed baseline-batch state is inconsistent")
+
+    def verify(self) -> None:
+        """Fail closed on path, SQLite, schema, and state corruption."""
+
+        with closing(self._connect()) as connection:
+            self._verify_connection(connection)
 
     def precommit(
         self, plan: R3BExperimentPlan, test_suite: object
@@ -2588,6 +4435,7 @@ class SealedTestLedger:
             not isinstance(plan, R3BExperimentPlan)
             or not isinstance(test_suite, EvaluationSuite)
             or test_suite.split != "test"
+            or test_suite.policy_seed != plan.test_evaluation_seed
             or len(test_suite.snapshot_ids) * test_suite.repetitions
             != plan.test_episodes_per_policy
         ):
@@ -2664,13 +4512,16 @@ class SealedTestLedger:
             for seed in plan.test_learner_seeds
         )
         jobs_sha256 = _canonical_sha256([job.sha256 for job in jobs])
-        receipt_token = secrets.token_hex(32)
+        baseline_commitment = SealedBaselineBatchCommitment.from_plan(plan, test_suite)
+        if authorization.baseline_batch_commitment_sha256 != baseline_commitment.sha256:
+            raise RuntimeError("sealed baseline-batch commitment disagrees")
         with closing(self._connect()) as connection:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
                 "SELECT test_suite_sha256,ledger_nonce,state,validation_run_sha256,"
                 "validation_results_sha256,validation_suite_sha256,authorization_sha256,"
-                "jobs_sha256,receipt_token FROM sealed_test_attempt WHERE plan_sha256=?",
+                "jobs_sha256,baseline_batch_sha256,receipt_token_sha256 "
+                "FROM sealed_test_attempt WHERE plan_sha256=?",
                 (plan.sha256,),
             ).fetchone()
             if row is None:
@@ -2686,15 +4537,27 @@ class SealedTestLedger:
                 validation_suite.sha256,
                 authorization.sha256,
                 jobs_sha256,
+                baseline_commitment.sha256,
             )
+            receipt_token = _canonical_sha256(
+                {
+                    "domain": "r3b-sealed-test-receipt-v1",
+                    "plan_sha256": plan.sha256,
+                    "ledger_nonce": row[1],
+                    "authorization_sha256": authorization.sha256,
+                    "jobs_sha256": jobs_sha256,
+                    "baseline_batch_sha256": baseline_commitment.sha256,
+                }
+            )
+            receipt_token_sha256 = _bearer_sha256(receipt_token)
             if row[2] == "ready":
                 updated = connection.execute(
                     "UPDATE sealed_test_attempt SET state='authorized',"
                     "validation_run_sha256=?,validation_results_sha256=?,"
                     "validation_suite_sha256=?,authorization_sha256=?,jobs_sha256=?,"
-                    "receipt_token=? "
+                    "baseline_batch_sha256=?,receipt_token_sha256=? "
                     "WHERE plan_sha256=? AND state='ready'",
-                    (*expected, receipt_token, plan.sha256),
+                    (*expected, receipt_token_sha256, plan.sha256),
                 )
                 if updated.rowcount != 1:
                     raise RuntimeError("sealed-test authorization race was lost")
@@ -2712,10 +4575,17 @@ class SealedTestLedger:
                         for job in jobs
                     ),
                 )
-            elif row[2] != "authorized" or tuple(row[3:8]) != expected:
+                connection.execute(
+                    "INSERT INTO sealed_baseline_batch "
+                    "(plan_sha256,commitment_sha256,state) VALUES (?,?,'pending')",
+                    (plan.sha256, baseline_commitment.sha256),
+                )
+            elif (
+                row[2] != "authorized"
+                or tuple(row[3:9]) != expected
+                or row[9] != receipt_token_sha256
+            ):
                 raise RuntimeError("sealed-test attempt is consumed or disagrees")
-            else:
-                receipt_token = str(row[8])
             connection.commit()
         return _bind_sealed_test_run(
             plan,
@@ -2727,8 +4597,169 @@ class SealedTestLedger:
             receipt_token,
         )
 
+    def claim_baseline_batch(
+        self,
+        sealed_run: SealedTestRunAuthorization,
+        *,
+        lease_token: str | None = None,
+    ) -> SealedBaselineBatchLease:
+        """Atomically claim the sole required-baseline execution."""
+
+        if (
+            not isinstance(sealed_run, SealedTestRunAuthorization)
+            or Path(sealed_run.ledger_path) != self.path
+        ):
+            raise ValueError("sealed baseline batch belongs to another ledger")
+        sealed_run.assert_authorized()
+        token = secrets.token_hex(32) if lease_token is None else lease_token
+        if not _is_nonzero_sha256(token):
+            raise ValueError("sealed baseline lease token must be a nonzero SHA-256")
+        with closing(self._connect()) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            updated = connection.execute(
+                "UPDATE sealed_baseline_batch SET state='leased',lease_token_sha256=? "
+                "WHERE plan_sha256=? AND commitment_sha256=? AND state='pending'",
+                (
+                    _bearer_sha256(token),
+                    sealed_run.plan.sha256,
+                    sealed_run.baseline_batch_commitment.sha256,
+                ),
+            )
+            if updated.rowcount != 1:
+                raise RuntimeError(
+                    "sealed baseline batch is already claimed or terminal"
+                )
+            connection.commit()
+        return SealedBaselineBatchLease(sealed_run, token)
+
+    def resume_baseline_batch(
+        self,
+        sealed_run: SealedTestRunAuthorization,
+        *,
+        lease_token: str,
+    ) -> SealedBaselineBatchLease:
+        """Recover only an unstarted batch lease held by the same bearer."""
+
+        if (
+            not isinstance(sealed_run, SealedTestRunAuthorization)
+            or Path(sealed_run.ledger_path) != self.path
+            or not _is_nonzero_sha256(lease_token)
+        ):
+            raise ValueError("sealed baseline-batch lease recovery is malformed")
+        with closing(self._connect()) as connection:
+            row = connection.execute(
+                "SELECT state,lease_token_sha256 FROM sealed_baseline_batch "
+                "WHERE plan_sha256=? AND commitment_sha256=?",
+                (
+                    sealed_run.plan.sha256,
+                    sealed_run.baseline_batch_commitment.sha256,
+                ),
+            ).fetchone()
+        if row != ("leased", _bearer_sha256(lease_token)):
+            raise RuntimeError("sealed baseline-batch recovery token is invalid")
+        return SealedBaselineBatchLease(sealed_run, lease_token)
+
+    def begin_baseline_batch(self, lease: SealedBaselineBatchLease) -> None:
+        """Irrevocably consume a baseline-batch lease into execution."""
+
+        if (
+            not isinstance(lease, SealedBaselineBatchLease)
+            or Path(lease.sealed_run.ledger_path) != self.path
+        ):
+            raise ValueError("sealed baseline-batch lease belongs to another ledger")
+        lease._assert_state({"leased"})
+        with closing(self._connect()) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            updated = connection.execute(
+                "UPDATE sealed_baseline_batch SET state='running' "
+                "WHERE plan_sha256=? AND commitment_sha256=? AND state='leased' "
+                "AND lease_token_sha256=?",
+                (
+                    lease.sealed_run.plan.sha256,
+                    lease.sealed_run.baseline_batch_commitment.sha256,
+                    _bearer_sha256(lease.lease_token),
+                ),
+            )
+            if updated.rowcount != 1:
+                raise RuntimeError("sealed baseline-batch lease is stale or consumed")
+            connection.commit()
+
+    def complete_baseline_batch(
+        self,
+        lease: SealedBaselineBatchLease,
+        baseline_artifacts: Sequence[object],
+    ) -> tuple[BaselineEvidence, ...]:
+        """Persist exact evidence identities for the sole successful batch."""
+
+        if (
+            not isinstance(lease, SealedBaselineBatchLease)
+            or Path(lease.sealed_run.ledger_path) != self.path
+        ):
+            raise ValueError("sealed baseline-batch lease belongs to another ledger")
+        evidence = _resolve_sealed_baseline_batch(
+            lease.sealed_run.plan,
+            lease.sealed_run.baseline_batch_commitment,
+            tuple(baseline_artifacts),
+        )
+        evidence_sha256s = json.dumps(
+            [item.sha256 for item in evidence],
+            separators=(",", ":"),
+        )
+        lease.assert_running()
+        with closing(self._connect()) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            updated = connection.execute(
+                "UPDATE sealed_baseline_batch SET state='complete',"
+                "evidence_sha256s=? WHERE plan_sha256=? AND commitment_sha256=? "
+                "AND state='running' AND lease_token_sha256=?",
+                (
+                    evidence_sha256s,
+                    lease.sealed_run.plan.sha256,
+                    lease.sealed_run.baseline_batch_commitment.sha256,
+                    _bearer_sha256(lease.lease_token),
+                ),
+            )
+            if updated.rowcount != 1:
+                raise RuntimeError("sealed baseline-batch lease is stale or consumed")
+            connection.commit()
+        return evidence
+
+    def fail_baseline_batch(
+        self, lease: SealedBaselineBatchLease, failure_reason: str
+    ) -> None:
+        """Terminalize a started baseline execution without allowing a retry."""
+
+        if (
+            not isinstance(lease, SealedBaselineBatchLease)
+            or Path(lease.sealed_run.ledger_path) != self.path
+            or not isinstance(failure_reason, str)
+            or not failure_reason.strip()
+        ):
+            raise ValueError("sealed baseline-batch failure record is malformed")
+        lease.assert_running()
+        with closing(self._connect()) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            updated = connection.execute(
+                "UPDATE sealed_baseline_batch SET state='failure',failure_reason=? "
+                "WHERE plan_sha256=? AND commitment_sha256=? AND state='running' "
+                "AND lease_token_sha256=?",
+                (
+                    failure_reason.strip(),
+                    lease.sealed_run.plan.sha256,
+                    lease.sealed_run.baseline_batch_commitment.sha256,
+                    _bearer_sha256(lease.lease_token),
+                ),
+            )
+            if updated.rowcount != 1:
+                raise RuntimeError("sealed baseline-batch lease is stale or consumed")
+            connection.commit()
+
     def claim_job(
-        self, sealed_run: SealedTestRunAuthorization, job: TrialJob
+        self,
+        sealed_run: SealedTestRunAuthorization,
+        job: TrialJob,
+        *,
+        lease_token: str | None = None,
     ) -> SealedTestJobLease:
         """Atomically lease one pending test job; a lease cannot be reassigned."""
 
@@ -2738,11 +4769,13 @@ class SealedTestLedger:
             or job not in sealed_run.plan.trial_jobs("test", sealed_run)
         ):
             raise ValueError("sealed-test job does not belong to this ledger run")
-        lease_token = secrets.token_hex(32)
+        token = secrets.token_hex(32) if lease_token is None else lease_token
+        if not _is_nonzero_sha256(token):
+            raise ValueError("sealed-test lease token must be a nonzero SHA-256")
         with closing(self._connect()) as connection:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
-                "SELECT state,lease_token FROM sealed_test_job "
+                "SELECT state,lease_token_sha256 FROM sealed_test_job "
                 "WHERE plan_sha256=? AND job_sha256=?",
                 (sealed_run.plan.sha256, job.sha256),
             ).fetchone()
@@ -2750,16 +4783,20 @@ class SealedTestLedger:
                 raise RuntimeError("sealed-test job is absent from the authorization")
             if row[0] == "pending":
                 updated = connection.execute(
-                    "UPDATE sealed_test_job SET state='leased',lease_token=? "
+                    "UPDATE sealed_test_job SET state='leased',lease_token_sha256=? "
                     "WHERE plan_sha256=? AND job_sha256=? AND state='pending'",
-                    (lease_token, sealed_run.plan.sha256, job.sha256),
+                    (
+                        _bearer_sha256(token),
+                        sealed_run.plan.sha256,
+                        job.sha256,
+                    ),
                 )
                 if updated.rowcount != 1:
                     raise RuntimeError("sealed-test job claim race was lost")
             else:
                 raise RuntimeError("sealed-test job is already claimed or terminal")
             connection.commit()
-        return SealedTestJobLease(sealed_run, job, lease_token)
+        return SealedTestJobLease(sealed_run, job, token)
 
     def resume_job(
         self,
@@ -2779,11 +4816,11 @@ class SealedTestLedger:
             raise ValueError("sealed-test lease recovery is malformed")
         with closing(self._connect()) as connection:
             row = connection.execute(
-                "SELECT state,lease_token FROM sealed_test_job "
+                "SELECT state,lease_token_sha256 FROM sealed_test_job "
                 "WHERE plan_sha256=? AND job_sha256=?",
                 (sealed_run.plan.sha256, job.sha256),
             ).fetchone()
-        if row != ("leased", lease_token):
+        if row != ("leased", _bearer_sha256(lease_token)):
             raise RuntimeError("sealed-test lease recovery token is invalid")
         return SealedTestJobLease(sealed_run, job, lease_token)
 
@@ -2801,11 +4838,11 @@ class SealedTestLedger:
             updated = connection.execute(
                 "UPDATE sealed_test_job SET state='running' "
                 "WHERE plan_sha256=? AND job_sha256=? AND state='leased' "
-                "AND lease_token=?",
+                "AND lease_token_sha256=?",
                 (
                     lease.sealed_run.plan.sha256,
                     lease.job.sha256,
-                    lease.lease_token,
+                    _bearer_sha256(lease.lease_token),
                 ),
             )
             if updated.rowcount != 1:
@@ -2838,12 +4875,12 @@ class SealedTestLedger:
             updated = connection.execute(
                 "UPDATE sealed_test_job SET state='complete',outcome_sha256=? "
                 "WHERE plan_sha256=? AND job_sha256=? AND state='running' "
-                "AND lease_token=?",
+                "AND lease_token_sha256=?",
                 (
                     outcome.sha256,
                     lease.sealed_run.plan.sha256,
                     lease.job.sha256,
-                    lease.lease_token,
+                    _bearer_sha256(lease.lease_token),
                 ),
             )
             if updated.rowcount != 1:
@@ -2866,17 +4903,222 @@ class SealedTestLedger:
             updated = connection.execute(
                 "UPDATE sealed_test_job SET state='failure',failure_reason=? "
                 "WHERE plan_sha256=? AND job_sha256=? AND state='running' "
-                "AND lease_token=?",
+                "AND lease_token_sha256=?",
                 (
                     failure_reason.strip(),
                     lease.sealed_run.plan.sha256,
                     lease.job.sha256,
-                    lease.lease_token,
+                    _bearer_sha256(lease.lease_token),
                 ),
             )
             if updated.rowcount != 1:
                 raise RuntimeError("sealed-test job lease is stale or consumed")
             connection.commit()
+
+    def terminalize_orphaned_execution(
+        self,
+        sealed_run: SealedTestRunAuthorization,
+        *,
+        failure_reason: str,
+    ) -> int:
+        """Reject started work whose bearer process was irrecoverably lost.
+
+        This never makes a job retryable. It only converts durable ``running``
+        rows to terminal failures so the one-shot attempt can be finalized.
+        """
+
+        if (
+            not isinstance(sealed_run, SealedTestRunAuthorization)
+            or Path(sealed_run.ledger_path) != self.path
+            or not isinstance(failure_reason, str)
+            or not failure_reason.strip()
+        ):
+            raise ValueError("sealed orphan reconciliation is malformed")
+        sealed_run.assert_authorized()
+        reason = failure_reason.strip()
+        with closing(self._connect()) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            jobs = connection.execute(
+                "UPDATE sealed_test_job SET state='failure',failure_reason=? "
+                "WHERE plan_sha256=? AND state='running'",
+                (reason, sealed_run.plan.sha256),
+            ).rowcount
+            baseline = connection.execute(
+                "UPDATE sealed_baseline_batch SET state='failure',failure_reason=? "
+                "WHERE plan_sha256=? AND state='running'",
+                (reason, sealed_run.plan.sha256),
+            ).rowcount
+            connection.commit()
+        return jobs + baseline
+
+    def verify_completed_job(
+        self,
+        sealed_run: SealedTestRunAuthorization,
+        job: TrialJob,
+        outcome_sha256: str,
+    ) -> bool:
+        """Verify the immutable ledger result used by workflow reconciliation."""
+
+        if (
+            not isinstance(sealed_run, SealedTestRunAuthorization)
+            or Path(sealed_run.ledger_path) != self.path
+            or job not in sealed_run.plan.trial_jobs("test", sealed_run)
+            or not _is_nonzero_sha256(outcome_sha256)
+        ):
+            return False
+        sealed_run.assert_authorized()
+        with closing(self._connect()) as connection:
+            row = connection.execute(
+                "SELECT state,outcome_sha256 FROM sealed_test_job "
+                "WHERE plan_sha256=? AND job_sha256=?",
+                (sealed_run.plan.sha256, job.sha256),
+            ).fetchone()
+        return row == ("complete", outcome_sha256)
+
+    def job_state(
+        self,
+        sealed_run: SealedTestRunAuthorization,
+        job: TrialJob,
+    ) -> tuple[str, str | None, str | None]:
+        """Return one ledger row for fail-closed process supervision."""
+
+        if (
+            not isinstance(sealed_run, SealedTestRunAuthorization)
+            or Path(sealed_run.ledger_path) != self.path
+            or job not in sealed_run.plan.trial_jobs("test", sealed_run)
+        ):
+            raise ValueError("sealed-test job belongs to another ledger")
+        sealed_run.assert_authorized()
+        with closing(self._connect()) as connection:
+            row = connection.execute(
+                "SELECT state,outcome_sha256,failure_reason "
+                "FROM sealed_test_job WHERE plan_sha256=? AND job_sha256=?",
+                (sealed_run.plan.sha256, job.sha256),
+            ).fetchone()
+        if row is None or row[0] not in {
+            "pending",
+            "leased",
+            "running",
+            "complete",
+            "failure",
+        }:
+            raise RuntimeError("sealed-test job state is absent or malformed")
+        return str(row[0]), row[1], row[2]
+
+    def verify_failed_job(
+        self,
+        sealed_run: SealedTestRunAuthorization,
+        job: TrialJob,
+        failure_reason: str,
+    ) -> bool:
+        """Verify a terminal failure without making the sealed job retryable."""
+
+        if (
+            not isinstance(sealed_run, SealedTestRunAuthorization)
+            or Path(sealed_run.ledger_path) != self.path
+            or job not in sealed_run.plan.trial_jobs("test", sealed_run)
+            or not isinstance(failure_reason, str)
+            or not failure_reason
+        ):
+            return False
+        sealed_run.assert_authorized()
+        with closing(self._connect()) as connection:
+            row = connection.execute(
+                "SELECT state,failure_reason FROM sealed_test_job "
+                "WHERE plan_sha256=? AND job_sha256=?",
+                (sealed_run.plan.sha256, job.sha256),
+            ).fetchone()
+        return row == ("failure", failure_reason)
+
+    def verify_completed_baseline_batch(
+        self,
+        sealed_run: SealedTestRunAuthorization,
+        evidence_sha256s: Sequence[str],
+    ) -> bool:
+        """Verify the ordered evidence identities consumed by the one-shot batch."""
+
+        identities = tuple(evidence_sha256s)
+        if (
+            not isinstance(sealed_run, SealedTestRunAuthorization)
+            or Path(sealed_run.ledger_path) != self.path
+            or not identities
+            or any(not _is_nonzero_sha256(value) for value in identities)
+        ):
+            return False
+        sealed_run.assert_authorized()
+        with closing(self._connect()) as connection:
+            row = connection.execute(
+                "SELECT state,evidence_sha256s FROM sealed_baseline_batch "
+                "WHERE plan_sha256=? AND commitment_sha256=?",
+                (
+                    sealed_run.plan.sha256,
+                    sealed_run.baseline_batch_commitment.sha256,
+                ),
+            ).fetchone()
+        return row == (
+            "complete",
+            json.dumps(list(identities), separators=(",", ":")),
+        )
+
+    def terminal_job_records(
+        self, sealed_run: SealedTestRunAuthorization
+    ) -> tuple[SealedTestJobRecord, ...]:
+        """Return the complete immutable test result index, or fail if unfinished."""
+
+        if (
+            not isinstance(sealed_run, SealedTestRunAuthorization)
+            or Path(sealed_run.ledger_path) != self.path
+        ):
+            raise ValueError("sealed-test result index belongs to another ledger")
+        sealed_run.assert_authorized()
+        with closing(self._connect()) as connection:
+            rows = connection.execute(
+                "SELECT job_sha256,arm_id,learner_seed,state,outcome_sha256,"
+                "failure_reason FROM sealed_test_job WHERE plan_sha256=? "
+                "ORDER BY arm_id,learner_seed",
+                (sealed_run.plan.sha256,),
+            ).fetchall()
+        expected = {
+            job.sha256 for job in sealed_run.plan.trial_jobs("test", sealed_run)
+        }
+        if (
+            len(rows) != len(expected)
+            or {str(row[0]) for row in rows} != expected
+            or any(row[3] not in {"complete", "failure"} for row in rows)
+        ):
+            raise RuntimeError("sealed-test jobs are not all terminal")
+        return tuple(
+            SealedTestJobRecord(
+                str(row[0]),
+                str(row[1]),
+                int(row[2]),
+                str(row[3]),
+                None if row[4] is None else str(row[4]),
+                None if row[5] is None else str(row[5]),
+            )
+            for row in rows
+        )
+
+    def finalized_confirmation_sha256(
+        self, sealed_run: SealedTestRunAuthorization
+    ) -> str | None:
+        """Return the immutable report identity after finalization."""
+
+        if (
+            not isinstance(sealed_run, SealedTestRunAuthorization)
+            or Path(sealed_run.ledger_path) != self.path
+        ):
+            raise ValueError("sealed confirmation belongs to another ledger")
+        sealed_run.assert_authorized(allow_finalized=True)
+        with closing(self._connect()) as connection:
+            row = connection.execute(
+                "SELECT state,confirmation_report_sha256 FROM sealed_test_attempt "
+                "WHERE plan_sha256=?",
+                (sealed_run.plan.sha256,),
+            ).fetchone()
+        if row is None:
+            raise RuntimeError("sealed-test attempt is absent")
+        return str(row[1]) if row[0] == "finalized" else None
 
     def finalize_once(
         self,
@@ -2896,14 +5138,15 @@ class SealedTestLedger:
         with closing(self._connect()) as connection:
             connection.execute("BEGIN IMMEDIATE")
             attempt = connection.execute(
-                "SELECT state,authorization_sha256,receipt_token FROM sealed_test_attempt "
+                "SELECT state,authorization_sha256,receipt_token_sha256 "
+                "FROM sealed_test_attempt "
                 "WHERE plan_sha256=?",
                 (sealed_run.plan.sha256,),
             ).fetchone()
             if attempt != (
                 "authorized",
                 sealed_run.authorization.sha256,
-                sealed_run.ledger_receipt_token,
+                _bearer_sha256(sealed_run.ledger_receipt_token),
             ):
                 raise RuntimeError(
                     "sealed-test attempt is absent, mismatched, or consumed"
@@ -2921,6 +5164,35 @@ class SealedTestLedger:
                 or any(row[3] not in {"complete", "failure"} for row in rows)
             ):
                 raise RuntimeError("sealed-test jobs are incomplete or disagree")
+            baseline_row = connection.execute(
+                "SELECT state,evidence_sha256s FROM sealed_baseline_batch "
+                "WHERE plan_sha256=? AND commitment_sha256=?",
+                (
+                    sealed_run.plan.sha256,
+                    sealed_run.baseline_batch_commitment.sha256,
+                ),
+            ).fetchone()
+            if baseline_row is None or baseline_row[0] not in {
+                "complete",
+                "failure",
+            }:
+                raise RuntimeError("sealed baseline batch is absent or incomplete")
+            if baseline_row[0] == "complete":
+                baseline_evidence = _resolve_sealed_baseline_batch(
+                    sealed_run.plan,
+                    sealed_run.baseline_batch_commitment,
+                    tuple(baseline_artifacts),
+                )
+                expected_evidence_sha256s = json.dumps(
+                    [item.sha256 for item in baseline_evidence],
+                    separators=(",", ":"),
+                )
+                if baseline_row[1] != expected_evidence_sha256s:
+                    raise ValueError(
+                        "supplied baseline evidence differs from the sealed batch"
+                    )
+            elif tuple(baseline_artifacts):
+                raise ValueError("failed sealed baseline batch accepts no evidence")
 
             def recorded_result(
                 arm_id: str, supplied: ArmPhaseResult | None
@@ -3056,6 +5328,67 @@ class ConfirmationDecision:
             "trivial_baseline_margin_lower": self.trivial_baseline_margin_lower,
         }
 
+    @classmethod
+    def from_manifest(cls, value: object) -> ConfirmationDecision:
+        manifest = _require_keys(
+            value,
+            {
+                "accepted",
+                "gates",
+                "relative_auc_gain_lower",
+                "final_mean_retention_lower",
+                "final_mean_mode",
+                "p10_lower",
+                "p10_mode",
+                "trivial_baseline_margin_lower",
+            },
+            location="confirmation decision",
+        )
+        gates = manifest["gates"]
+        if (
+            type(manifest["accepted"]) is not bool
+            or not isinstance(gates, Mapping)
+            or not gates
+            or any(
+                type(name) is not str or not name or type(passed) is not bool
+                for name, passed in gates.items()
+            )
+            or any(name not in _CONFIRMATION_GATE_ORDER for name in gates)
+        ):
+            raise ValueError("confirmation decision fields are malformed")
+        for name in (
+            "relative_auc_gain_lower",
+            "final_mean_retention_lower",
+            "p10_lower",
+            "trivial_baseline_margin_lower",
+        ):
+            if manifest[name] is not None and type(manifest[name]) is not float:
+                raise ValueError("confirmation decision bounds must be floats or null")
+        for name in ("final_mean_mode", "p10_mode"):
+            if manifest[name] is not None and type(manifest[name]) is not str:
+                raise ValueError("confirmation decision modes must be strings or null")
+        try:
+            result = cls(
+                accepted=manifest["accepted"],  # type: ignore[arg-type]
+                gates=tuple(
+                    (name, gates[name])
+                    for name in _CONFIRMATION_GATE_ORDER
+                    if name in gates
+                ),  # type: ignore[arg-type]
+                relative_auc_gain_lower=manifest["relative_auc_gain_lower"],  # type: ignore[arg-type]
+                final_mean_retention_lower=manifest["final_mean_retention_lower"],  # type: ignore[arg-type]
+                final_mean_mode=manifest["final_mean_mode"],  # type: ignore[arg-type]
+                p10_lower=manifest["p10_lower"],  # type: ignore[arg-type]
+                p10_mode=manifest["p10_mode"],  # type: ignore[arg-type]
+                trivial_baseline_margin_lower=manifest["trivial_baseline_margin_lower"],  # type: ignore[arg-type]
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError("confirmation decision is malformed") from exc
+        _require_manifest_round_trip(
+            manifest, result.manifest(), location="confirmation decision"
+        )
+        return result
+
     @property
     def sha256(self) -> str:
         return _canonical_sha256(self.manifest())
@@ -3116,6 +5449,95 @@ class SealedConfirmationReport:
             "decision": self.decision.manifest(),
         }
 
+    @classmethod
+    def from_manifest(cls, value: object) -> SealedConfirmationReport:
+        manifest = _require_keys(
+            value,
+            {
+                "version",
+                "plan_sha256",
+                "authorization_sha256",
+                "ledger_receipt_sha256",
+                "candidate_arm_id",
+                "control_arm_id",
+                "candidate_result_sha256",
+                "control_result_sha256",
+                "baseline_evidence_sha256",
+                "decision",
+            },
+            location="sealed confirmation report",
+        )
+        evidence = _manifest_list(
+            manifest["baseline_evidence_sha256"],
+            location="sealed confirmation baseline identities",
+        )
+        string_fields = (
+            "version",
+            "plan_sha256",
+            "authorization_sha256",
+            "ledger_receipt_sha256",
+            "candidate_arm_id",
+            "control_arm_id",
+            "candidate_result_sha256",
+            "control_result_sha256",
+        )
+        if any(type(manifest[name]) is not str for name in string_fields) or any(
+            type(item) is not str for item in evidence
+        ):
+            raise ValueError("sealed confirmation report fields are malformed")
+        try:
+            result = cls(
+                plan_sha256=manifest["plan_sha256"],  # type: ignore[arg-type]
+                authorization_sha256=manifest["authorization_sha256"],  # type: ignore[arg-type]
+                ledger_receipt_sha256=manifest["ledger_receipt_sha256"],  # type: ignore[arg-type]
+                candidate_arm_id=manifest["candidate_arm_id"],  # type: ignore[arg-type]
+                control_arm_id=manifest["control_arm_id"],  # type: ignore[arg-type]
+                candidate_result_sha256=manifest["candidate_result_sha256"],  # type: ignore[arg-type]
+                control_result_sha256=manifest["control_result_sha256"],  # type: ignore[arg-type]
+                baseline_evidence_sha256=tuple(evidence),  # type: ignore[arg-type]
+                decision=ConfirmationDecision.from_manifest(manifest["decision"]),
+                version=manifest["version"],  # type: ignore[arg-type]
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError("sealed confirmation report is malformed") from exc
+        _require_manifest_round_trip(
+            manifest, result.manifest(), location="sealed confirmation report"
+        )
+        return result
+
+    def publish(self, store: object) -> str:
+        from .r3b_artifacts import ArtifactStore
+
+        if not isinstance(store, ArtifactStore):
+            raise TypeError("sealed confirmation requires an ArtifactStore")
+        return store.publish(
+            kind=_SEALED_CONFIRMATION_KIND,
+            version=self.version,
+            payload=self.manifest(),
+        ).artifact_id
+
+    @classmethod
+    def load_finalized(
+        cls,
+        store: object,
+        artifact_id: str,
+        *,
+        ledger: SealedTestLedger,
+    ) -> SealedConfirmationReport:
+        from .r3b_artifacts import ArtifactStore
+
+        if not isinstance(store, ArtifactStore):
+            raise TypeError("sealed confirmation requires an ArtifactStore")
+        envelope = store.load(
+            artifact_id,
+            expected_kind=_SEALED_CONFIRMATION_KIND,
+            expected_version="r3b-sealed-confirmation-report-v3",
+        )
+        report = cls.from_manifest(envelope.payload)
+        if not ledger.verify_finalized(report):
+            raise RuntimeError("sealed confirmation is not finalized in the ledger")
+        return report
+
     @property
     def sha256(self) -> str:
         return _canonical_sha256(self.manifest())
@@ -3172,7 +5594,7 @@ def confirm_on_sealed_test(
             != authorization.runner_spec_sha256
         ):
             raise ValueError("test runner differs from the authorized runner")
-        _require_evaluation_suite((candidate_result, control_result))
+        _require_evaluation_suite(plan, (candidate_result, control_result))
         _require_metric_artifacts(plan, (candidate_result, control_result))
     except ValueError:
         return ConfirmationDecision(False, (("complete_exact_test_results", False),))
@@ -3189,12 +5611,12 @@ def confirm_on_sealed_test(
         for outcome in (*candidate_result.outcomes, *control_result.outcomes)
     )
     try:
-        baseline_evidence = _resolve_baseline_artifacts(baseline_artifacts)
-        baseline_pass = baseline_requirements_pass(
+        baseline_evidence = _resolve_sealed_baseline_batch(
             plan,
-            baseline_evidence,
-            expected_suite_sha256=authorization.test_suite_sha256,
+            sealed_run.baseline_batch_commitment,
+            baseline_artifacts,
         )
+        baseline_pass = True
     except (TypeError, ValueError):
         baseline_evidence = ()
         baseline_pass = False
@@ -3338,3 +5760,204 @@ def build_sealed_confirmation_report(
         tuple(item.sha256 for item in evidence),
         decision,
     )
+
+
+@dataclass(frozen=True, slots=True)
+class DurableSealedFinalization:
+    """A finalized ledger decision and its immutable report artifact."""
+
+    report: SealedConfirmationReport
+    report_artifact_sha256: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(
+            self.report, SealedConfirmationReport
+        ) or not _is_nonzero_sha256(self.report_artifact_sha256):
+            raise ValueError("durable sealed finalization is malformed")
+
+
+def _find_finalized_report_artifact(
+    store: object,
+    ledger: SealedTestLedger,
+    report_sha256: str,
+) -> DurableSealedFinalization:
+    from .r3b_artifacts import ArtifactStore, ArtifactTypeError
+
+    if not isinstance(store, ArtifactStore):
+        raise TypeError("sealed finalization requires an ArtifactStore")
+    matches: list[tuple[str, SealedConfirmationReport]] = []
+    for artifact_id in store.list():
+        try:
+            envelope = store.load(
+                artifact_id,
+                expected_kind=_SEALED_CONFIRMATION_KIND,
+                expected_version="r3b-sealed-confirmation-report-v3",
+            )
+        except ArtifactTypeError:
+            continue
+        report = SealedConfirmationReport.from_manifest(envelope.payload)
+        if report.sha256 == report_sha256:
+            matches.append((artifact_id, report))
+    if len(matches) != 1 or not ledger.verify_finalized(matches[0][1]):
+        raise RuntimeError("finalized ledger report has no unique immutable artifact")
+    return DurableSealedFinalization(matches[0][1], matches[0][0])
+
+
+def finalize_persisted_sealed_test(
+    *,
+    store: object,
+    workflow: object,
+    ledger: SealedTestLedger,
+    sealed_run: SealedTestRunAuthorization,
+    authorization_artifact_sha256: str,
+    baseline_artifact_sha256: str | None,
+    outcome_reference_sha256s: Sequence[str],
+    outcome_loader: Callable[[str], LearnerOutcome],
+) -> DurableSealedFinalization:
+    """Reload, reconcile, and finalize one sealed test after arbitrary restarts.
+
+    Rich outcome packages remain owned by the canonical runner; ``outcome_loader``
+    must perform that strict dependency reconstruction. This coordinator then
+    binds each loaded outcome to its immutable reference, ledger row, and workflow
+    row before the one-shot decision is allowed to finalize.
+    """
+
+    from .r3b_artifacts import ArtifactStore
+    from .r3b_operational import R3BWorkflow
+
+    if (
+        not isinstance(store, ArtifactStore)
+        or not isinstance(workflow, R3BWorkflow)
+        or not isinstance(ledger, SealedTestLedger)
+        or not isinstance(sealed_run, SealedTestRunAuthorization)
+        or not callable(outcome_loader)
+    ):
+        raise TypeError("sealed finalization dependencies are malformed")
+    reloaded_run = SealedTestRunAuthorization.load(
+        store,
+        authorization_artifact_sha256,
+        plan=sealed_run.plan,
+        validation_run=sealed_run.validation_run,
+        validation_results=sealed_run.validation_results,
+        validation_suite=sealed_run.validation_suite,
+        test_suite=sealed_run.test_suite,
+        allow_finalized=True,
+    )
+    if reloaded_run != sealed_run:
+        raise ValueError("sealed authorization artifact differs from the active run")
+    finalized_sha256 = ledger.finalized_confirmation_sha256(reloaded_run)
+    if finalized_sha256 is not None:
+        return _find_finalized_report_artifact(store, ledger, finalized_sha256)
+
+    committed_baselines: tuple[object, ...]
+    if baseline_artifact_sha256 is None:
+        committed_baselines = ()
+    else:
+        committed_baselines = (
+            SealedBaselineEvidenceArtifact.load_committed(
+                store,
+                baseline_artifact_sha256,
+                ledger=ledger,
+                sealed_run=reloaded_run,
+            ),
+        )
+    records = ledger.terminal_job_records(reloaded_run)
+    jobs = {
+        job.sha256: job for job in reloaded_run.plan.trial_jobs("test", reloaded_run)
+    }
+    references = tuple(
+        SealedLearnerOutcomeReference.load(store, artifact_id)
+        for artifact_id in outcome_reference_sha256s
+    )
+    indexed_references = {reference.job_sha256: reference for reference in references}
+    completed_ids = {
+        record.job_sha256 for record in records if record.state == "complete"
+    }
+    if (
+        len(indexed_references) != len(references)
+        or set(indexed_references) != completed_ids
+    ):
+        raise ValueError(
+            "sealed outcome references must cover exactly the completed ledger jobs"
+        )
+    outcomes_by_arm: dict[str, list[LearnerOutcome]] = {}
+    failures_by_arm: dict[str, list[tuple[str, str]]] = {}
+    for record in records:
+        job = jobs[record.job_sha256]
+        if record.state == "failure":
+            assert record.failure_reason is not None
+            failures_by_arm.setdefault(record.arm_id, []).append(
+                (record.job_sha256, record.failure_reason)
+            )
+            workflow.reconcile_sealed_failure(
+                ledger=ledger,
+                sealed_run=reloaded_run,
+                job=job,
+                failure_reason=record.failure_reason,
+            )
+            continue
+        reference = indexed_references[record.job_sha256]
+        outcome = reference.resolve(
+            ledger=ledger,
+            sealed_run=reloaded_run,
+            job=job,
+            loader=outcome_loader,
+        )
+        workflow.reconcile_sealed_completion(
+            ledger=ledger,
+            sealed_run=reloaded_run,
+            job=job,
+            outcome_sha256=outcome.sha256,
+            output_sha256=reference.output_artifact_sha256,
+        )
+        outcomes_by_arm.setdefault(record.arm_id, []).append(outcome)
+
+    def arm_result(arm_id: str) -> ArmPhaseResult:
+        if arm_id in failures_by_arm:
+            reason = "; ".join(
+                f"{job_sha256}:{message}"
+                for job_sha256, message in failures_by_arm[arm_id]
+            )
+            return ArmPhaseResult(
+                arm_id,
+                "test",
+                "post_start_failure",
+                reloaded_run.plan.test_updates,
+                failure_reason=reason,
+            )
+        outcomes = tuple(
+            sorted(
+                outcomes_by_arm.get(arm_id, ()),
+                key=lambda outcome: outcome.learner_seed,
+            )
+        )
+        expected_seeds = set(reloaded_run.plan.test_learner_seeds)
+        if {outcome.learner_seed for outcome in outcomes} != expected_seeds:
+            raise ValueError("sealed arm outcome references omit learner seeds")
+        return ArmPhaseResult(
+            arm_id,
+            "test",
+            "complete",
+            reloaded_run.plan.test_updates,
+            outcomes,
+        )
+
+    candidate = arm_result(reloaded_run.authorization.candidate_arm_id)
+    control = arm_result(reloaded_run.authorization.control_arm_id)
+    preview = build_sealed_confirmation_report(
+        reloaded_run.plan,
+        reloaded_run,
+        candidate,
+        control,
+        committed_baselines,
+    )
+    report_artifact = preview.publish(store)
+    report = ledger.finalize_once(
+        reloaded_run,
+        candidate,
+        control,
+        committed_baselines,
+    )
+    if report != preview:
+        raise RuntimeError("sealed finalization differs from its published preview")
+    return DurableSealedFinalization(report, report_artifact)

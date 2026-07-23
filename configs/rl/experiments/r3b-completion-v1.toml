@@ -10,7 +10,7 @@ tie_break = ["higher_median_auc", "higher_final_mean_raw_score", "lower_learning
 total_updates = 1000
 shaped_updates = 600
 zero_tail_updates = 400
-ticks_per_update = 32768
+ticks_per_update = 2048
 checkpoint_interval_updates = 50
 alpha_lifetime = "one_complete_episode"
 tail_transition = "drain_nonzero_episodes_before_zero_tail"
@@ -24,10 +24,13 @@ zero_control = "same_conditioned_architecture_composer_and_schedule"
 calibration_learner = [1103, 1129, 1151]
 validation_learner = [2203, 2221, 2237, 2267, 2281, 2309, 2333, 2357]
 test_learner = [3301, 3313, 3331, 3343, 3361, 3373, 3391, 3407, 3433, 3457, 3469, 3491]
+calibration_evaluation = 51
+validation_evaluation = 61
+test_evaluation = 71
 
 [calibration]
 budgets_updates = [100, 300]
-elimination_metric = "paired_tick_aligned_raw_score_auc"
+elimination_metric = "final_rung_paired_tick_aligned_raw_score_auc_no_early_elimination"
 
 [validation]
 updates = 1000
@@ -41,7 +44,8 @@ sealed_until_one_candidate_is_selected = true
 reuse_after_rejection = false
 
 [statistics]
-auc = "trapezoid_on_exact_simulated_tick_grid_normalized_by_horizon"
+auc = "linear_interpolation_to_target_tick_grid_normalized_by_horizon"
+maximum_cumulative_tick_overshoot_fraction = 0.01
 bootstrap_unit = "paired_learner_seed"
 bootstrap_samples = 4096
 bootstrap_seed = 2026072203
