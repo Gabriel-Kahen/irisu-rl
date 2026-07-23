@@ -2,8 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
-  activatedBlendAlpha, activatedPalette, bonusColorIntervalMs,
-  bonusPalette, colorFor, hasActivatedBlend, palette,
+  activatedPalette, activatedTrailAlphas, bonusColorIntervalMs,
+  bonusPalette, colorFor, hasActivatedTrail, palette,
 } from "../static/colors.mjs";
 
 test("green and orange slots use the requested colors in both states", () => {
@@ -24,12 +24,12 @@ test("the bonus ball cycles through exactly five block colors", () => {
   );
 });
 
-test("activated pieces use the original half-strength additive blend", () => {
-  assert.equal(activatedBlendAlpha, 128 / 255);
-  assert.equal(hasActivatedBlend({kind: "piece", lifecycle: "confirmed"}), true);
-  assert.equal(hasActivatedBlend({kind: "piece", lifecycle: "dynamic_fresh"}), true);
-  assert.equal(hasActivatedBlend({kind: "piece", lifecycle: "scripted_falling"}), false);
-  assert.equal(hasActivatedBlend({kind: "piece", lifecycle: "rotten"}), false);
-  assert.equal(hasActivatedBlend({kind: "bonus", lifecycle: "confirmed"}), false);
-  assert.equal(hasActivatedBlend({kind: "projectile", lifecycle: "confirmed"}), false);
+test("only confirmed pieces receive four translucent motion echoes", () => {
+  assert.deepEqual(activatedTrailAlphas, [.08, .13, .2, .3]);
+  assert.equal(hasActivatedTrail({kind: "piece", lifecycle: "confirmed"}), true);
+  assert.equal(hasActivatedTrail({kind: "piece", lifecycle: "dynamic_fresh"}), false);
+  assert.equal(hasActivatedTrail({kind: "piece", lifecycle: "scripted_falling"}), false);
+  assert.equal(hasActivatedTrail({kind: "piece", lifecycle: "rotten"}), false);
+  assert.equal(hasActivatedTrail({kind: "bonus", lifecycle: "confirmed"}), false);
+  assert.equal(hasActivatedTrail({kind: "projectile", lifecycle: "confirmed"}), false);
 });

@@ -14,15 +14,15 @@ export const bonusPalette = [
 ];
 
 export const bonusColorIntervalMs = 400;
-export const activatedBlendAlpha = 128 / 255;
+export const activatedTrailAlphas = [.08, .13, .2, .3];
 
 function isActivatedBlock(body) {
   return body.kind === "piece" &&
     (body.lifecycle === "dynamic_fresh" || body.lifecycle === "confirmed");
 }
 
-export function hasActivatedBlend(body) {
-  return isActivatedBlock(body);
+export function hasActivatedTrail(body) {
+  return body.kind === "piece" && body.lifecycle === "confirmed";
 }
 
 export function colorFor(body, now = 0) {
