@@ -166,7 +166,7 @@ def _config() -> R3BOperationalConfig:
         calibration_repetitions=1,
         validation_repetitions=1,
         test_repetitions=1,
-        evaluation_max_decisions=2,
+        evaluation_max_decisions=10,
         evaluation_max_simulated_ticks=10,
         snapshot_generator_version="r3b-full-game-generator-v1",
         minimum_train_snapshots=1,

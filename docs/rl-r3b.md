@@ -177,10 +177,12 @@ the complete retained calibration results and recomputes the one-LR-per-alpha
 selection; a standalone selection hash cannot authorize work.
 
 Tick-aligned learning-curve AUC is evaluated on the frozen first 32 logical
-snapshots at each 50-update checkpoint. Final mean, p10, retention,
-cross-backend diagnostics, and sealed gates use the complete 512-cell
+snapshots at each 50-update checkpoint. LR selection, validation AUC nomination,
+and the sealed relative-AUC gate all use that preregistered curve subset. Final
+mean, p10, retention, and cross-backend diagnostics use the complete 512-cell
 validation/test suite (64 cells for calibration). Curve and final reports carry
-different typed suite identities; a curve report cannot satisfy a final gate.
+different typed suite identities; a curve report cannot satisfy a full-suite
+final-score gate.
 
 The test suite is committed before validation in a durable SQLite ledger. The
 validation authorization carries that commitment. After validation fixes one
@@ -225,6 +227,13 @@ elapsed ticks are diagnostics, never selection rewards.
 The tick horizon is exact: long waits are clipped to the remaining budget and
 a shot macro stops after its press when only one tick remains. An all-masked
 action branch is an error, not an implicit WAIT action.
+“Final” denotes the score at the preregistered bounded-horizon endpoint, not
+necessarily natural game over. Reaching the 8,192-tick bound is retained as an
+explicit truncation; natural game over is a separate termination. The matching
+8,192-decision cap is nonbinding because every accepted semantic decision
+advances at least one tick. Every policy is therefore evaluated on the same
+paired cell and simulated-time bound, and neither outcome may be discarded or
+relabeled.
 
 The deployment-style recurrent evaluator uses deterministic semantic argmax,
 masked wait choices, coordinate means, recurrent state, and a zero critic-only

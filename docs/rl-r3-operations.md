@@ -103,16 +103,42 @@ still content- and semantics-verified. This avoids repeatedly scanning a
 growing artifact store at every checkpoint.
 
 Learning-curve AUC uses a preregistered 32-snapshot exact subset at every
-50-update checkpoint. Final selection/confirmation metrics and portable
-diagnostics use the complete phase suite: 64 calibration cells and 512
-validation/test cells. Curve and final suite identities are stored separately
-and cannot be substituted.
+50-update checkpoint. That subset therefore supplies LR selection, validation
+AUC nomination, and the sealed relative-AUC gate. Final mean, p10, retention,
+and portable diagnostics use the complete phase suite: 64 calibration cells
+and 512 validation/test cells. Curve and final suite identities are stored
+separately and cannot be substituted.
 
 On the local Ryzen 7 3700X reference host, a real exact 16-cell recurrent
 evaluation took 73.431 seconds scalar and 62.107 seconds with the 16-lane
-vector evaluator (1.18x). A five-update exact training smoke took 23.43
-seconds, with cumulative simulated ticks within 0.381% of target. These are
-engineering measurements, not R3 acceptance results.
+vector evaluator (1.18x). A real 50-update exact canonical segment took about
+64 seconds and produced 102,810 simulated ticks. These are engineering
+measurements, not R3 acceptance results.
+
+The frozen protocol comprises 66,800 optimizer updates and 116,864 bounded
+logical episode cells: 82,816 exact and 34,048 portable. Artifact-cache reuse
+can make the number of physical executions slightly lower. Extrapolating the
+reference measurements gives a best-observed serial floor of roughly five days
+before portable evaluation, persistence, and operational overhead. This is a
+capacity estimate, not a deadline or an acceptance result: the reference cells
+averaged only 1,576 of the allowed 8,192 ticks. At the same measured tick
+throughput, the all-cells-at-cap exact upper estimate is about 19 days before
+portable work. Rerun the benchmark and use completed validation durations to
+reserve each sealed learner-job window separately; pending sealed jobs are safe
+between commands. Reserve the one-shot baseline batch as its own uninterrupted
+window (about 35 hours of exact work at the tick-cap estimate, plus portable
+work and overhead), and retain enough disk for all immutable checkpoints and
+reports. The checked runner intentionally serializes jobs and evaluation shards;
+launching competing canonical runners on the same host is rejected by the
+global run lock.
+
+Evaluation is a preregistered bounded-horizon benchmark. An episode that reaches
+the 8,192-tick bound is explicitly recorded as truncated, and
+its score at that bound is the fixed-cell final raw score. Natural game over is
+recorded separately as termination. The 8,192-decision cap is a nonbinding
+safety cap because every accepted semantic decision advances at least one tick.
+Reports may not omit, relabel, or extend a truncated cell, so policy comparisons
+remain paired under identical simulated-time bounds.
 
 ## Commands
 
@@ -128,6 +154,19 @@ paths. The source plan is checked in; generated bundles belong under ignored
 `artifacts/`.
 
 ```bash
+install -d -m 700 artifacts artifacts/r3 artifacts/r3/snapshots
+
+uv run irisu-r3 snapshots build \
+  --source-config configs/rl/snapshots/r3b-source-plan-v1.toml \
+  --backend portable \
+  --library /absolute/path/to/libirisu_clone.so \
+  --output artifacts/r3/snapshots/portable
+
+uv run irisu-r3 snapshots verify \
+  --bundle artifacts/r3/snapshots/portable \
+  --backend portable \
+  --library /absolute/path/to/libirisu_clone.so
+
 uv run irisu-r3 snapshots build \
   --source-config configs/rl/snapshots/r3b-source-plan-v1.toml \
   --backend exact \

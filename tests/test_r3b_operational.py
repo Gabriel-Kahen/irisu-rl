@@ -60,6 +60,11 @@ class R3BOperationalTests(unittest.TestCase):
             R3BOperationalConfig.from_manifest(manifest)
         with self.assertRaisesRegex(ValueError, "invalid"):
             replace(self.config, ppo_entropy_coefficient=True)
+        with self.assertRaisesRegex(ValueError, "invalid"):
+            replace(
+                self.config,
+                evaluation_max_decisions=self.config.evaluation_max_simulated_ticks - 1,
+            )
 
     def test_progressive_calibration_uses_one_final_job_per_arm_seed(self) -> None:
         jobs = self.workflow.calibration_jobs(self.plan)

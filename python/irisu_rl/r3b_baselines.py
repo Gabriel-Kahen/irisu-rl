@@ -12,7 +12,12 @@ from typing import Any
 
 from irisu_env import IrisuEnv
 
-from .r3b_artifacts import ArtifactLookupIndex, ArtifactStore
+from .r3b_artifacts import (
+    ArtifactLookupIndex,
+    ArtifactStore,
+    ensure_private_directory,
+    publish_private_file,
+)
 from .r3b_canonical_runner import CanonicalRunInputs, PairedEvaluationSuites
 from .r3b_evaluation import (
     BaselineArtifactBundle,
@@ -371,26 +376,7 @@ def _secret_payload(
 
 
 def _write_private(path: Path, payload: bytes) -> None:
-    descriptor = os.open(
-        path,
-        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
-        0o600,
-    )
-    try:
-        view = memoryview(payload)
-        while view:
-            written = os.write(descriptor, view)
-            if written <= 0:
-                raise OSError("short write while publishing sealed baseline secret")
-            view = view[written:]
-        os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
-    parent = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
-    try:
-        os.fsync(parent)
-    finally:
-        os.close(parent)
+    publish_private_file(path, payload)
 
 
 def _load_private(path: Path) -> dict[str, str]:
@@ -423,9 +409,7 @@ def _acquire_baseline_lease(
     sealed: PublishedSealedAuthorization,
     ledger: SealedTestLedger,
 ) -> SealedBaselineBatchLease:
-    secret_root = inputs.root / "secrets"
-    secret_root.mkdir(mode=0o700, exist_ok=True)
-    os.chmod(secret_root, 0o700)
+    secret_root = ensure_private_directory(inputs.root / "secrets")
     secret = secret_root / "sealed-baseline.json"
     intent = secret_root / "sealed-baseline.intent.json"
     if secret.exists():

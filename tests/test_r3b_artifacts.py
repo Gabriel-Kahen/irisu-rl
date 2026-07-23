@@ -17,6 +17,9 @@ from irisu_rl.r3b_artifacts import (
     ExactResumeVerificationReceipt,
     UnsafeArtifactIdError,
     canonical_json_bytes,
+    ensure_private_directory,
+    publish_private_file,
+    write_all,
 )
 from irisu_rl.r3b_experiments import (
     ExactResumeArtifact,
@@ -237,6 +240,65 @@ class ArtifactStoreTests(unittest.TestCase):
             )
         after = len(tuple(descriptors.iterdir()))
         self.assertLessEqual(after, before + 1)
+
+    def test_private_directory_rejects_links_and_unsafe_metadata(self) -> None:
+        private = Path(self.temporary.name) / "private"
+        self.assertEqual(ensure_private_directory(private), private)
+        self.assertEqual(stat.S_IMODE(private.stat().st_mode), 0o700)
+
+        linked = Path(self.temporary.name) / "linked-private"
+        linked.symlink_to(private, target_is_directory=True)
+        with self.assertRaisesRegex(ArtifactIntegrityError, "non-linked"):
+            ensure_private_directory(linked)
+
+        os.chmod(private, 0o755)
+        with self.assertRaisesRegex(ArtifactIntegrityError, "0700"):
+            ensure_private_directory(private)
+
+    def test_write_all_retries_legal_partial_writes(self) -> None:
+        destination = Path(self.temporary.name) / "private-state"
+        descriptor = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        payload = b"abcdefghijklmnopqrstuvwxyz"
+        real_write = os.write
+
+        def partial_write(fd: int, value: object) -> int:
+            data = bytes(value)  # type: ignore[arg-type]
+            return real_write(fd, data[: max(1, len(data) // 2)])
+
+        try:
+            with mock.patch(
+                "irisu_rl.r3b_artifacts.os.write",
+                side_effect=partial_write,
+            ) as write:
+                write_all(descriptor, payload)
+            self.assertGreater(write.call_count, 1)
+        finally:
+            os.close(descriptor)
+        self.assertEqual(destination.read_bytes(), payload)
+
+    def test_private_file_failure_never_exposes_partial_destination(self) -> None:
+        private = ensure_private_directory(Path(self.temporary.name) / "private")
+        destination = private / "secret.json"
+        real_write = os.write
+        calls = 0
+
+        def fail_after_partial_write(fd: int, value: object) -> int:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                data = bytes(value)  # type: ignore[arg-type]
+                return real_write(fd, data[:1])
+            raise OSError("synthetic disk failure")
+
+        with mock.patch(
+            "irisu_rl.r3b_artifacts.os.write",
+            side_effect=fail_after_partial_write,
+        ):
+            with self.assertRaisesRegex(OSError, "synthetic disk failure"):
+                publish_private_file(destination, b"complete-secret")
+
+        self.assertFalse(destination.exists())
+        self.assertEqual(tuple(private.glob(".private-*.tmp")), ())
 
 
 class ExactResumeVerificationReceiptTests(unittest.TestCase):

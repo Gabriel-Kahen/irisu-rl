@@ -29,7 +29,12 @@ from .r3b_local_runner import (
     run_local_canonical_updates,
     run_local_smoke_updates,
 )
-from .r3b_operational import R3BOperationalConfig, R3BWorkflow
+from .r3b_operational import (
+    CANONICAL_OPERATIONAL_CONFIG_SHA256,
+    CANONICAL_PLAN_SHA256,
+    R3BOperationalConfig,
+    R3BWorkflow,
+)
 from .r3b_snapshots import (
     SnapshotBundle,
     SnapshotSourceManifest,
@@ -262,6 +267,13 @@ def _command_config_verify(args: argparse.Namespace) -> dict[str, object]:
     config = R3BOperationalConfig.from_toml(args.config)
     plan = load_plan(args.plan)
     _validate_config_plan(config, plan)
+    if (
+        plan.sha256 != CANONICAL_PLAN_SHA256
+        or config.sha256 != CANONICAL_OPERATIONAL_CONFIG_SHA256
+    ):
+        raise ValueError(
+            "configuration does not match the locked canonical R3b identities"
+        )
     return {
         "version": "r3b-config-verification-v1",
         "plan_sha256": plan.sha256,

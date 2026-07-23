@@ -29,7 +29,7 @@ CANONICAL_PLAN_SHA256 = (
     "68860ef26686c954960c176afe67a44da34e2ffab03dd02ba5aa7c1fc193baf8"
 )
 CANONICAL_OPERATIONAL_CONFIG_SHA256 = (
-    "b93465814cb1e7fa5ccffae54de89138ad1bfd5e58e52d9688c4cfa02d0ab2d3"
+    "b59828dfcf0bf933ba940ad8f219765784e8328cde8a5ca39b09411d2a4d275c"
 )
 CANONICAL_EXACT_SNAPSHOT_BUNDLE_SHA256 = (
     "f1dda0293344589c7db516c25c3c85219ae2ec596648c1c2568b1b5e6b0c135e"
@@ -186,6 +186,7 @@ class R3BOperationalConfig:
                 self.minimum_test_snapshots,
             )
             or self.evaluation_shards > self.curve_snapshots
+            or self.evaluation_max_decisions < self.evaluation_max_simulated_ticks
             or self.primary_backend != "exact"
             or self.checkpoint_retention != "all_planned_boundaries"
             or self.transfer_eligible

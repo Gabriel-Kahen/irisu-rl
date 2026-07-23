@@ -8,7 +8,12 @@ import os
 from pathlib import Path
 import secrets
 
-from .r3b_artifacts import ArtifactStore, ArtifactTypeError
+from .r3b_artifacts import (
+    ArtifactStore,
+    ArtifactTypeError,
+    ensure_private_directory,
+    publish_private_file,
+)
 from .r3b_canonical_runner import (
     CanonicalRunInputs,
     PairedEvaluationSuites,
@@ -235,21 +240,7 @@ def _write_sealed_lease_secret(
         )
         + b"\n"
     )
-    descriptor = os.open(
-        path,
-        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
-        0o600,
-    )
-    try:
-        os.write(descriptor, payload)
-        os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
-    parent = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
-    try:
-        os.fsync(parent)
-    finally:
-        os.close(parent)
+    publish_private_file(path, payload)
 
 
 def _load_sealed_lease_secret(
@@ -294,9 +285,7 @@ def acquire_sealed_job(
         raise ValueError("sealed authorization belongs to another run")
     root = inputs.root
     workflow = inputs.workflow
-    secret_root = root / "secrets"
-    secret_root.mkdir(mode=0o700, exist_ok=True)
-    os.chmod(secret_root, 0o700)
+    secret_root = ensure_private_directory(root / "secrets")
     active: list[JobClaim] = []
     for path in sorted(secret_root.glob("*.claim.json")):
         candidate = _load_claim(path)
@@ -446,31 +435,17 @@ def acquire_sealed_job(
                 )
         else:
             lease_token = secrets.token_hex(32)
-            descriptor = os.open(
+            publish_private_file(
                 lease_intent,
-                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
-                0o600,
-            )
-            try:
-                os.write(
-                    descriptor,
-                    _canonical_bytes(
-                        {
-                            "version": "r3b-sealed-lease-intent-v1",
-                            "job_sha256": job.sha256,
-                            "lease_token": lease_token,
-                        }
-                    )
-                    + b"\n",
+                _canonical_bytes(
+                    {
+                        "version": "r3b-sealed-lease-intent-v1",
+                        "job_sha256": job.sha256,
+                        "lease_token": lease_token,
+                    }
                 )
-                os.fsync(descriptor)
-            finally:
-                os.close(descriptor)
-            parent = os.open(secret_root, os.O_RDONLY | os.O_DIRECTORY)
-            try:
-                os.fsync(parent)
-            finally:
-                os.close(parent)
+                + b"\n",
+            )
             lease = ledger.claim_job(
                 sealed.authorization,
                 job,

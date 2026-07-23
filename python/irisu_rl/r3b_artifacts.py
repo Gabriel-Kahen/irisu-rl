@@ -111,6 +111,91 @@ def canonical_json_bytes(value: object) -> bytes:
         raise ArtifactStoreError("value cannot be encoded as canonical JSON") from error
 
 
+def ensure_private_directory(path: str | Path) -> Path:
+    """Create or verify one owned, non-linked directory with mode 0700."""
+
+    supplied = Path(path)
+    if not supplied.is_absolute():
+        raise ArtifactStoreError("private directory path must be absolute")
+    try:
+        supplied.mkdir(mode=_DIRECTORY_MODE)
+    except FileExistsError:
+        pass
+    metadata = supplied.lstat()
+    if (
+        not stat.S_ISDIR(metadata.st_mode)
+        or metadata.st_uid != os.geteuid()
+        or stat.S_IMODE(metadata.st_mode) != _DIRECTORY_MODE
+    ):
+        raise ArtifactIntegrityError(
+            "private directory must be owned, non-linked, and mode 0700"
+        )
+    flags = os.O_RDONLY | os.O_CLOEXEC | os.O_DIRECTORY | os.O_NOFOLLOW
+    descriptor = os.open(supplied, flags)
+    try:
+        opened = os.fstat(descriptor)
+        if (
+            not stat.S_ISDIR(opened.st_mode)
+            or opened.st_uid != os.geteuid()
+            or stat.S_IMODE(opened.st_mode) != _DIRECTORY_MODE
+            or (opened.st_dev, opened.st_ino) != (metadata.st_dev, metadata.st_ino)
+        ):
+            raise ArtifactIntegrityError("private directory metadata changed")
+    finally:
+        os.close(descriptor)
+    return supplied
+
+
+def write_all(descriptor: int, payload: bytes) -> None:
+    """Write every payload byte or fail before the caller publishes it."""
+
+    view = memoryview(payload)
+    while view:
+        written = os.write(descriptor, view)
+        if written <= 0:
+            raise OSError("short write while publishing private state")
+        view = view[written:]
+
+
+def publish_private_file(path: str | Path, payload: bytes) -> Path:
+    """Atomically publish one immutable mode-0600 file without replacement."""
+
+    destination = Path(path)
+    if not destination.is_absolute() or destination.name in {"", ".", ".."}:
+        raise ArtifactStoreError("private file path must be absolute and named")
+    parent = ensure_private_directory(destination.parent)
+    temporary = f".private-{os.getpid()}-{secrets.token_hex(16)}.tmp"
+    flags = os.O_RDONLY | os.O_CLOEXEC | os.O_DIRECTORY | os.O_NOFOLLOW
+    parent_fd = os.open(parent, flags)
+    published = False
+    try:
+        file_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC
+        file_flags |= os.O_NOFOLLOW
+        descriptor = os.open(temporary, file_flags, _FILE_MODE, dir_fd=parent_fd)
+        try:
+            os.fchmod(descriptor, _FILE_MODE)
+            write_all(descriptor, payload)
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        _rename_noreplace(
+            temporary,
+            destination.name,
+            source_fd=parent_fd,
+            destination_fd=parent_fd,
+        )
+        published = True
+        os.fsync(parent_fd)
+    finally:
+        if not published:
+            try:
+                os.unlink(temporary, dir_fd=parent_fd)
+            except FileNotFoundError:
+                pass
+        os.close(parent_fd)
+    return destination
+
+
 def _content_sha256(*, kind: str, version: str, payload: object) -> str:
     content = {"kind": kind, "payload": payload, "version": version}
     return hashlib.sha256(canonical_json_bytes(content)).hexdigest()

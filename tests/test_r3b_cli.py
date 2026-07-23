@@ -37,6 +37,29 @@ class R3BCLITests(unittest.TestCase):
         self.assertEqual(result["primary_backend"], "exact")
         self.assertFalse(result["transfer_eligible"])
 
+    def test_config_verify_rejects_a_schema_valid_but_unlocked_config(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            changed = Path(directory) / "changed-operational.toml"
+            changed.write_text(
+                CONFIG.read_text(encoding="utf-8").replace(
+                    "entropy_coefficient = 0.01",
+                    "entropy_coefficient = 0.011",
+                ),
+                encoding="utf-8",
+            )
+
+            code, output, error = self.invoke(
+                "config",
+                "verify",
+                "--config",
+                str(changed),
+                "--plan",
+                str(PLAN),
+            )
+
+        self.assertEqual((code, output), (2, ""))
+        self.assertIn("locked canonical R3b identities", error)
+
     def test_experiment_init_status_and_verify_round_trip(self) -> None:
         manifest = {
             "version": "r3b-snapshot-bundle-v1",

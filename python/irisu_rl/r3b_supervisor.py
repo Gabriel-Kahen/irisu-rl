@@ -176,6 +176,55 @@ def _restore(
         raise ValueError("restored session differs from its typed checkpoint")
 
 
+def _build_trial_for_evaluation(
+    builder: Any,
+    job: TrialJob,
+    authorization: ValidationRunAuthorization | SealedTestJobLease | None,
+) -> Any:
+    return (
+        builder.build_under_running_sealed_lease(job, authorization=authorization)
+        if isinstance(authorization, SealedTestJobLease)
+        else builder.build(job, authorization=authorization)
+    )
+
+
+def _fresh_restored_checkpoint(
+    *,
+    builder: Any,
+    authorization: ValidationRunAuthorization | SealedTestJobLease | None,
+    root: Path,
+    store: ArtifactStore,
+    artifact_sha256: str,
+    job: TrialJob,
+    target_update: int,
+    identity: dict[str, object],
+) -> tuple[Any, TrainingCheckpointArtifact, str]:
+    """Restore one checkpoint into a new caller-owned trial session."""
+
+    built = _build_trial_for_evaluation(builder, job, authorization)
+    try:
+        checkpoint, generation, _ = _checkpoint_package(
+            root=root,
+            store=store,
+            artifact_sha256=artifact_sha256,
+            built=built,
+            job=job,
+            target_update=target_update,
+        )
+        _restore(
+            root=root,
+            built=built,
+            job=job,
+            generation=generation,
+            identity=identity,
+            checkpoint=checkpoint,
+        )
+    except BaseException:
+        built.close()
+        raise
+    return built, checkpoint, generation
+
+
 @dataclass(frozen=True, slots=True)
 class CanonicalEvaluationResult:
     job_sha256: str
@@ -275,16 +324,14 @@ def evaluate_trained_canonical_job(
         sealed_test_ledger=sealed_test_ledger,
     )
     built = None
+    initial_built = None
+    resume_built = None
     try:
-        built = (
-            builder.build_under_running_sealed_lease(job, authorization=authorization)
-            if isinstance(authorization, SealedTestJobLease)
-            else builder.build(job, authorization=authorization)
-        )
+        initial_built = _build_trial_for_evaluation(builder, job, authorization)
         identity = {
-            "trial_manifest_sha256": built.manifest.sha256,
+            "trial_manifest_sha256": initial_built.manifest.sha256,
             "job_sha256": job.sha256,
-            "runner_spec_sha256": built.manifest.runner_spec_sha256,
+            "runner_spec_sha256": initial_built.manifest.runner_spec_sha256,
             "source_identity_sha256": inputs.workflow.verify()[
                 "source_identity_sha256"
             ],
@@ -306,15 +353,17 @@ def evaluate_trained_canonical_job(
             inputs,
             phase=phase,
             learner_seed=job.learner_seed,
-            assignment_sha256=built.manifest.assignment_sha256,
+            assignment_sha256=initial_built.manifest.assignment_sha256,
             purpose="curve",
         )
         final_suites = PairedEvaluationSuites.build(
             inputs,
             phase=phase,
             learner_seed=job.learner_seed,
-            assignment_sha256=built.manifest.assignment_sha256,
+            assignment_sha256=initial_built.manifest.assignment_sha256,
         )
+        initial_built.close()
+        initial_built = None
         with PaddedVectorEnv(
             config.lanes,
             workers=config.workers,
@@ -322,48 +371,47 @@ def evaluate_trained_canonical_job(
             worker_path=worker,
         ) as exact_vector:
             for update in expected_updates:
-                checkpoint, generation, _ = _checkpoint_package(
-                    root=root,
-                    store=store,
-                    artifact_sha256=indexed[update],
-                    built=built,
-                    job=job,
-                    target_update=update,
+                checkpoint_built, checkpoint, generation = (
+                    _fresh_restored_checkpoint(
+                        builder=builder,
+                        authorization=authorization,
+                        root=root,
+                        store=store,
+                        artifact_sha256=indexed[update],
+                        job=job,
+                        target_update=update,
+                        identity=identity,
+                    )
                 )
-                packages[update] = (checkpoint, generation)
-                _restore(
-                    root=root,
-                    built=built,
-                    job=job,
-                    generation=generation,
-                    identity=identity,
-                    checkpoint=checkpoint,
-                )
-                encoder, kind_mask, wait_mask, deployment = _deployment(
-                    built.session.model
-                )
-                report = evaluate_recurrent_policy_sharded(
-                    inputs=inputs,
-                    simulator=exact_vector,
-                    store=inputs.exact_bundle.store,
-                    suite=curve_suites.exact,
-                    model=built.session.model,
-                    encoder=encoder,
-                    kind_mask=kind_mask,
-                    wait_mask=wait_mask,
-                    policy_sha256=deployment.sha256,
-                    artifact_store=store,
-                )
-                checkpoint_evaluations.append(CheckpointEvaluation(checkpoint, report))
-            final_checkpoint, final_generation = packages[job.budget_updates]
-            _restore(
-                root=root,
-                built=built,
-                job=job,
-                generation=final_generation,
-                identity=identity,
-                checkpoint=final_checkpoint,
-            )
+                retain = False
+                try:
+                    packages[update] = (checkpoint, generation)
+                    encoder, kind_mask, wait_mask, deployment = _deployment(
+                        checkpoint_built.session.model
+                    )
+                    report = evaluate_recurrent_policy_sharded(
+                        inputs=inputs,
+                        simulator=exact_vector,
+                        store=inputs.exact_bundle.store,
+                        suite=curve_suites.exact,
+                        model=checkpoint_built.session.model,
+                        encoder=encoder,
+                        kind_mask=kind_mask,
+                        wait_mask=wait_mask,
+                        policy_sha256=deployment.sha256,
+                        artifact_store=store,
+                    )
+                    checkpoint_evaluations.append(
+                        CheckpointEvaluation(checkpoint, report)
+                    )
+                    if update == job.budget_updates:
+                        built = checkpoint_built
+                        retain = True
+                finally:
+                    if not retain:
+                        checkpoint_built.close()
+            if built is None:
+                raise RuntimeError("canonical evaluation lacks its final session")
             encoder, kind_mask, wait_mask, deployment = _deployment(built.session.model)
             exact_final_report = evaluate_recurrent_policy_sharded(
                 inputs=inputs,
@@ -399,14 +447,23 @@ def evaluate_trained_canonical_job(
 
         resume_update = job.budget_updates - plan.checkpoint_interval_updates
         resume_checkpoint, resume_generation = packages[resume_update]
-        _restore(
-            root=root,
-            built=built,
-            job=job,
-            generation=resume_generation,
-            identity=identity,
-            checkpoint=resume_checkpoint,
+        resume_built, restored_resume_checkpoint, restored_resume_generation = (
+            _fresh_restored_checkpoint(
+                builder=builder,
+                authorization=authorization,
+                root=root,
+                store=store,
+                artifact_sha256=indexed[resume_update],
+                job=job,
+                target_update=resume_update,
+                identity=identity,
+            )
         )
+        if (
+            restored_resume_checkpoint != resume_checkpoint
+            or restored_resume_generation != resume_generation
+        ):
+            raise RuntimeError("resume checkpoint restoration changed identity")
 
         def restored_factory():
             if isinstance(authorization, SealedTestJobLease):
@@ -421,21 +478,15 @@ def evaluate_trained_canonical_job(
             checkpoint_directory=root / "jobs" / job.sha256 / "checkpoints",
             generation=resume_generation,
             checkpoint_identity=identity,
-            source=built.session,
+            source=resume_built.session,
             restored_factory=restored_factory,
             plan=plan,
             sealed_job_lease=(
                 authorization if isinstance(authorization, SealedTestJobLease) else None
             ),
         )
-        _restore(
-            root=root,
-            built=built,
-            job=job,
-            generation=final_generation,
-            identity=identity,
-            checkpoint=final_checkpoint,
-        )
+        resume_built.close()
+        resume_built = None
         outcome, published = assemble_and_publish_outcome(
             inputs=inputs,
             store=store,
@@ -505,5 +556,9 @@ def evaluate_trained_canonical_job(
                 )
         raise
     finally:
+        if initial_built is not None:
+            initial_built.close()
+        if resume_built is not None:
+            resume_built.close()
         if built is not None:
             built.close()

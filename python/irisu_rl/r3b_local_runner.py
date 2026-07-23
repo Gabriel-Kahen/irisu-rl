@@ -20,7 +20,7 @@ from .curriculum import CurriculumSpec, StageSpec
 from .encoding import TeacherStateEncoder
 from .models import RecurrentActorCritic, RecurrentModelConfig
 from .ppo import PPOConfig
-from .r3b_artifacts import ArtifactStore
+from .r3b_artifacts import ArtifactStore, ensure_private_directory, publish_private_file
 from .r3b_evaluation import DeploymentPolicyIdentity
 from .r3b_experiments import (
     R3BExperimentPlan,
@@ -123,8 +123,6 @@ def _read_resolved_run(root: Path) -> dict[str, object]:
 
 
 def _write_claim(path: Path, claim: JobClaim) -> None:
-    path.parent.mkdir(mode=0o700, exist_ok=True)
-    os.chmod(path.parent, 0o700)
     payload = (
         _canonical_bytes(
             {
@@ -137,23 +135,7 @@ def _write_claim(path: Path, claim: JobClaim) -> None:
         )
         + b"\n"
     )
-    descriptor = os.open(
-        path,
-        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
-        0o600,
-    )
-    try:
-        with os.fdopen(descriptor, "wb", closefd=False) as handle:
-            handle.write(payload)
-            handle.flush()
-            os.fsync(handle.fileno())
-    finally:
-        os.close(descriptor)
-    parent_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
-    try:
-        os.fsync(parent_fd)
-    finally:
-        os.close(parent_fd)
+    publish_private_file(path, payload)
 
 
 def _load_claim(path: Path) -> JobClaim:
@@ -182,8 +164,6 @@ def _load_claim(path: Path) -> JobClaim:
 
 
 def _write_claim_intent(path: Path, *, phase: str, token: str, owner: str) -> None:
-    path.parent.mkdir(mode=0o700, exist_ok=True)
-    os.chmod(path.parent, 0o700)
     payload = (
         _canonical_bytes(
             {
@@ -195,28 +175,17 @@ def _write_claim_intent(path: Path, *, phase: str, token: str, owner: str) -> No
         )
         + b"\n"
     )
-    descriptor = os.open(
-        path,
-        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
-        0o600,
-    )
-    try:
-        os.write(descriptor, payload)
-        os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
-    parent_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
-    try:
-        os.fsync(parent_fd)
-    finally:
-        os.close(parent_fd)
+    publish_private_file(path, payload)
 
 
 def _load_claim_intent(path: Path) -> tuple[str, str, str]:
     if path.is_symlink() or not path.is_file() or path.stat().st_mode & 0o077:
         raise ValueError("claim intent is missing, linked, or not private")
     payload = path.read_bytes()
-    value = json.loads(payload)
+    try:
+        value = json.loads(payload)
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise ValueError("claim intent is malformed") from exc
     if (
         not isinstance(value, dict)
         or set(value) != {"version", "phase", "token", "owner"}
@@ -420,6 +389,70 @@ class LocalTrainingResult:
         }
 
 
+def _reconcile_sealed_training_failure(
+    *,
+    workflow: R3BWorkflow,
+    authorization: SealedTestJobLease,
+    ledger: SealedTestLedger,
+    reason: str,
+) -> None:
+    """Record or recover one sealed failure, then reconcile the workflow row."""
+
+    try:
+        authorization.assert_running()
+    except RuntimeError:
+        state, _outcome_sha256, failure_reason = ledger.job_state(
+            authorization.sealed_run,
+            authorization.job,
+        )
+        if state != "failure" or not isinstance(failure_reason, str):
+            return
+        reason = failure_reason
+    else:
+        ledger.fail_job(authorization, reason)
+    workflow.reconcile_sealed_failure(
+        ledger=ledger,
+        sealed_run=authorization.sealed_run,
+        job=authorization.job,
+        failure_reason=reason,
+    )
+
+
+def _load_completed_training_result(
+    root: Path,
+    job: TrialJob,
+    record: dict[str, object],
+) -> LocalTrainingResult:
+    latest = record["latest_checkpoint"]
+    if (
+        not isinstance(latest, dict)
+        or latest.get("completed_updates") != job.budget_updates
+        or not isinstance(latest.get("artifact_sha256"), str)
+    ):
+        raise RuntimeError("trained job lacks its final checkpoint")
+    envelope = ArtifactStore(root / "artifacts").load(
+        latest["artifact_sha256"],
+        expected_kind="irisu.r3b.training-checkpoint",
+        expected_version="r3b-training-checkpoint-package-v2",
+    )
+    payload = envelope.payload
+    if (
+        not isinstance(payload, dict)
+        or payload.get("job_sha256") != job.sha256
+        or payload.get("completed_updates") != job.budget_updates
+        or not isinstance(payload.get("simulated_ticks"), int)
+    ):
+        raise ValueError("trained job final checkpoint package differs")
+    return LocalTrainingResult(
+        job.sha256,
+        job.budget_updates,
+        job.budget_updates,
+        payload["simulated_ticks"],
+        envelope.artifact_id,
+        True,
+    )
+
+
 def _run_local_training_updates(
     run_directory: str | Path,
     *,
@@ -495,16 +528,15 @@ def _run_local_training_updates(
     if not worker.is_absolute() or worker.is_symlink() or not worker.is_file():
         raise ValueError("exact worker path must be an absolute regular file")
 
-    secret_root = root / "secrets"
+    secret_root = ensure_private_directory(root / "secrets")
     active: tuple[Path, JobClaim] | None = None
-    if secret_root.exists():
-        for path in sorted(secret_root.glob("*.claim.json")):
-            candidate = _load_claim(path)
-            record = workflow.job_record(candidate.job_sha256)
-            if record["status"] in {"claimed", "running", "trained"}:
-                if active is not None:
-                    raise RuntimeError("multiple active local claim secrets exist")
-                active = (path, candidate)
+    for path in sorted(secret_root.glob("*.claim.json")):
+        candidate = _load_claim(path)
+        record = workflow.job_record(candidate.job_sha256)
+        if record["status"] in {"claimed", "running", "trained"}:
+            if active is not None:
+                raise RuntimeError("multiple active local claim secrets exist")
+            active = (path, candidate)
     if active is None:
         intent_path = secret_root / f"{phase}.intent.json"
         if intent_path.exists():
@@ -540,18 +572,22 @@ def _run_local_training_updates(
             raise RuntimeError("active training claim belongs to another owner")
 
     record = workflow.job_record(claim.job_sha256)
-    if record["status"] == "trained":
-        raise RuntimeError("training is complete; evaluation output is still pending")
-    if phase == "test" and record["status"] == "running":
-        raise RuntimeError(
-            "sealed test training cannot resume across an execution boundary"
-        )
     try:
         job = TrialJob.from_manifest(record["manifest"])
     except (TypeError, ValueError) as exc:
         raise ValueError("claimed job manifest is invalid") from exc
     if job.phase != phase or job.sha256 != claim.job_sha256:
         raise ValueError("claimed job is foreign to the requested phase")
+    if record["status"] == "trained":
+        if phase == "test":
+            raise RuntimeError(
+                "sealed test evaluation cannot resume across an execution boundary"
+            )
+        return _load_completed_training_result(root, job, record)
+    if phase == "test" and record["status"] == "running":
+        raise RuntimeError(
+            "sealed test training cannot resume across an execution boundary"
+        )
     if phase == "test" and max_new_updates < job.budget_updates:
         raise ValueError(
             "sealed test training must reach its full budget in one process"
@@ -743,18 +779,12 @@ def _run_local_training_updates(
             isinstance(authorization, SealedTestJobLease)
             and sealed_test_ledger is not None
         ):
-            try:
-                authorization.assert_running()
-            except RuntimeError:
-                pass
-            else:
-                sealed_test_ledger.fail_job(authorization, reason)
-                workflow.reconcile_sealed_failure(
-                    ledger=sealed_test_ledger,
-                    sealed_run=authorization.sealed_run,
-                    job=authorization.job,
-                    failure_reason=reason,
-                )
+            _reconcile_sealed_training_failure(
+                workflow=workflow,
+                authorization=authorization,
+                ledger=sealed_test_ledger,
+                reason=reason,
+            )
         if began:
             current = workflow.job_record(claim.job_sha256)["status"]
             if current in {"claimed", "running"}:
