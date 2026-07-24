@@ -843,14 +843,14 @@ class EpisodeMetrics:
             or self.elapsed_ticks < 0
             or self.decisions < 0
             or self.invalid_actions < 0
-            # The exact runtime stores gauge as a signed int64 and can report a
-            # negative pre-terminal value before its terminal bookkeeping
-            # publishes the final boundary.  Preserve that diagnostic instead
-            # of rejecting an otherwise valid episode.
+            # The exact runtime stores gauge as a signed int64. Rot damage
+            # happens after the scene gauge floor, so a live observation can
+            # remain negative until the next tick latches game over. That
+            # terminal tick can also end negative because actor updates
+            # continue after the latch.
             or not -(2**63) <= self.minimum_gauge < 2**63
             or self.minimum_gauge > self.final_gauge
-            or self.final_gauge < 0
-            or self.final_gauge >= 2**63
+            or not -(2**63) <= self.final_gauge < 2**63
             or self.raw_score != self.final_score - self.initial_score
             or not isinstance(self.terminated, bool)
             or not isinstance(self.truncated, bool)

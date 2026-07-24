@@ -17,6 +17,7 @@ from irisu_rl.r3b_evaluation import (
     CrossBackendCellPair,
     CrossBackendEvaluationManifest,
     DeploymentPolicyIdentity,
+    EpisodeMetrics,
     EvaluationReport,
     EvaluationSuite,
     LearnedPolicyBackendParityArtifact,
@@ -100,7 +101,7 @@ class FakeTerminalUnderflowSimulator(FakeSingleSimulator):
         self.steps += 1
         self.tick += 1
         self.score += 1
-        self.gauge = -48 if self.steps == 1 else 1
+        self.gauge = -48 if self.steps == 1 else -96
         return (
             self._observation(),
             1,
@@ -110,12 +111,45 @@ class FakeTerminalUnderflowSimulator(FakeSingleSimulator):
         )
 
 
+class FakeHorizonUnderflowSimulator(FakeSingleSimulator):
+    def step(self, action: Action):
+        self.tick += 1
+        self.score += 1
+        self.gauge = -48
+        return self._observation(), 1, False, False, {"invalid_action": False}
+
+
 class ConfiguredTeacherEncoder(TeacherStateEncoder):
     def __init__(self, scale: int) -> None:
         self.scale = scale
 
 
 class R3BEvaluationTests(unittest.TestCase):
+    def test_episode_metrics_preserve_signed_final_gauge(self) -> None:
+        manifest = {
+            "snapshot_id": "r3b-source-v1-exact-calibration-0031",
+            "repetition": 0,
+            "policy_seed": 1533497378338680030,
+            "initial_score": 0,
+            "final_score": 16,
+            "raw_score": 16,
+            "elapsed_ticks": 1877,
+            "decisions": 29,
+            "terminated": True,
+            "truncated": False,
+            "invalid_actions": 0,
+            "minimum_gauge": -1819,
+            "final_gauge": -1819,
+        }
+        episode = EpisodeMetrics.from_manifest(manifest)
+        self.assertEqual(episode.final_gauge, -1819)
+        with self.assertRaisesRegex(ValueError, "malformed"):
+            replace(
+                episode,
+                minimum_gauge=-(2**63) - 1,
+                final_gauge=-(2**63) - 1,
+            )
+
     def test_build_identity_binds_source_dependencies_runtime_and_configuration(
         self,
     ) -> None:
@@ -591,7 +625,7 @@ class R3BEvaluationTests(unittest.TestCase):
         self.assertEqual(report.episodes[0].elapsed_ticks, 3)
         self.assertEqual(report.episodes[0].raw_score, 3)
 
-    def test_terminal_underflow_is_preserved_as_signed_minimum_gauge(self) -> None:
+    def test_terminal_underflow_is_preserved_as_signed_final_gauge(self) -> None:
         torch.manual_seed(41)
         model = RecurrentActorCritic(
             TEACHER_V1,
@@ -633,8 +667,55 @@ class R3BEvaluationTests(unittest.TestCase):
         )
         episode = report.episodes[0]
         self.assertTrue(episode.terminated)
+        self.assertEqual(episode.minimum_gauge, -96)
+        self.assertEqual(episode.final_gauge, -96)
+
+    def test_horizon_underflow_is_preserved_as_signed_final_gauge(self) -> None:
+        torch.manual_seed(42)
+        model = RecurrentActorCritic(
+            TEACHER_V1,
+            config=RecurrentModelConfig(8, 8, 12, 12, 1),
+        )
+        spec, blobs = _fixture()
+        store = SnapshotBlobStore(spec.library, blobs)
+        suite = EvaluationSuite(
+            "horizon-underflow-v1",
+            "validation",
+            ("validation",),
+            1,
+            42,
+            1,
+            1,
+            _RUNTIME_SHA256,
+            spec.assignment_sha256,
+            store.library.sha256,
+            store.sha256,
+            model.action_spec.sha256,
+            (spec.library["validation"].sha256,),
+        )
+        kind_mask = torch.zeros((1, 3), dtype=torch.bool)
+        kind_mask[:, 0] = True
+        wait_mask = torch.zeros(
+            (1, len(model.action_spec.wait_choices)), dtype=torch.bool
+        )
+        wait_mask[:, 0] = True
+        report = evaluate_recurrent_policy(
+            FakeHorizonUnderflowSimulator(),
+            store,
+            suite,
+            model,
+            TeacherStateEncoder(),
+            kind_mask,
+            wait_mask,
+            evaluator_sha256="e" * 64,
+            expected_assignment_sha256=spec.assignment_sha256,
+            **evaluation_identity(),
+        )
+        episode = report.episodes[0]
+        self.assertFalse(episode.terminated)
+        self.assertTrue(episode.truncated)
         self.assertEqual(episode.minimum_gauge, -48)
-        self.assertEqual(episode.final_gauge, 1)
+        self.assertEqual(episode.final_gauge, -48)
 
 
 if __name__ == "__main__":

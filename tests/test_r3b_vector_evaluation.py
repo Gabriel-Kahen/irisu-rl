@@ -15,6 +15,7 @@ from irisu_rl.r3b_evaluation import (
 )
 from irisu_rl.schema import TEACHER_V1
 from tests.test_r3b_evaluation import (
+    FakeHorizonUnderflowSimulator,
     FakeSingleSimulator,
     FakeTerminalUnderflowSimulator,
 )
@@ -227,9 +228,44 @@ class R3BVectorEvaluationTests(unittest.TestCase):
         )
         self.assertEqual(vector, single)
         self.assertTrue(all(value.terminated for value in vector.episodes))
-        self.assertTrue(all(value.minimum_gauge == -48 for value in vector.episodes))
+        self.assertTrue(all(value.minimum_gauge == -96 for value in vector.episodes))
+        self.assertTrue(all(value.final_gauge == -96 for value in vector.episodes))
         self.assertIn((0, 1), vector_simulator.step_many_calls)
         self.assertIn((0,), vector_simulator.step_many_calls)
+
+    def test_horizon_underflow_matches_single_lane(self) -> None:
+        model = _model()
+        suite = _suite(self.store, repetitions=3, max_decisions=1, max_ticks=1)
+        kind_mask = torch.zeros((1, 3), dtype=torch.bool)
+        kind_mask[:, 0] = True
+        wait_mask = torch.zeros(
+            (1, len(model.action_spec.wait_choices)), dtype=torch.bool
+        )
+        wait_mask[:, 0] = True
+        single = _evaluate(
+            FakeHorizonUnderflowSimulator(),
+            self.store,
+            suite,
+            model,
+            kind_mask,
+            wait_mask,
+            vector=False,
+        )
+        vector_simulator = FakePaddedVectorSimulator(2, FakeHorizonUnderflowSimulator)
+        vector = _evaluate(
+            vector_simulator,
+            self.store,
+            suite,
+            model,
+            kind_mask,
+            wait_mask,
+            vector=True,
+        )
+        self.assertEqual(vector, single)
+        self.assertTrue(all(not value.terminated for value in vector.episodes))
+        self.assertTrue(all(value.truncated for value in vector.episodes))
+        self.assertTrue(all(value.minimum_gauge == -48 for value in vector.episodes))
+        self.assertTrue(all(value.final_gauge == -48 for value in vector.episodes))
 
     def test_rejects_nonvector_and_identity_mismatch_before_execution(self) -> None:
         model = _model()
