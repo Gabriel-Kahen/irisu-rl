@@ -36,18 +36,18 @@
     "episode_content_sha256": "2c39615161b60c32fb8b892f987d8126fe76482426d759e8483d0db6641a6636",
     "exact_worker_sha256": "4faa4508a89df3e1e62b80e2871b6a35b5913f220d53fe5de43408ad6512c261",
     "final": {
-      "deployment_policy_sha256": "9652cba42caa7e13d35ec46224eca4d7237140e2d0e907e26277ca2de85bc444",
+      "deployment_policy_sha256": "2fbc157afcf0eed895075226cb5e971bb873729ae0b76901e722afcb6edad194",
       "evaluation_module_sha256": "08cabf235afbbc4726b105ea483b75c9e66f32da18d13c946358b5a53a194c5c",
       "operational_config_sha256": "002a3f0deb1119b47aa55114f733c17322ec9aeaa1a5e13847ab834895a5577e",
-      "simulated_ticks_per_second": 21573.666369086885,
-      "source_revision": "7909e9ca3d3c6ebdec369641c208344096b9a123",
+      "simulated_ticks_per_second": 21682.855159209194,
+      "source_revision": "80281e205f44881bd94f84a9ed8ceb2f68ab5a04",
       "source_tracked_clean": true,
       "suite_sha256": "98e83975c6b8bb230ecadff669f1c88424334f70e1ee71107193e3043f4d7b50",
       "untracked_test_setup": [
         "build",
         "reference/runs"
       ],
-      "wall_seconds": 4.871540988999186
+      "wall_seconds": 4.847009271994466
     },
     "max_simulated_ticks": 2048,
     "model_state_sha256": "51e8ee90bbfac0efe750201d7066844c4b64031cdb9dd23597492626e502a763",
@@ -56,7 +56,7 @@
       "source_revision": "fc1ee1b665207726a1687dfd570646290e92efa4",
       "wall_seconds": 4.057675719988765
     },
-    "relative_throughput": 0.832934738546124,
+    "relative_throughput": 0.837150393632133,
     "simulated_ticks": 105097,
     "snapshot_bundle_sha256": "2371129c883ade88b309e509c2d8a7399a85944dc5dd7e841fc14d977527eb7a",
     "torch_threads": 1,
