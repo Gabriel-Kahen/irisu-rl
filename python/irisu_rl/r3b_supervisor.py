@@ -125,14 +125,22 @@ def _stop_evaluation_executor(
     for process in processes:
         _signal_evaluation_process(process, signal.SIGTERM)
     deadline = time.monotonic() + timeout_seconds
-    for process in processes:
-        process.join(max(0.0, deadline - time.monotonic()))
+    while time.monotonic() < deadline:
+        active = tuple(process for process in processes if process.is_alive())
+        if not active:
+            break
+        for process in active:
+            process.join(min(0.05, max(0.0, deadline - time.monotonic())))
     survivors = tuple(process for process in processes if process.is_alive())
     for process in survivors:
         _signal_evaluation_process(process, signal.SIGKILL)
     deadline = time.monotonic() + timeout_seconds
-    for process in survivors:
-        process.join(max(0.0, deadline - time.monotonic()))
+    while time.monotonic() < deadline:
+        active = tuple(process for process in survivors if process.is_alive())
+        if not active:
+            break
+        for process in active:
+            process.join(min(0.05, max(0.0, deadline - time.monotonic())))
     remaining = tuple(process for process in survivors if process.is_alive())
     if remaining:
         details = tuple(
