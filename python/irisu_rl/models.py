@@ -38,10 +38,9 @@ class RecurrentModelConfig:
             for value in widths
         ):
             raise ValueError("model widths and layer count must be positive integers")
-        if (
-            isinstance(self.critic_condition_features, bool)
-            or self.critic_condition_features not in (0, 1)
-        ):
+        if isinstance(
+            self.critic_condition_features, bool
+        ) or self.critic_condition_features not in (0, 1):
             raise ValueError("critic condition feature count must be zero or one")
         if not 1.0 <= self.minimum_concentration <= 10.0:
             raise ValueError("minimum concentration must be within [1, 10]")
@@ -202,8 +201,7 @@ class RecurrentActorCritic(nn.Module):
             if self.config.critic_condition_features
             else (
                 "recurrent-actor-critic-v2"
-                if self.config.coordinate_parameterization
-                == "mean-log-concentration"
+                if self.config.coordinate_parameterization == "mean-log-concentration"
                 else "recurrent-actor-critic-v1"
             )
         )
