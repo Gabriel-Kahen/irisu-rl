@@ -16,6 +16,7 @@ from irisu_rl.r3b_operational import (
     CANONICAL_OPERATIONAL_CONFIG_SHA256,
     CANONICAL_PAIRING_SHA256S,
     CANONICAL_PORTABLE_SNAPSHOT_BUNDLE_SHA256,
+    PREREGISTERED_CANONICAL_OPERATIONAL_CONFIG_SHA256S,
     R3BOperationalConfig,
     R3BWorkflow,
 )
@@ -60,7 +61,7 @@ class R3BOperationalTests(unittest.TestCase):
                 self.config.evaluation_torch_threads,
                 self.config.evaluation_shards,
             ),
-            (16, 16, 16, 16, 9, 1, 2),
+            (16, 16, 16, 16, 9, 1, 1),
         )
         manifest = self.config.manifest()
         self.assertEqual(
@@ -109,6 +110,13 @@ class R3BOperationalTests(unittest.TestCase):
 
     def test_canonical_workflow_requires_every_preregistered_input(self) -> None:
         self.assertEqual(self.config.sha256, CANONICAL_OPERATIONAL_CONFIG_SHA256)
+        self.assertEqual(
+            PREREGISTERED_CANONICAL_OPERATIONAL_CONFIG_SHA256S,
+            {
+                CANONICAL_OPERATIONAL_CONFIG_SHA256,
+                "b59828dfcf0bf933ba940ad8f219765784e8328cde8a5ca39b09411d2a4d275c",
+            },
+        )
         canonical_path = Path(self.temporary.name) / "canonical.sqlite3"
         workflow = R3BWorkflow.create(
             canonical_path,

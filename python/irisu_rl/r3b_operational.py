@@ -28,7 +28,13 @@ CANONICAL_PLAN_SHA256 = (
     "68860ef26686c954960c176afe67a44da34e2ffab03dd02ba5aa7c1fc193baf8"
 )
 CANONICAL_OPERATIONAL_CONFIG_SHA256 = (
-    "002a3f0deb1119b47aa55114f733c17322ec9aeaa1a5e13847ab834895a5577e"
+    "76f56fe6b6cbeb9ab5796aabaf92d76fab969ca24abed20fca0953cf39c86a15"
+)
+PREREGISTERED_CANONICAL_OPERATIONAL_CONFIG_SHA256S = frozenset(
+    {
+        CANONICAL_OPERATIONAL_CONFIG_SHA256,
+        "b59828dfcf0bf933ba940ad8f219765784e8328cde8a5ca39b09411d2a4d275c",
+    }
 )
 CANONICAL_EXACT_SNAPSHOT_BUNDLE_SHA256 = (
     "2371129c883ade88b309e509c2d8a7399a85944dc5dd7e841fc14d977527eb7a"
@@ -885,7 +891,7 @@ class R3BWorkflow:
             if manifest.get("run_class") == "canonical" and (
                 manifest.get("plan_sha256") != CANONICAL_PLAN_SHA256
                 or manifest.get("operational_config_sha256")
-                != CANONICAL_OPERATIONAL_CONFIG_SHA256
+                not in PREREGISTERED_CANONICAL_OPERATIONAL_CONFIG_SHA256S
                 or manifest.get("snapshot_bundle_sha256")
                 != CANONICAL_EXACT_SNAPSHOT_BUNDLE_SHA256
                 or manifest.get("portable_snapshot_bundle_sha256")

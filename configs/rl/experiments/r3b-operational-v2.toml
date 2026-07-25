@@ -33,7 +33,7 @@ target_kl = 0.03
 # cover the seven curve reports plus the exact and portable final reports.
 [evaluation]
 curve_snapshots = 32
-shards = 2
+shards = 1
 lanes = 16
 workers = 16
 processes = 9

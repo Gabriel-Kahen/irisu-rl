@@ -43,6 +43,11 @@ children from an interrupted operator have exited. Canonical training may only
 stop on the frozen 50-update grid; sealed test jobs must train and evaluate in
 one uninterrupted command.
 
+Read-only workflow verification retains the preregistered operational identity
+of the original canonical runner as well as the current accelerated identity.
+New canonical runs and operator execution paths may use only the current
+identity; the historical allowance does not authorize resuming old evidence.
+
 Calibration and validation may recover only from the last identity-bound
 checkpoint. A stale worker token immediately loses authority. Test jobs use the
 separate one-shot sealed ledger: an unstarted lease is recoverable only with
