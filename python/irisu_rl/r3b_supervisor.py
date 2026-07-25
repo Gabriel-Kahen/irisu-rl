@@ -19,6 +19,7 @@ from typing import Any
 
 import torch
 from irisu_env import IrisuEnv
+from irisu_env.exact_ipc import register_exact_worker_lease
 
 from .collector import model_state_sha256
 from .encoding import TeacherStateEncoder
@@ -61,9 +62,9 @@ from .r3b_parallel_evaluation import (
 _CHECKPOINT_KIND = "irisu.r3b.training-checkpoint"
 _CHECKPOINT_VERSION = "r3b-training-checkpoint-package-v2"
 _EVALUATION_SHUTDOWN_SECONDS = 5.0
+_EVALUATION_STARTUP_SECONDS = 30.0
 _PR_SET_PDEATHSIG = 1
 _EVALUATION_LEASE_DESCRIPTOR: int | None = None
-_EVALUATOR_LEASE_FD_ENV = "IRISU_R3B_EVALUATOR_LEASE_FD"
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,7 +100,7 @@ def _evaluation_worker_initializer(
     if os.getppid() != parent_pid:
         _terminate_evaluation_process_group(signal.SIGTERM, None)
     _EVALUATION_LEASE_DESCRIPTOR = hold_evaluator_lease(lease_path)
-    os.environ[_EVALUATOR_LEASE_FD_ENV] = str(_EVALUATION_LEASE_DESCRIPTOR)
+    register_exact_worker_lease(_EVALUATION_LEASE_DESCRIPTOR, lease_path)
     if ready_gate is not None:
         ready_gate.wait()
 
@@ -112,7 +113,7 @@ def _evaluation_processes(executor: ProcessPoolExecutor) -> tuple[Any, ...]:
 def _capture_evaluation_process_groups(
     executor: ProcessPoolExecutor,
     *,
-    timeout_seconds: float = _EVALUATION_SHUTDOWN_SECONDS,
+    timeout_seconds: float = _EVALUATION_STARTUP_SECONDS,
 ) -> tuple[_EvaluationProcessGroup, ...]:
     """Pin every initialized evaluator group before trusted work proceeds."""
 
@@ -224,51 +225,83 @@ def _evaluation_lease_holders(group: _EvaluationProcessGroup) -> tuple[int, ...]
     """Pin live processes that still hold this evaluator's exact lease file."""
 
     descriptors: list[int] = []
-    for entry in Path("/proc").iterdir():
-        if not entry.name.isdecimal():
-            continue
-        try:
-            _, fields = (entry / "stat").read_text(encoding="utf-8").rsplit(") ", 1)
-        except FileNotFoundError:
-            continue
-        except PermissionError:
-            raise RuntimeError("cannot inspect evaluator descendant state")
-        except ValueError:
-            continue
-        values = fields.split()
-        if (
-            len(values) < 3
-            or values[0] == "Z"
-            or not values[2].isdecimal()
-            or int(values[2]) != group.pgid
-        ):
-            continue
-        try:
-            if entry.stat().st_uid != os.geteuid():
+    try:
+        for entry in Path("/proc").iterdir():
+            if not entry.name.isdecimal():
                 continue
-        except FileNotFoundError:
-            continue
-        try:
-            pidfd = os.pidfd_open(int(entry.name), 0)
-        except ProcessLookupError:
-            continue
-        try:
-            held = any(
-                (metadata := descriptor.stat()).st_dev == group.lease_device
-                and metadata.st_ino == group.lease_inode
-                for descriptor in (entry / "fd").iterdir()
-            )
-        except FileNotFoundError:
-            os.close(pidfd)
-            continue
-        except PermissionError:
-            os.close(pidfd)
-            raise RuntimeError("cannot inspect evaluator descendant descriptors")
-        if held:
-            descriptors.append(pidfd)
-        else:
-            os.close(pidfd)
+            pid = int(entry.name)
+            try:
+                if entry.stat().st_uid != os.geteuid():
+                    continue
+            except FileNotFoundError:
+                continue
+            except PermissionError:
+                continue
+            try:
+                if os.getpgid(pid) != group.pgid:
+                    continue
+            except ProcessLookupError:
+                continue
+            except PermissionError as exc:
+                raise RuntimeError(
+                    "cannot inspect same-user evaluator process group"
+                ) from exc
+            try:
+                identity = _evaluation_process_identity(entry)
+            except FileNotFoundError:
+                continue
+            except PermissionError as exc:
+                raise RuntimeError("cannot inspect evaluator descendant state") from exc
+            if identity is None or identity[0] != group.pgid:
+                continue
+            try:
+                pidfd = os.pidfd_open(pid, 0)
+            except ProcessLookupError:
+                continue
+            keep = False
+            try:
+                try:
+                    if _evaluation_process_identity(entry) != identity:
+                        continue
+                    held = any(
+                        (metadata := descriptor.stat()).st_dev == group.lease_device
+                        and metadata.st_ino == group.lease_inode
+                        for descriptor in (entry / "fd").iterdir()
+                    )
+                    if _evaluation_process_identity(entry) != identity:
+                        continue
+                except FileNotFoundError:
+                    continue
+                except PermissionError as exc:
+                    raise RuntimeError(
+                        "cannot inspect evaluator descendant descriptors"
+                    ) from exc
+                if held:
+                    descriptors.append(pidfd)
+                    keep = True
+            finally:
+                if not keep:
+                    os.close(pidfd)
+    except BaseException:
+        for descriptor in descriptors:
+            os.close(descriptor)
+        raise
     return tuple(descriptors)
+
+
+def _evaluation_process_identity(entry: Path) -> tuple[int, int] | None:
+    """Return process-group/start-time identity for one live procfs entry."""
+
+    _, fields = (entry / "stat").read_text(encoding="utf-8").rsplit(") ", 1)
+    values = fields.split()
+    if (
+        len(values) <= 19
+        or values[0] == "Z"
+        or not values[2].isdecimal()
+        or not values[19].isdecimal()
+    ):
+        return None
+    return int(values[2]), int(values[19])
 
 
 def _evaluation_group_alive(group: _EvaluationProcessGroup) -> bool:
@@ -912,7 +945,6 @@ def evaluate_trained_canonical_job(
         futures: dict[
             Future[CanonicalEvaluationTaskResult], CanonicalEvaluationTask
         ] = {}
-        failed = True
         try:
             for task in evaluation_tasks:
                 futures[executor.submit(evaluate_canonical_task, task)] = task
@@ -963,11 +995,18 @@ def evaluate_trained_canonical_job(
             resume_built.close()
             resume_built = None
             results = _collect_evaluation_results(futures)
-            failed = False
-        finally:
-            if failed:
-                for future in futures:
-                    future.cancel()
+        except BaseException as primary_error:
+            for future in futures:
+                future.cancel()
+            try:
+                _stop_evaluation_executor(executor)
+            except BaseException as cleanup_error:
+                primary_error.add_note(
+                    "canonical evaluator cleanup also failed: "
+                    f"{type(cleanup_error).__name__}: {cleanup_error}"
+                )
+            raise
+        else:
             _stop_evaluation_executor(executor)
 
         checkpoint_evaluations = tuple(

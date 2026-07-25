@@ -32,6 +32,8 @@ _PROTOCOL_VERSION = 1
 _BODY_CAPACITY = 196
 _EXACT_BACKEND = "exact-msvc9-r58-multiworld-forward"
 _EXACT_LIBRARY_SONAME = "libirisu_box2d_msvc_exact_multiworld.so"
+_EXACT_WORKER_LEASE_LOCK = threading.RLock()
+_EXACT_WORKER_LEASE: tuple[int, int, int, str] | None = None
 
 _HELLO = 1
 _RESET = 2
@@ -959,27 +961,83 @@ def _exact_worker_launch_environment() -> dict[str, str]:
 
 
 def _exact_worker_pass_fds() -> tuple[int, ...]:
-    """Preserve the optional canonical evaluator lease across worker exec."""
+    """Return the explicitly registered canonical lease after revalidation."""
 
-    raw = os.environ.get("IRISU_R3B_EVALUATOR_LEASE_FD")
-    if raw is None:
+    with _EXACT_WORKER_LEASE_LOCK:
+        registration = _EXACT_WORKER_LEASE
+    if registration is None:
         return ()
-    if not raw.isascii() or not raw.isdecimal():
-        raise ExactWorkerError("evaluator lease descriptor is malformed")
-    descriptor = int(raw)
-    try:
-        metadata = os.fstat(descriptor)
-    except OSError as exc:
-        raise ExactWorkerError("evaluator lease descriptor is not open") from exc
+    current = _validated_exact_worker_lease(registration[0], registration[3])
+    if current != registration:
+        raise ExactWorkerError("exact-worker lease identity changed")
+    return (registration[0],)
+
+
+def _validated_exact_worker_lease(
+    descriptor: int,
+    path: str | os.PathLike[str],
+) -> tuple[int, int, int, str]:
     if (
-        descriptor <= 2
-        or not stat.S_ISREG(metadata.st_mode)
-        or metadata.st_uid != os.geteuid()
-        or stat.S_IMODE(metadata.st_mode) != 0o600
-        or metadata.st_nlink != 1
+        isinstance(descriptor, bool)
+        or not isinstance(descriptor, int)
+        or descriptor <= 2
     ):
-        raise ExactWorkerError("evaluator lease descriptor metadata is unsafe")
-    return (descriptor,)
+        raise ExactWorkerError("exact-worker lease descriptor is invalid")
+    lease_path = Path(path)
+    if not lease_path.is_absolute():
+        raise ExactWorkerError("exact-worker lease path must be absolute")
+    try:
+        descriptor_metadata = os.fstat(descriptor)
+        path_metadata = lease_path.lstat()
+    except OSError as exc:
+        raise ExactWorkerError("exact-worker lease is unavailable") from exc
+    if (
+        not stat.S_ISREG(descriptor_metadata.st_mode)
+        or not stat.S_ISREG(path_metadata.st_mode)
+        or descriptor_metadata.st_uid != os.geteuid()
+        or path_metadata.st_uid != os.geteuid()
+        or stat.S_IMODE(descriptor_metadata.st_mode) != 0o600
+        or stat.S_IMODE(path_metadata.st_mode) != 0o600
+        or descriptor_metadata.st_nlink != 1
+        or path_metadata.st_nlink != 1
+        or (descriptor_metadata.st_dev, descriptor_metadata.st_ino)
+        != (path_metadata.st_dev, path_metadata.st_ino)
+    ):
+        raise ExactWorkerError("exact-worker lease metadata is unsafe")
+    return (
+        descriptor,
+        descriptor_metadata.st_dev,
+        descriptor_metadata.st_ino,
+        str(lease_path),
+    )
+
+
+def register_exact_worker_lease(
+    descriptor: int,
+    path: str | os.PathLike[str],
+) -> None:
+    """Register one validated descriptor for inheritance by exact workers."""
+
+    registration = _validated_exact_worker_lease(descriptor, path)
+    with _EXACT_WORKER_LEASE_LOCK:
+        global _EXACT_WORKER_LEASE
+        if _EXACT_WORKER_LEASE not in {None, registration}:
+            raise ExactWorkerError(
+                "a different exact-worker lease is already registered"
+            )
+        _EXACT_WORKER_LEASE = registration
+
+
+def clear_exact_worker_lease(descriptor: int) -> None:
+    """Clear the matching in-process exact-worker lease registration."""
+
+    with _EXACT_WORKER_LEASE_LOCK:
+        global _EXACT_WORKER_LEASE
+        if _EXACT_WORKER_LEASE is None:
+            return
+        if _EXACT_WORKER_LEASE[0] != descriptor:
+            raise ExactWorkerError("exact-worker lease registration differs")
+        _EXACT_WORKER_LEASE = None
 
 
 class ExactWorkerClient:
@@ -991,22 +1049,25 @@ class ExactWorkerClient:
         *,
         config: Mapping[str, Any] | None = None,
     ) -> None:
-        self.path = find_exact_worker(worker)
         self._process: subprocess.Popen[bytes] | None = None
         self._connection: socket.socket | None = None
         try:
-            self._process = subprocess.Popen(
-                [str(self.path)],
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                bufsize=0,
-                cwd=os.sep,
-                env=_exact_worker_launch_environment(),
-                pass_fds=_exact_worker_pass_fds(),
-            )
+            with _EXACT_WORKER_LEASE_LOCK:
+                self.path = find_exact_worker(worker)
+                self._process = subprocess.Popen(
+                    [str(self.path)],
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    bufsize=0,
+                    cwd=os.sep,
+                    env=_exact_worker_launch_environment(),
+                    pass_fds=_exact_worker_pass_fds(),
+                )
         except OSError as exc:
-            raise ExactWorkerError(f"failed to launch exact worker {self.path}: {exc}") from exc
+            raise ExactWorkerError(
+                f"failed to launch exact worker {worker}: {exc}"
+            ) from exc
         if self._process.stdin is None or self._process.stdout is None:
             self._process.kill()
             self._process.wait()

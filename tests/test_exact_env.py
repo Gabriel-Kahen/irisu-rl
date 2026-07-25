@@ -4,6 +4,7 @@ import ctypes
 import os
 import sys
 import tempfile
+import threading
 import unittest
 from contextlib import ExitStack
 from pathlib import Path
@@ -170,33 +171,165 @@ def decode_fake_exact_transition(
 
 
 class ExactBackendArgumentTests(unittest.TestCase):
-    def test_evaluator_lease_descriptor_is_forwarded_only_when_safe(self) -> None:
+    def test_exact_worker_lease_registration_is_explicit_and_revalidated(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as directory:
             lease = Path(directory) / "lease"
             descriptor = os.open(lease, os.O_RDWR | os.O_CREAT, 0o600)
             try:
-                with mock.patch.dict(
-                    os.environ,
-                    {"IRISU_R3B_EVALUATOR_LEASE_FD": str(descriptor)},
-                ):
-                    self.assertEqual(
-                        exact_ipc_module._exact_worker_pass_fds(), (descriptor,)
-                    )
+                self.assertEqual(exact_ipc_module._exact_worker_pass_fds(), ())
+                exact_ipc_module.register_exact_worker_lease(descriptor, lease)
+                exact_ipc_module.register_exact_worker_lease(descriptor, lease)
+                self.assertEqual(
+                    exact_ipc_module._exact_worker_pass_fds(), (descriptor,)
+                )
                 os.chmod(lease, 0o640)
-                with mock.patch.dict(
-                    os.environ,
-                    {"IRISU_R3B_EVALUATOR_LEASE_FD": str(descriptor)},
-                ), self.assertRaisesRegex(ExactWorkerError, "metadata is unsafe"):
+                with self.assertRaisesRegex(ExactWorkerError, "metadata is unsafe"):
                     exact_ipc_module._exact_worker_pass_fds()
+            finally:
+                exact_ipc_module.clear_exact_worker_lease(descriptor)
+                os.close(descriptor)
+            self.assertEqual(exact_ipc_module._exact_worker_pass_fds(), ())
+
+    def test_exact_worker_lease_registration_rejects_unsafe_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            lease = root / "lease"
+            lease.write_bytes(b"")
+            lease.chmod(0o600)
+            descriptor = os.open(lease, os.O_RDWR)
+            try:
+                for invalid in (True, 2, "3"):
+                    with self.subTest(descriptor=invalid), self.assertRaisesRegex(
+                        ExactWorkerError, "descriptor is invalid"
+                    ):
+                        exact_ipc_module.register_exact_worker_lease(invalid, lease)
+                with self.assertRaisesRegex(ExactWorkerError, "must be absolute"):
+                    exact_ipc_module.register_exact_worker_lease(
+                        descriptor, Path("lease")
+                    )
+                other = root / "other"
+                other.write_bytes(b"")
+                other.chmod(0o600)
+                with self.assertRaisesRegex(ExactWorkerError, "metadata is unsafe"):
+                    exact_ipc_module.register_exact_worker_lease(descriptor, other)
+                alias = root / "alias"
+                os.link(lease, alias)
+                with self.assertRaisesRegex(ExactWorkerError, "metadata is unsafe"):
+                    exact_ipc_module.register_exact_worker_lease(descriptor, lease)
+                alias.unlink()
+                directory_descriptor = os.open(root, os.O_RDONLY)
+                try:
+                    with self.assertRaisesRegex(
+                        ExactWorkerError, "metadata is unsafe"
+                    ):
+                        exact_ipc_module.register_exact_worker_lease(
+                            directory_descriptor, root
+                        )
+                finally:
+                    os.close(directory_descriptor)
+                closed_descriptor = os.dup(descriptor)
+                os.close(closed_descriptor)
+                with self.assertRaisesRegex(ExactWorkerError, "unavailable"):
+                    exact_ipc_module.register_exact_worker_lease(
+                        closed_descriptor, lease
+                    )
             finally:
                 os.close(descriptor)
 
-    def test_evaluator_lease_descriptor_rejects_malformed_value(self) -> None:
-        with mock.patch.dict(
-            os.environ,
-            {"IRISU_R3B_EVALUATOR_LEASE_FD": "not-an-fd"},
-        ), self.assertRaisesRegex(ExactWorkerError, "malformed"):
-            exact_ipc_module._exact_worker_pass_fds()
+    def test_exact_worker_launch_inherits_registered_lease(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            worker = root / "worker"
+            worker.write_bytes(b"")
+            worker.chmod(0o700)
+            lease = root / "lease"
+            descriptor = os.open(lease, os.O_RDWR | os.O_CREAT, 0o600)
+            process = mock.Mock()
+            process.stdin = mock.Mock()
+            process.stdout = mock.Mock()
+            process.pid = 123
+            try:
+                exact_ipc_module.register_exact_worker_lease(descriptor, lease)
+                with mock.patch.object(
+                    exact_ipc_module.subprocess,
+                    "Popen",
+                    return_value=process,
+                ) as popen, mock.patch.object(
+                    ExactWorkerClient,
+                    "_initialize_protocol",
+                ):
+                    ExactWorkerClient(worker)
+                self.assertEqual(popen.call_args.kwargs["pass_fds"], (descriptor,))
+            finally:
+                exact_ipc_module.clear_exact_worker_lease(descriptor)
+                os.close(descriptor)
+
+    def test_exact_worker_path_error_is_not_masked(self) -> None:
+        with mock.patch.object(
+            exact_ipc_module,
+            "find_exact_worker",
+            side_effect=PermissionError("denied"),
+        ), self.assertRaisesRegex(ExactWorkerError, "worker.*denied"):
+            ExactWorkerClient("worker")
+
+    def test_exact_worker_launch_pins_registration_until_exec(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            worker = root / "worker"
+            worker.write_bytes(b"")
+            worker.chmod(0o700)
+            lease = root / "lease"
+            descriptor = os.open(lease, os.O_RDWR | os.O_CREAT, 0o600)
+            process = mock.Mock()
+            process.stdin = mock.Mock()
+            process.stdout = mock.Mock()
+            process.pid = 123
+            launch_started = threading.Event()
+            allow_launch = threading.Event()
+            lease_cleared = threading.Event()
+            launch_errors: list[BaseException] = []
+
+            def popen(*_: object, **__: object) -> object:
+                launch_started.set()
+                self.assertTrue(allow_launch.wait(5))
+                return process
+
+            def clear() -> None:
+                exact_ipc_module.clear_exact_worker_lease(descriptor)
+                lease_cleared.set()
+
+            def launch() -> None:
+                try:
+                    ExactWorkerClient(worker)
+                except BaseException as exc:
+                    launch_errors.append(exc)
+
+            try:
+                exact_ipc_module.register_exact_worker_lease(descriptor, lease)
+                with mock.patch.object(
+                    exact_ipc_module.subprocess,
+                    "Popen",
+                    side_effect=popen,
+                ), mock.patch.object(ExactWorkerClient, "_initialize_protocol"):
+                    launcher = threading.Thread(target=launch)
+                    launcher.start()
+                    self.assertTrue(launch_started.wait(5))
+                    clearer = threading.Thread(target=clear)
+                    clearer.start()
+                    self.assertFalse(lease_cleared.wait(0.1))
+                    allow_launch.set()
+                    launcher.join(5)
+                    clearer.join(5)
+                    self.assertFalse(launcher.is_alive())
+                    self.assertFalse(clearer.is_alive())
+                    self.assertTrue(lease_cleared.is_set())
+                    self.assertEqual(launch_errors, [])
+            finally:
+                if exact_ipc_module._EXACT_WORKER_LEASE is not None:
+                    exact_ipc_module.clear_exact_worker_lease(descriptor)
+                os.close(descriptor)
 
     @staticmethod
     def worker_info(**changes: object) -> ExactWorkerInfo:

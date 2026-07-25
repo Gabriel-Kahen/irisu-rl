@@ -7,6 +7,11 @@ import os
 from pathlib import Path
 import stat
 
+from irisu_env.exact_ipc import (
+    clear_exact_worker_lease,
+    register_exact_worker_lease,
+)
+
 
 def _acquire(path: Path, operation: int = fcntl.LOCK_EX) -> int:
     descriptor = os.open(
@@ -69,15 +74,20 @@ class R3BRunLock:
         self.global_path = lock_root / f".irisu-r3b-operator-{os.geteuid()}.lock"
         self.evaluator_path = evaluator_lease_path(lock_root)
         self._descriptors: list[int] = []
+        self._lease_descriptor: int | None = None
 
     def __enter__(self) -> R3BRunLock:
-        if self._descriptors:
+        if self._descriptors or self._lease_descriptor is not None:
             raise RuntimeError("R3 operator lock instance is already held")
         lease_guard: int | None = None
         try:
             self._descriptors.append(_acquire(self.global_path))
             lease_guard = _acquire(self.evaluator_path)
             self._descriptors.append(_acquire(self.path))
+            register_exact_worker_lease(lease_guard, self.evaluator_path)
+            self._lease_descriptor = lease_guard
+            lease_guard = None
+            fcntl.flock(self._lease_descriptor, fcntl.LOCK_SH)
         except BaseException:
             self.__exit__()
             raise
@@ -88,10 +98,31 @@ class R3BRunLock:
         return self
 
     def __exit__(self, *exc_info: object) -> None:
+        cleanup_error: BaseException | None = None
+        if self._lease_descriptor is not None:
+            descriptor = self._lease_descriptor
+            self._lease_descriptor = None
+            try:
+                clear_exact_worker_lease(descriptor)
+            except BaseException as exc:
+                cleanup_error = exc
+            finally:
+                # Do not explicitly unlock: an exact worker may hold an
+                # inherited duplicate of this same open file description.
+                os.close(descriptor)
         while self._descriptors:
             descriptor = self._descriptors.pop()
-            fcntl.flock(descriptor, fcntl.LOCK_UN)
-            os.close(descriptor)
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+            finally:
+                os.close(descriptor)
+        if cleanup_error is not None:
+            if exc_info and isinstance(exc_info[1], BaseException):
+                exc_info[1].add_note(
+                    f"exact-worker lease cleanup also failed: {cleanup_error}"
+                )
+            else:
+                raise cleanup_error
 
 
 __all__ = ["R3BRunLock", "evaluator_lease_path", "hold_evaluator_lease"]
