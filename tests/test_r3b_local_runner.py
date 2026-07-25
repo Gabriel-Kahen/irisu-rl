@@ -11,16 +11,109 @@ from unittest import mock
 from irisu_rl.r3b_artifacts import ArtifactStore
 from irisu_rl.r3b_experiments import CandidateArm, TrialJob
 from irisu_rl.r3b_local_runner import (
+    _checkpoint_due_after_update,
     _load_claim,
     _load_claim_intent,
     _load_completed_training_result,
     _reconcile_sealed_training_failure,
+    _run_update_and_checkpoint_due,
     _write_claim,
 )
 from irisu_rl.r3b_operational import JobClaim
 
 
 class R3BLocalRunnerTests(unittest.TestCase):
+    def test_checkpoint_waits_for_optimizer_progress_during_tail_drain(self) -> None:
+        self.assertFalse(
+            _checkpoint_due_after_update(
+                600,
+                600,
+                optimizer_completed=False,
+                target=1000,
+                interval=50,
+            )
+        )
+        self.assertTrue(
+            _checkpoint_due_after_update(
+                599,
+                600,
+                optimizer_completed=True,
+                target=1000,
+                interval=50,
+            )
+        )
+        self.assertFalse(
+            _checkpoint_due_after_update(
+                600,
+                601,
+                optimizer_completed=True,
+                target=1000,
+                interval=50,
+            )
+        )
+        self.assertTrue(
+            _checkpoint_due_after_update(
+                999,
+                1000,
+                optimizer_completed=True,
+                target=1000,
+                interval=50,
+            )
+        )
+        with self.assertRaisesRegex(RuntimeError, "advanced unexpectedly"):
+            _checkpoint_due_after_update(
+                600,
+                602,
+                optimizer_completed=True,
+                target=1000,
+                interval=50,
+            )
+
+    def test_training_attempt_loop_skips_unchanged_checkpoint_boundaries(self) -> None:
+        class Session:
+            def __init__(self) -> None:
+                self.trainer = SimpleNamespace(
+                    schedule=SimpleNamespace(completed_updates=599)
+                )
+                self.results = iter(
+                    ((600, object()), (600, None), (600, None), (601, object()))
+                )
+
+            def run_update(self) -> object:
+                completed_updates, optimizer = next(self.results)
+                self.trainer.schedule.completed_updates = completed_updates
+                return SimpleNamespace(optimizer=optimizer)
+
+        session = Session()
+        published = []
+        for _ in range(4):
+            completed_updates, checkpoint_due = _run_update_and_checkpoint_due(
+                session,  # type: ignore[arg-type]
+                target=1000,
+                interval=50,
+            )
+            if checkpoint_due:
+                published.append(completed_updates)
+        self.assertEqual(published, [600])
+
+    def test_training_attempt_rejects_result_and_clock_disagreement(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "did not advance"):
+            _checkpoint_due_after_update(
+                600,
+                600,
+                optimizer_completed=True,
+                target=1000,
+                interval=50,
+            )
+        with self.assertRaisesRegex(RuntimeError, "without an optimizer"):
+            _checkpoint_due_after_update(
+                600,
+                601,
+                optimizer_completed=False,
+                target=1000,
+                interval=50,
+            )
+
     def test_claim_secret_round_trips_privately(self) -> None:
         claim = JobClaim("a" * 64, "calibration", "b" * 64, "worker", 0, None)
         with tempfile.TemporaryDirectory() as directory:

@@ -140,7 +140,8 @@ class TailSessionIntegrationTests(unittest.TestCase):
             assert_next_update_exact("mid-sweep")
             # The shaped sweep is complete: the next collection is the no-update drain.
             assert_next_update_exact("sweep-boundary")
-            # One drain completed and all lanes reset: the next update starts score-only.
+            # One drain completed and all lanes reset: the next update starts
+            # score-only.
             assert_next_update_exact("mid-drain")
             # One score-only update completed: the following optimizer step is exact.
             assert_next_update_exact("mid-score-only")
@@ -197,6 +198,7 @@ class TailSessionIntegrationTests(unittest.TestCase):
             collector,
             trainer,
             numpy_seed=17,
+            max_consecutive_skips=1,
             tail_controller=tail,
         )
         session.initialize()
@@ -212,8 +214,10 @@ class TailSessionIntegrationTests(unittest.TestCase):
         self.assertEqual(tail.drain_collections, 1)
         self.assertEqual(coordinator.shaping_weights_ppm().tolist(), [0, 0, 0, 0])
 
+        self.assertEqual(session.consecutive_skips, session.max_consecutive_skips)
         score_only = session.run_update()
         self.assertIsNotNone(score_only.optimizer)
+        self.assertEqual(session.consecutive_skips, 0)
         self.assertEqual(trainer.schedule.completed_updates, 2)
         self.assertEqual(tail.score_only_updates, 1)
         self.assertTrue(
