@@ -14,6 +14,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from irisu_env import ExactWorkerClient, ExactWorkerNotFoundError, find_exact_worker
 from irisu_rl.r3b_artifacts import ArtifactStore
 from irisu_rl.r3b_experiments import CandidateArm, TrainingCheckpointArtifact, TrialJob
 from irisu_rl.r3b_supervisor import (
@@ -21,6 +22,7 @@ from irisu_rl.r3b_supervisor import (
     _capture_evaluation_process_groups,
     _deployment,
     _checkpoint_package,
+    _evaluation_lease_holders,
     _fresh_restored_checkpoint,
     _evaluation_worker_initializer,
     _signal_evaluation_group,
@@ -44,14 +46,31 @@ def _fail_for_test() -> None:
 
 
 def _spawn_leased_descendant(path: str) -> None:
-    descriptor = int(os.environ["IRISU_R3B_EVALUATOR_LEASE_FD"])
-    child = subprocess.Popen(["sleep", "60"], pass_fds=(descriptor,))
+    from irisu_env.exact_ipc import _exact_worker_pass_fds
+
+    child = subprocess.Popen(["sleep", "60"], pass_fds=_exact_worker_pass_fds())
     Path(path).write_text(f"{os.getpid()} {child.pid}\n", encoding="utf-8")
     child.wait()
 
 
+def _spawn_stopped_exact_descendant(path: str, worker: str) -> None:
+    client = ExactWorkerClient(worker)
+    os.kill(client._transport_pid, signal.SIGSTOP)
+    Path(path).write_text(
+        f"{os.getpid()} {client._transport_pid}\n",
+        encoding="utf-8",
+    )
+    time.sleep(60)
+
+
 def _write_gate_result(path: str) -> None:
     Path(path).write_text("released\n", encoding="utf-8")
+
+
+try:
+    EXACT_WORKER = find_exact_worker()
+except ExactWorkerNotFoundError:
+    EXACT_WORKER = None
 
 
 class R3BSupervisorTests(unittest.TestCase):
@@ -149,6 +168,31 @@ time.sleep(60)
             with R3BRunLock(Path(directory), global_directory=directory):
                 pass
 
+    @unittest.skipUnless(sys.platform == "linux", "evaluator isolation is Linux-only")
+    def test_nine_evaluators_are_captured_before_startup_deadline(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            context = multiprocessing.get_context("spawn")
+            ready_gate = context.Event()
+            lease_path = str(evaluator_lease_path(directory))
+            executor = ProcessPoolExecutor(
+                max_workers=9,
+                mp_context=context,
+                initializer=_evaluation_worker_initializer,
+                initargs=(os.getpid(), lease_path, ready_gate),
+            )
+            setattr(executor, "_irisu_ready_gate", ready_gate)
+            setattr(executor, "_irisu_evaluator_lease_path", lease_path)
+            try:
+                futures = tuple(
+                    executor.submit(_sleep_for_test, 0.01) for _ in range(9)
+                )
+                groups = _capture_evaluation_process_groups(executor)
+                self.assertEqual(len(groups), 9)
+                for future in futures:
+                    future.result(timeout=5)
+            finally:
+                _stop_evaluation_executor(executor)
+
     @unittest.skipUnless(sys.platform == "linux", "pidfd signaling is Linux-only")
     def test_group_cleanup_never_signals_a_reused_numeric_pgid(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -207,6 +251,109 @@ time.sleep(60)
                 os.close(lease_descriptor)
                 unrelated.kill()
                 unrelated.wait()
+
+    @unittest.skipUnless(sys.platform == "linux", "procfs identity is Linux-only")
+    def test_lease_scan_rejects_pid_reuse_after_pidfd_open(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            entry = Path(directory) / "123"
+            entry.mkdir()
+            pidfd = os.open("/dev/null", os.O_RDONLY)
+            group = _EvaluationProcessGroup(
+                SimpleNamespace(),
+                77,
+                os.dup(pidfd),
+                1,
+                2,
+            )
+            original_iterdir = Path.iterdir
+
+            def iterdir(path: Path):
+                if path == Path("/proc"):
+                    return iter((entry,))
+                return original_iterdir(path)
+
+            try:
+                with (
+                    patch.object(Path, "iterdir", iterdir),
+                    patch(
+                        "irisu_rl.r3b_supervisor.os.getpgid",
+                        return_value=77,
+                    ),
+                    patch(
+                        "irisu_rl.r3b_supervisor.os.pidfd_open",
+                        return_value=pidfd,
+                    ),
+                    patch(
+                        "irisu_rl.r3b_supervisor._evaluation_process_identity",
+                        side_effect=((77, 100), (77, 101)),
+                    ),
+                ):
+                    self.assertEqual(_evaluation_lease_holders(group), ())
+                with self.assertRaises(OSError):
+                    os.fstat(pidfd)
+                pidfd = -1
+            finally:
+                os.close(group.pidfd)
+                if pidfd >= 0:
+                    os.close(pidfd)
+
+    @unittest.skipUnless(sys.platform == "linux", "procfs identity is Linux-only")
+    def test_lease_scan_closes_accumulated_pidfds_on_error(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            lease = root / "lease"
+            lease.write_bytes(b"")
+            metadata = lease.stat()
+            first = root / "111"
+            second = root / "222"
+            (first / "fd").mkdir(parents=True)
+            second.mkdir()
+            (first / "fd" / "5").symlink_to(lease)
+            scanned_pidfd = os.open("/dev/null", os.O_RDONLY)
+            group = _EvaluationProcessGroup(
+                SimpleNamespace(),
+                77,
+                os.dup(scanned_pidfd),
+                metadata.st_dev,
+                metadata.st_ino,
+            )
+            original_iterdir = Path.iterdir
+
+            def iterdir(path: Path):
+                if path == Path("/proc"):
+                    return iter((first, second))
+                return original_iterdir(path)
+
+            def identity(entry: Path) -> tuple[int, int]:
+                if entry == second:
+                    raise PermissionError("blocked")
+                return 77, 100
+
+            try:
+                with (
+                    patch.object(Path, "iterdir", iterdir),
+                    patch(
+                        "irisu_rl.r3b_supervisor.os.getpgid",
+                        return_value=77,
+                    ),
+                    patch(
+                        "irisu_rl.r3b_supervisor.os.pidfd_open",
+                        return_value=scanned_pidfd,
+                    ),
+                    patch(
+                        "irisu_rl.r3b_supervisor._evaluation_process_identity",
+                        side_effect=identity,
+                    ),
+                    self.assertRaisesRegex(RuntimeError, "descendant state"),
+                ):
+                    _evaluation_lease_holders(group)
+                with self.assertRaises(OSError):
+                    os.fstat(scanned_pidfd)
+                scanned_pidfd = -1
+            finally:
+                os.close(group.pidfd)
+                if scanned_pidfd >= 0:
+                    os.close(scanned_pidfd)
 
     @unittest.skipUnless(sys.platform == "linux", "evaluator isolation is Linux-only")
     def test_failed_evaluation_stops_blocked_workers_within_bound(self) -> None:
@@ -279,6 +426,71 @@ time.sleep(60)
                     time.sleep(0.01)
                 if proc.exists():
                     self.assertEqual(proc.read_text().split()[2], "Z")
+                with R3BRunLock(root, global_directory=directory):
+                    pass
+            finally:
+                if not cleanup_attempted:
+                    _stop_evaluation_executor(executor, timeout_seconds=2.0)
+                for pid in pids:
+                    try:
+                        os.kill(pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+
+    @unittest.skipUnless(
+        sys.platform == "linux" and EXACT_WORKER is not None,
+        "requires the Linux exact worker",
+    )
+    def test_cleanup_reaps_stopped_exact_worker_after_evaluator_sigkill(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "run"
+            root.mkdir()
+            path = Path(directory) / "pids"
+            lease_path = str(evaluator_lease_path(directory))
+            executor = ProcessPoolExecutor(
+                max_workers=1,
+                mp_context=multiprocessing.get_context("spawn"),
+                initializer=_evaluation_worker_initializer,
+                initargs=(os.getpid(), lease_path),
+            )
+            setattr(executor, "_irisu_evaluator_lease_path", lease_path)
+            pids: tuple[int, ...] = ()
+            cleanup_attempted = False
+            try:
+                executor.submit(
+                    _spawn_stopped_exact_descendant,
+                    str(path),
+                    str(EXACT_WORKER),
+                )
+                groups = _capture_evaluation_process_groups(executor)
+                deadline = time.monotonic() + 15
+                while not path.is_file() and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                self.assertTrue(path.is_file())
+                evaluator_pid, worker_pid = (
+                    int(value) for value in path.read_text().split()
+                )
+                pids = (evaluator_pid, worker_pid)
+                os.kill(evaluator_pid, signal.SIGKILL)
+                groups[0].process.join(2)
+                with self.assertRaisesRegex(RuntimeError, "another process"):
+                    with R3BRunLock(root, global_directory=directory):
+                        pass
+                cleanup_attempted = True
+                _stop_evaluation_executor(executor, timeout_seconds=2.0)
+                deadline = time.monotonic() + 2
+                state = "live"
+                while time.monotonic() < deadline:
+                    try:
+                        state = Path(f"/proc/{worker_pid}/stat").read_text().split()[2]
+                    except FileNotFoundError:
+                        state = "gone"
+                    if state in {"gone", "Z"}:
+                        break
+                    time.sleep(0.01)
+                self.assertIn(state, {"gone", "Z"})
                 with R3BRunLock(root, global_directory=directory):
                     pass
             finally:
