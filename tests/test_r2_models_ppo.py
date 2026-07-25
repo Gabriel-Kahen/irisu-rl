@@ -4,6 +4,7 @@ import copy
 import tempfile
 import unittest
 from dataclasses import astuple, replace
+from unittest.mock import patch
 
 import torch
 from irisu_rl.checkpoints import load_checkpoint, save_checkpoint
@@ -13,6 +14,7 @@ from irisu_rl.ppo import (
     PPOTrainer,
     RecurrentTrainingBatch,
     clipped_surrogate_loss,
+    quantile_huber_loss,
 )
 from irisu_rl.schema import TEACHER_V1
 from irisu_rl.torch_distribution import TorchConditionalActionDistribution
@@ -126,6 +128,86 @@ class RecurrentModelTests(unittest.TestCase):
         )
         torch.testing.assert_close(from_large.kind_logits, from_zero.kind_logits)
 
+    def test_default_model_preserves_legacy_architecture_and_manifest(self) -> None:
+        config = RecurrentModelConfig()
+        self.assertEqual(
+            config.manifest(),
+            {
+                "global_hidden": 96,
+                "body_hidden": 96,
+                "fused_hidden": 192,
+                "recurrent_hidden": 192,
+                "recurrent_layers": 1,
+                "minimum_concentration": 1.001,
+            },
+        )
+        model = RecurrentActorCritic(TEACHER_V1)
+        self.assertEqual(model.manifest()["architecture"], "recurrent-actor-critic-v1")
+        self.assertIsNone(model.value_quantile_head)
+        self.assertFalse(
+            any(name.startswith("value_quantile_head.") for name in model.state_dict())
+        )
+        global_features, bodies, mask = self.observations(time=1)
+        output = model(global_features, bodies, mask, model.initial_state(2))
+        self.assertIsNone(output.value_quantiles)
+
+    def test_quantile_count_validation_and_enabled_manifest(self) -> None:
+        for count in (-1, 1, 2, 4, 102, True, 3.0):
+            with (
+                self.subTest(count=count),
+                self.assertRaisesRegex(ValueError, "quantile count"),
+            ):
+                RecurrentModelConfig(value_quantile_count=count)  # type: ignore[arg-type]
+        config = RecurrentModelConfig(value_quantile_count=51)
+        self.assertEqual(config.manifest()["value_quantile_count"], 51)
+
+    def test_enabled_model_emits_conditioned_critic_only_quantiles(self) -> None:
+        model = RecurrentActorCritic(
+            TEACHER_V1,
+            config=RecurrentModelConfig(
+                16,
+                16,
+                24,
+                24,
+                1,
+                critic_condition_features=1,
+                value_quantile_count=5,
+            ),
+        )
+        global_features, bodies, mask = self.observations()
+        hidden = model.initial_state(2)
+        zero = model(
+            global_features,
+            bodies,
+            mask,
+            hidden,
+            critic_condition=torch.zeros((3, 2, 1)),
+        )
+        one = model(
+            global_features,
+            bodies,
+            mask,
+            hidden,
+            critic_condition=torch.ones((3, 2, 1)),
+        )
+        self.assertIsNotNone(zero.value_quantiles)
+        self.assertEqual(zero.value_quantiles.shape, (3, 2, 5))
+        self.assertTrue(torch.isfinite(zero.value_quantiles).all())
+        for name in (
+            "kind_logits",
+            "wait_logits",
+            "coordinate_alpha",
+            "coordinate_beta",
+            "recurrent_state",
+        ):
+            self.assertTrue(torch.equal(getattr(zero, name), getattr(one, name)), name)
+        value_shift = one.values - zero.values
+        self.assertTrue(torch.any(value_shift != 0))
+        torch.testing.assert_close(
+            one.value_quantiles - zero.value_quantiles,
+            value_shift.unsqueeze(-1).expand_as(one.value_quantiles),
+        )
+
 
 class PPOTrainerTests(unittest.TestCase):
     def assert_nested_equal(self, left, right, path="state"):
@@ -143,11 +225,11 @@ class PPOTrainerTests(unittest.TestCase):
         else:
             self.assertEqual(left, right, path)
 
-    def make_batch(self):
+    def make_batch(self, config=None):
         torch.manual_seed(8)
         model = RecurrentActorCritic(
             TEACHER_V1,
-            config=RecurrentModelConfig(8, 8, 12, 12, 1),
+            config=config or RecurrentModelConfig(8, 8, 12, 12, 1),
         )
         time, lanes = 2, 2
         global_features = torch.randn(time, lanes, len(TEACHER_V1.global_features))
@@ -237,6 +319,144 @@ class PPOTrainerTests(unittest.TestCase):
         # Objectives: 1.2 (positive clipped high), -0.8 (negative clipped
         # low), 1.1 (inside clip), and 0.0 (zero advantage).
         self.assertAlmostEqual(float(loss), -(1.2 - 0.8 + 1.1) / 4)
+
+    def test_quantile_huber_loss_zero_large_and_masked_cases(self) -> None:
+        audited = quantile_huber_loss(
+            torch.tensor([[[-2.0, -1.0, 3.0]]]),
+            torch.tensor([[0.0]]),
+            torch.tensor([[True]]),
+            kappa=2.0,
+        )
+        self.assertAlmostEqual(float(audited), 5 / 24)
+
+        targets = torch.tensor([[2.0, -3.0], [1.0, -1.0]])
+        predictions = targets.unsqueeze(-1).expand(2, 2, 5).clone()
+        mask = torch.tensor([[True, True], [True, False]])
+        self.assertEqual(float(quantile_huber_loss(predictions, targets, mask)), 0.0)
+
+        predictions[1, 1] = torch.tensor([-1e12, -1e6, 0.0, 1e6, 1e12])
+        unchanged = quantile_huber_loss(predictions, targets, mask)
+        predictions[1, 1] *= -1
+        torch.testing.assert_close(
+            quantile_huber_loss(predictions, targets, mask), unchanged
+        )
+        large = quantile_huber_loss(
+            torch.zeros((1, 2, 5)),
+            torch.tensor([[1e30, -1e30]]),
+            torch.ones((1, 2), dtype=torch.bool),
+        )
+        self.assertTrue(torch.isfinite(large))
+
+    def test_quantile_huber_loss_rejects_malformed_inputs(self) -> None:
+        predictions = torch.zeros((1, 2, 5))
+        targets = torch.zeros((1, 2))
+        mask = torch.ones((1, 2), dtype=torch.bool)
+        bad_cases = (
+            (predictions[0], targets[0], mask[0], 1.0),
+            (predictions[..., :4], targets, mask, 1.0),
+            (predictions, targets, mask.float(), 1.0),
+            (predictions, targets, torch.zeros_like(mask), 1.0),
+            (predictions, targets, mask, 0.0),
+            (predictions, targets, mask, True),
+        )
+        for arguments in bad_cases:
+            with (
+                self.subTest(shapes=[value.shape for value in arguments[:3]]),
+                self.assertRaises(ValueError),
+            ):
+                quantile_huber_loss(*arguments)
+        nonfinite = predictions.clone()
+        nonfinite[0, 0, 0] = float("nan")
+        with self.assertRaisesRegex(ValueError, "invalid"):
+            quantile_huber_loss(nonfinite, targets, mask)
+        with self.assertRaisesRegex(FloatingPointError, "reduction"):
+            quantile_huber_loss(
+                torch.zeros((1, 16, 5)),
+                torch.full((1, 16), 5e37),
+                torch.ones((1, 16), dtype=torch.bool),
+            )
+
+    def test_quantile_head_and_loss_must_be_enabled_together(self) -> None:
+        head_model = RecurrentActorCritic(
+            TEACHER_V1,
+            config=RecurrentModelConfig(8, 8, 12, 12, 1, value_quantile_count=5),
+        )
+        head_before = copy.deepcopy(head_model.state_dict())
+        with patch("irisu_rl.ppo.torch.optim.Adam") as adam:
+            with self.assertRaisesRegex(ValueError, "enabled together"):
+                PPOTrainer(head_model, total_updates=1, sampler_seed=1)
+            adam.assert_not_called()
+        self.assert_nested_equal(head_model.state_dict(), head_before, "head_model")
+
+        scalar_model = RecurrentActorCritic(
+            TEACHER_V1,
+            config=RecurrentModelConfig(8, 8, 12, 12, 1),
+        )
+        scalar_before = copy.deepcopy(scalar_model.state_dict())
+        with patch("irisu_rl.ppo.torch.optim.Adam") as adam:
+            with self.assertRaisesRegex(ValueError, "enabled together"):
+                PPOTrainer(
+                    scalar_model,
+                    config=PPOConfig(quantile_value_coefficient=0.5),
+                    total_updates=1,
+                    sampler_seed=1,
+                )
+            adam.assert_not_called()
+        self.assert_nested_equal(
+            scalar_model.state_dict(), scalar_before, "scalar_model"
+        )
+
+    def test_quantile_update_changes_head_and_reports_loss(self) -> None:
+        model, batch = self.make_batch(
+            RecurrentModelConfig(8, 8, 12, 12, 1, value_quantile_count=5)
+        )
+        trainer = PPOTrainer(
+            model,
+            config=PPOConfig(
+                epochs=1,
+                lane_minibatch_size=2,
+                entropy_coefficient=0.0,
+                target_kl=1.0,
+                quantile_value_coefficient=0.5,
+            ),
+            total_updates=1,
+            sampler_seed=11,
+        )
+        before = model.value_quantile_head.weight.detach().clone()
+        stats = trainer.update(batch)
+        self.assertGreater(stats.quantile_value_loss, 0)
+        self.assertFalse(torch.equal(model.value_quantile_head.weight, before))
+
+    def test_malformed_quantile_output_fails_before_trainer_mutation(self) -> None:
+        model, batch = self.make_batch(
+            RecurrentModelConfig(8, 8, 12, 12, 1, value_quantile_count=5)
+        )
+        trainer = PPOTrainer(
+            model,
+            config=PPOConfig(quantile_value_coefficient=0.5),
+            total_updates=2,
+            sampler_seed=11,
+        )
+        with torch.no_grad():
+            malformed = replace(
+                model(
+                    batch.global_features,
+                    batch.body_features,
+                    batch.body_mask,
+                    batch.initial_state,
+                    reset_before=batch.reset_before,
+                ),
+                value_quantiles=torch.zeros((*batch.returns.shape, 3)),
+            )
+        before_model = copy.deepcopy(model.state_dict())
+        before_trainer = copy.deepcopy(trainer.state_dict())
+        with (
+            patch.object(model, "forward", return_value=malformed),
+            self.assertRaisesRegex(ValueError, "configured shape"),
+        ):
+            trainer.update(batch)
+        self.assert_nested_equal(model.state_dict(), before_model, "model")
+        self.assert_nested_equal(trainer.state_dict(), before_trainer, "trainer")
 
     def test_update_is_finite_changes_parameters_and_reports_used_lr(self) -> None:
         model, batch = self.make_batch()
@@ -341,15 +561,10 @@ class PPOTrainerTests(unittest.TestCase):
         self.assert_nested_equal(model.state_dict(), before_model, "model")
         self.assert_nested_equal(trainer.state_dict(), before_trainer, "trainer")
 
-    def test_trainer_state_resumes_next_update_bit_exactly(self) -> None:
-        model, batch = self.make_batch()
-        config = PPOConfig(
-            learning_rate=1e-4,
-            epochs=2,
-            lane_minibatch_size=1,
-            entropy_coefficient=0.0,
-            target_kl=1.0,
-        )
+    def assert_trainer_resume_is_bit_exact(
+        self, model_config: RecurrentModelConfig, config: PPOConfig
+    ) -> None:
+        model, batch = self.make_batch(model_config)
         trainer = PPOTrainer(model, config=config, total_updates=4, sampler_seed=29)
         trainer.update(batch)
         next_batch = self.refresh_batch(model, batch)
@@ -370,7 +585,7 @@ class PPOTrainerTests(unittest.TestCase):
 
         restored_model = RecurrentActorCritic(
             TEACHER_V1,
-            config=RecurrentModelConfig(8, 8, 12, 12, 1),
+            config=model_config,
         )
         restored = PPOTrainer(
             restored_model, config=config, total_updates=4, sampler_seed=999
@@ -381,6 +596,34 @@ class PPOTrainerTests(unittest.TestCase):
         self.assertEqual(actual_stats, expected_stats)
         for name, value in restored_model.state_dict().items():
             self.assertTrue(torch.equal(value, expected_model[name]), name)
+        self.assert_nested_equal(restored.state_dict(), trainer.state_dict(), "trainer")
+
+    def test_legacy_scalar_trainer_state_resumes_next_update_bit_exactly(self) -> None:
+        self.assert_trainer_resume_is_bit_exact(
+            RecurrentModelConfig(8, 8, 12, 12, 1),
+            PPOConfig(
+                learning_rate=1e-4,
+                epochs=2,
+                lane_minibatch_size=1,
+                entropy_coefficient=0.0,
+                target_kl=1.0,
+            ),
+        )
+
+    def test_distributional_trainer_state_resumes_next_update_bit_exactly(
+        self,
+    ) -> None:
+        self.assert_trainer_resume_is_bit_exact(
+            RecurrentModelConfig(8, 8, 12, 12, 1, value_quantile_count=5),
+            PPOConfig(
+                learning_rate=1e-4,
+                epochs=2,
+                lane_minibatch_size=1,
+                entropy_coefficient=0.0,
+                target_kl=1.0,
+                quantile_value_coefficient=0.5,
+            ),
+        )
 
 
 if __name__ == "__main__":

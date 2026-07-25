@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-import unittest
 import json
+import math
+import unittest
 from pathlib import Path
 
 import numpy as np
-
 from irisu_env.native import PaddedObservation
 from irisu_rl.encoding import ActorTrackEncoder, EncodedBatch, TeacherStateEncoder
 from irisu_rl.schema import ACTOR_VISION_V1, PROHIBITED_ACTOR_FIELDS, TEACHER_V1
@@ -174,6 +174,132 @@ class SchemaEncodingTests(unittest.TestCase):
         np.testing.assert_array_equal(first.body_features, second.body_features)
         self.assertEqual(int(first.body_mask.sum()), 196)
         self.assertEqual(int(first.health_flags[0]) & 1, 1)
+
+    def test_actor_high_score_inputs_are_causal_and_teacher_exact_state_is_separate(
+        self,
+    ) -> None:
+        actor_global = set(ACTOR_VISION_V1.global_features)
+        actor_body = set(ACTOR_VISION_V1.body_features)
+        self.assertTrue({"level_log1p", "elapsed_seconds_scaled"} <= actor_global)
+        self.assertTrue(
+            {
+                "velocity_x_display_per_second_scaled",
+                "velocity_y_display_per_second_scaled",
+            }
+            <= actor_body
+        )
+        self.assertFalse(
+            {
+                "score_signed_log1p",
+                "highest_chain_log1p",
+                "qualifying_clears_log1p",
+                "active_colors_scaled",
+                "spawn_interval_scaled",
+                "id_scaled",
+                "chain_id_scaled",
+                "remaining_lifetime_signed_log1p",
+                "rot_timer_log1p",
+                "rng_state",
+                "future_spawns",
+                "snapshot",
+            }
+            & (actor_global | actor_body)
+        )
+        self.assertTrue(
+            {
+                "score_signed_log1p",
+                "level_log1p",
+                "active_colors_scaled",
+                "spawn_interval_scaled",
+            }
+            <= set(TEACHER_V1.global_features)
+        )
+
+        record = {
+            "global": {
+                "level": 7,
+                "level_confidence": 0.9,
+                "elapsed_seconds": 120.0,
+                "timing_confidence": 0.8,
+            },
+            "tracks": [
+                {
+                    "kind": "piece",
+                    "shape": "box",
+                    "color": 2,
+                    "lifecycle": "falling",
+                    "effect_x": 100.0,
+                    "effect_y": 200.0,
+                    "vx_display_per_second": 50.0,
+                    "vy_display_per_second": -250.0,
+                    "size": 20.0,
+                    "confidence": 1.0,
+                }
+            ],
+        }
+        encoded = ActorTrackEncoder().encode([record])
+        self.assertAlmostEqual(
+            encoded.global_features[
+                0, ACTOR_VISION_V1.global_features.index("level_log1p")
+            ],
+            math.log1p(7) / 8,
+        )
+        self.assertAlmostEqual(
+            encoded.global_features[
+                0, ACTOR_VISION_V1.global_features.index("elapsed_seconds_scaled")
+            ],
+            math.log1p(120) / 8,
+        )
+        self.assertAlmostEqual(
+            encoded.body_features[
+                0,
+                0,
+                ACTOR_VISION_V1.body_features.index(
+                    "velocity_y_display_per_second_scaled"
+                ),
+            ],
+            -0.25,
+        )
+        privileged = {
+            "global": {
+                **record["global"],
+                "score": 100_000,
+                "highest_chain": 99,
+                "spawn_interval_ticks": 1,
+                "difficulty_counter": 1234,
+            },
+            "tracks": [
+                {
+                    **record["tracks"][0],
+                    "id": 42,
+                    "chain_id": 7,
+                    "remaining_lifetime": 3,
+                    "rot_timer": 9,
+                }
+            ],
+            "rng_state": "hidden",
+            "future_spawns": [1, 2, 3],
+            "snapshot": "identity",
+        }
+        ignored = ActorTrackEncoder().encode([privileged])
+        np.testing.assert_array_equal(ignored.global_features, encoded.global_features)
+        np.testing.assert_array_equal(ignored.body_features, encoded.body_features)
+        np.testing.assert_array_equal(ignored.body_mask, encoded.body_mask)
+
+        teacher = TeacherStateEncoder().encode([padded_fixture()])
+        teacher_names = TEACHER_V1.global_features
+        self.assertAlmostEqual(
+            teacher.global_features[0, teacher_names.index("score_signed_log1p")],
+            -math.log1p(30) / 20,
+        )
+        self.assertAlmostEqual(
+            teacher.global_features[0, teacher_names.index("gauge_fraction")],
+            0.25,
+        )
+        self.assertAlmostEqual(
+            teacher.global_features[0, teacher_names.index("spawn_interval_scaled")],
+            0.31,
+        )
 
     def test_actor_requires_effect_time_units_and_excludes_fully_occluded_tracks(
         self,

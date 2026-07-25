@@ -1414,6 +1414,20 @@ Large chains can create a heavy-tailed score distribution. Required checks:
 If a scalar value head proves inadequate, test distributional or quantile value
 prediction before altering the reward.
 
+The model now supports an opt-in auxiliary quantile critic for that experiment.
+It predicts midpoint return quantiles while retaining the scalar value head for
+PPO advantages, GAE, and bootstrapping. Quantile predictions and critic-only
+conditioning remain outside the recurrent actor inputs and action heads. A
+future high-score development configuration should enable 51 quantiles together
+with its explicitly identity-bound PPO loss coefficient; disabled/default
+manifests and the current canonical R3 configuration intentionally remain
+unchanged.
+
+This capability is a prerequisite for studying heavy-tailed complete-game
+returns, not evidence of full-game learning or 100k performance. Training reward
+deltas must remain unclipped, and policy selection and evaluation must continue
+to use actual raw game score rather than predicted quantiles or critic loss.
+
 ### 11.4 Hyperparameter procedure
 
 - Define a small initial search space on training seeds.

@@ -39,9 +39,7 @@ class R2ManifestTests(unittest.TestCase):
     def test_runtime_manifest_binds_lock_model_and_transfer_gate(self) -> None:
         model = RecurrentActorCritic(
             TEACHER_V1,
-            config=RecurrentModelConfig(
-                8, 8, 12, 12, 1, critic_condition_features=1
-            ),
+            config=RecurrentModelConfig(8, 8, 12, 12, 1, critic_condition_features=1),
         )
         manifest = runtime_manifest(
             ROOT,
@@ -73,6 +71,25 @@ class R2ManifestTests(unittest.TestCase):
             manifest["reward"]["composer"]["shaping_spec"],
             LinearGaugePotential().manifest(),
         )
+
+    def test_quantile_settings_are_omitted_by_default_and_bound_when_enabled(
+        self,
+    ) -> None:
+        self.assertNotIn("value_quantile_count", RecurrentModelConfig().manifest())
+        self.assertNotIn("quantile_value_coefficient", PPOConfig().manifest())
+        self.assertNotIn("quantile_huber_kappa", PPOConfig().manifest())
+        self.assertEqual(
+            RecurrentModelConfig(value_quantile_count=51).manifest()[
+                "value_quantile_count"
+            ],
+            51,
+        )
+        enabled = PPOConfig(
+            quantile_value_coefficient=0.25,
+            quantile_huber_kappa=2.0,
+        ).manifest()
+        self.assertEqual(enabled["quantile_value_coefficient"], 0.25)
+        self.assertEqual(enabled["quantile_huber_kappa"], 2.0)
 
     def test_simulator_identity_requires_exact_runtime_and_mechanics_hashes(
         self,
@@ -113,9 +130,7 @@ class R2ManifestTests(unittest.TestCase):
                 code_revision="test-revision",
                 observation_provenance="privileged_simulator",
                 simulator=simulator,
-                reward_composer=RewardComposer(
-                    shaping_spec=LinearGaugePotential()
-                ),
+                reward_composer=RewardComposer(shaping_spec=LinearGaugePotential()),
             )
 
 

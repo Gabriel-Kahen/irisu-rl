@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import math
 import copy
+import math
 from dataclasses import asdict, dataclass
 
 import torch
@@ -25,6 +25,8 @@ class PPOConfig:
     entropy_coefficient: float = 0.01
     max_gradient_norm: float = 0.5
     target_kl: float = 0.03
+    quantile_value_coefficient: float = 0.0
+    quantile_huber_kappa: float = 1.0
 
     def __post_init__(self) -> None:
         positive = (
@@ -45,6 +47,20 @@ class PPOConfig:
         if not math.isfinite(self.entropy_coefficient) or self.entropy_coefficient < 0:
             raise ValueError("entropy coefficient must be finite and nonnegative")
         if (
+            isinstance(self.quantile_value_coefficient, bool)
+            or not math.isfinite(self.quantile_value_coefficient)
+            or self.quantile_value_coefficient < 0
+        ):
+            raise ValueError(
+                "quantile value coefficient must be finite and nonnegative"
+            )
+        if (
+            isinstance(self.quantile_huber_kappa, bool)
+            or not math.isfinite(self.quantile_huber_kappa)
+            or self.quantile_huber_kappa <= 0
+        ):
+            raise ValueError("quantile Huber kappa must be finite and positive")
+        if (
             isinstance(self.epochs, bool)
             or not isinstance(self.epochs, int)
             or self.epochs <= 0
@@ -58,7 +74,11 @@ class PPOConfig:
             raise ValueError("lane minibatch size must be a positive integer")
 
     def manifest(self) -> dict[str, int | float]:
-        return asdict(self)
+        manifest = asdict(self)
+        if self.quantile_value_coefficient == 0:
+            manifest.pop("quantile_value_coefficient")
+            manifest.pop("quantile_huber_kappa")
+        return manifest
 
 
 @dataclass(frozen=True, slots=True)
@@ -233,6 +253,7 @@ class RecurrentTrainingBatch:
 class PPOUpdateStats:
     policy_loss: float
     value_loss: float
+    quantile_value_loss: float
     entropy: float
     approximate_kl: float
     kind_approximate_kl: float
@@ -271,6 +292,64 @@ def clipped_surrogate_loss(
     unclipped = ratio * advantages
     clipped = ratio.clamp(1.0 - clip_ratio, 1.0 + clip_ratio) * advantages
     return -torch.minimum(unclipped, clipped)[train_mask].mean()
+
+
+def quantile_huber_loss(
+    value_quantiles: Tensor,
+    targets: Tensor,
+    train_mask: Tensor,
+    kappa: float = 1.0,
+) -> Tensor:
+    """Return masked midpoint-quantile Huber regression against scalar targets."""
+
+    if (
+        value_quantiles.ndim != 3
+        or targets.ndim != 2
+        or value_quantiles.shape[:-1] != targets.shape
+        or train_mask.shape != targets.shape
+        or train_mask.dtype != torch.bool
+        or not torch.any(train_mask)
+    ):
+        raise ValueError("quantile inputs need one nonempty shared timestep mask")
+    quantile_count = value_quantiles.shape[-1]
+    if quantile_count < 3 or quantile_count > 101 or quantile_count % 2 != 1:
+        raise ValueError("quantile predictions need an odd count within [3, 101]")
+    if (
+        not value_quantiles.is_floating_point()
+        or not targets.is_floating_point()
+        or value_quantiles.dtype != targets.dtype
+        or value_quantiles.device != targets.device
+        or train_mask.device != targets.device
+        or isinstance(kappa, bool)
+        or not isinstance(kappa, (int, float))
+        or not math.isfinite(kappa)
+        or kappa <= 0
+        or not torch.isfinite(value_quantiles).all()
+        or not torch.isfinite(targets).all()
+    ):
+        raise ValueError("quantile values, targets, mask, or kappa are invalid")
+    error = targets.unsqueeze(-1) - value_quantiles
+    if not torch.isfinite(error).all():
+        raise FloatingPointError("quantile target error overflowed")
+    absolute_error = error.abs()
+    quadratic = absolute_error.clamp_max(kappa)
+    huber = 0.5 * quadratic.square() + kappa * (absolute_error - quadratic)
+    tau = (
+        torch.arange(
+            quantile_count,
+            dtype=value_quantiles.dtype,
+            device=value_quantiles.device,
+        )
+        + 0.5
+    ) / quantile_count
+    weight = (tau - (error.detach() < 0).to(value_quantiles.dtype)).abs()
+    per_timestep = (weight * huber / kappa).mean(dim=-1)
+    if not torch.isfinite(per_timestep).all():
+        raise FloatingPointError("quantile Huber loss overflowed")
+    loss = per_timestep[train_mask].mean()
+    if not torch.isfinite(loss):
+        raise FloatingPointError("quantile Huber reduction overflowed")
+    return loss
 
 
 def _masked_metric(value: Tensor, mask: Tensor) -> tuple[float, int]:
@@ -368,6 +447,12 @@ class PPOTrainer:
     ) -> None:
         self.model = model
         self.config = config or PPOConfig()
+        head_enabled = self.model.config.value_quantile_count > 0
+        loss_enabled = self.config.quantile_value_coefficient > 0
+        if head_enabled != loss_enabled:
+            raise ValueError(
+                "quantile value head and positive loss coefficient must be enabled together"
+            )
         if (
             isinstance(sampler_seed, bool)
             or not isinstance(sampler_seed, int)
@@ -422,6 +507,22 @@ class PPOTrainer:
                         else {}
                     ),
                 )
+                expected_quantiles = (
+                    *output.values.shape,
+                    self.model.config.value_quantile_count,
+                )
+                if self.model.config.value_quantile_count and (
+                    output.value_quantiles is None
+                    or output.value_quantiles.shape != expected_quantiles
+                ):
+                    raise ValueError(
+                        "model quantile output does not match its configured shape"
+                    )
+                if (
+                    not self.model.config.value_quantile_count
+                    and output.value_quantiles is not None
+                ):
+                    raise ValueError("disabled model emitted quantile values")
                 distribution = TorchConditionalActionDistribution(
                     output.kind_logits,
                     output.wait_logits,
@@ -462,6 +563,8 @@ class PPOTrainer:
                     output.values[train_mask],
                     ratio[train_mask],
                 )
+                if output.value_quantiles is not None:
+                    selected += (output.value_quantiles[train_mask],)
                 if not all(torch.isfinite(value).all() for value in selected):
                     raise FloatingPointError("nonfinite PPO model output")
                 entropy = entropy_values[train_mask].mean()
@@ -480,9 +583,20 @@ class PPOTrainer:
                 value_loss = (
                     0.5 * torch.maximum(value_error, clipped_error)[train_mask].mean()
                 )
+                quantile_value_loss = (
+                    quantile_huber_loss(
+                        output.value_quantiles,
+                        returns,
+                        train_mask,
+                        self.config.quantile_huber_kappa,
+                    )
+                    if output.value_quantiles is not None
+                    else output.values.new_zeros(())
+                )
                 loss = (
                     policy_loss
                     + self.config.value_coefficient * value_loss
+                    + self.config.quantile_value_coefficient * quantile_value_loss
                     - self.config.entropy_coefficient * entropy
                 )
                 if not torch.isfinite(loss):
@@ -530,6 +644,10 @@ class PPOTrainer:
                     {
                         "policy_loss": (float(policy_loss.detach()), train_count),
                         "value_loss": (float(value_loss.detach()), train_count),
+                        "quantile_value_loss": (
+                            float(quantile_value_loss.detach()),
+                            train_count,
+                        ),
                         "entropy": (float(entropy.detach()), train_count),
                         "approximate_kl": (
                             float(approximate_kl.detach()),
@@ -577,6 +695,7 @@ class PPOTrainer:
         return PPOUpdateStats(
             policy_loss=weighted_mean("policy_loss"),
             value_loss=weighted_mean("value_loss"),
+            quantile_value_loss=weighted_mean("quantile_value_loss"),
             entropy=weighted_mean("entropy"),
             approximate_kl=weighted_mean("approximate_kl"),
             kind_approximate_kl=weighted_mean("kind_approximate_kl"),
@@ -608,6 +727,26 @@ class PPOTrainer:
                 else {}
             ),
         )
+        expected_quantiles = (
+            *output.values.shape,
+            self.model.config.value_quantile_count,
+        )
+        if self.model.config.value_quantile_count:
+            if (
+                output.value_quantiles is None
+                or output.value_quantiles.shape != expected_quantiles
+            ):
+                raise ValueError(
+                    "model quantile output does not match its configured shape"
+                )
+            quantile_huber_loss(
+                output.value_quantiles,
+                batch.returns,
+                batch.train_mask,
+                self.config.quantile_huber_kappa,
+            )
+        elif output.value_quantiles is not None:
+            raise ValueError("disabled model emitted quantile values")
         distribution = TorchConditionalActionDistribution(
             output.kind_logits,
             output.wait_logits,
