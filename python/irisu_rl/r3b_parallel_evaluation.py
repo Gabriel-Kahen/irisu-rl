@@ -23,9 +23,9 @@ from .r3b_canonical_runner import (
     evaluate_recurrent_policy_sharded,
 )
 from .r3b_evaluation import (
-    DeploymentPolicyIdentity,
     EvaluationReport,
     EvaluationSuite,
+    deployment_policy_identity_for_threads,
 )
 from .r3b_experiments import TrialJob
 from .runtime_identity import attest_simulator_runtime
@@ -254,8 +254,12 @@ def _model_from_task(
     encoder = TeacherStateEncoder()
     kind_mask = torch.ones((1, 3), dtype=torch.bool)
     wait_mask = torch.ones((1, len(model.action_spec.wait_choices)), dtype=torch.bool)
-    deployment = DeploymentPolicyIdentity.from_components(
-        model, encoder, kind_mask, wait_mask
+    deployment = deployment_policy_identity_for_threads(
+        model,
+        encoder,
+        kind_mask,
+        wait_mask,
+        torch_threads=config.evaluation_torch_threads,
     )
     if deployment.sha256 != task.deployment_policy_sha256:
         raise ValueError("evaluation deployment identity differs from the checkpoint")

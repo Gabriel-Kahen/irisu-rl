@@ -12,9 +12,9 @@ from irisu_rl.encoding import TeacherStateEncoder
 from irisu_rl.models import RecurrentActorCritic, RecurrentModelConfig
 from irisu_rl.r3b_canonical_runner import PairedEvaluationSuites
 from irisu_rl.r3b_evaluation import (
-    DeploymentPolicyIdentity,
     EpisodeMetrics,
     EvaluationReport,
+    deployment_policy_identity_for_threads,
 )
 from irisu_rl.r3b_parallel_evaluation import (
     CanonicalEvaluationTask,
@@ -53,8 +53,12 @@ def _task_fixture() -> tuple[
     encoder = TeacherStateEncoder()
     kind_mask = torch.ones((1, 3), dtype=torch.bool)
     wait_mask = torch.ones((1, len(model.action_spec.wait_choices)), dtype=torch.bool)
-    deployment = DeploymentPolicyIdentity.from_components(
-        model, encoder, kind_mask, wait_mask
+    deployment = deployment_policy_identity_for_threads(
+        model,
+        encoder,
+        kind_mask,
+        wait_mask,
+        torch_threads=config.evaluation_torch_threads,
     )
     assignment = _hash("a")
     suite = PairedEvaluationSuites.build(
@@ -89,6 +93,27 @@ def _task_fixture() -> tuple[
 
 
 class R3BParallelEvaluationTests(unittest.TestCase):
+    def test_deployment_identity_binds_threads_and_restores_training_setting(
+        self,
+    ) -> None:
+        task, _suite, model = _task_fixture()
+        encoder = TeacherStateEncoder()
+        kind_mask = torch.ones((1, 3), dtype=torch.bool)
+        wait_mask = torch.ones(
+            (1, len(model.action_spec.wait_choices)), dtype=torch.bool
+        )
+        previous = torch.get_num_threads()
+        alternate_threads = 2 if previous != 2 else 3
+        alternate = deployment_policy_identity_for_threads(
+            model,
+            encoder,
+            kind_mask,
+            wait_mask,
+            torch_threads=alternate_threads,
+        )
+        self.assertEqual(torch.get_num_threads(), previous)
+        self.assertNotEqual(alternate.sha256, task.deployment_policy_sha256)
+
     def test_model_transport_is_bounded_picklable_and_identity_checked(self) -> None:
         task, _suite, expected_model = _task_fixture()
         restored_task = pickle.loads(pickle.dumps(task))

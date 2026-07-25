@@ -25,7 +25,10 @@ from .r3b_canonical_runner import (
     complete_nonsealed_workflow_job,
     complete_sealed_workflow_job,
 )
-from .r3b_evaluation import DeploymentPolicyIdentity
+from .r3b_evaluation import (
+    DeploymentPolicyIdentity,
+    deployment_policy_identity_for_threads,
+)
 from .r3b_experiments import (
     CheckpointEvaluation,
     SealedTestJobLease,
@@ -52,13 +55,23 @@ _CHECKPOINT_VERSION = "r3b-training-checkpoint-package-v2"
 
 
 def _deployment(
-    model: Any,
+    model: Any, *, torch_threads: int | None = None
 ) -> tuple[TeacherStateEncoder, torch.Tensor, torch.Tensor, DeploymentPolicyIdentity]:
     encoder = TeacherStateEncoder()
     kind_mask = torch.ones((1, 3), dtype=torch.bool)
     wait_mask = torch.ones((1, len(model.action_spec.wait_choices)), dtype=torch.bool)
-    identity = DeploymentPolicyIdentity.from_components(
-        model, encoder, kind_mask, wait_mask
+    identity = (
+        DeploymentPolicyIdentity.from_components(
+            model, encoder, kind_mask, wait_mask
+        )
+        if torch_threads is None
+        else deployment_policy_identity_for_threads(
+            model,
+            encoder,
+            kind_mask,
+            wait_mask,
+            torch_threads=torch_threads,
+        )
     )
     return encoder, kind_mask, wait_mask, identity
 
@@ -165,13 +178,17 @@ def _restore(
     generation: str,
     identity: dict[str, object],
     checkpoint: TrainingCheckpointArtifact,
+    evaluation_torch_threads: int | None = None,
 ) -> None:
     built.session.restore(
         root / "jobs" / job.sha256 / "checkpoints",
         generation=generation,
         identity=identity,
     )
-    encoder, kind_mask, wait_mask, deployment = _deployment(built.session.model)
+    encoder, kind_mask, wait_mask, deployment = _deployment(
+        built.session.model,
+        torch_threads=evaluation_torch_threads,
+    )
     del encoder, kind_mask, wait_mask
     if (
         built.session.trainer.schedule.completed_updates != checkpoint.completed_updates
@@ -204,6 +221,7 @@ def _fresh_restored_checkpoint(
     job: TrialJob,
     target_update: int,
     identity: dict[str, object],
+    evaluation_torch_threads: int | None = None,
 ) -> tuple[Any, TrainingCheckpointArtifact, str]:
     """Restore one checkpoint into a new caller-owned trial session."""
 
@@ -224,6 +242,7 @@ def _fresh_restored_checkpoint(
             generation=generation,
             identity=identity,
             checkpoint=checkpoint,
+            evaluation_torch_threads=evaluation_torch_threads,
         )
     except BaseException:
         built.close()
@@ -247,7 +266,10 @@ def _evaluation_task(
 ) -> CanonicalEvaluationTask:
     """Bind one verified restored model to one immutable evaluation suite."""
 
-    _, _, _, deployment = _deployment(model)
+    _, _, _, deployment = _deployment(
+        model,
+        torch_threads=inputs.config.evaluation_torch_threads,
+    )
     if (
         model_state_sha256(model) != checkpoint.model_sha256
         or deployment.sha256 != checkpoint.deployment_policy_sha256
@@ -462,6 +484,7 @@ def evaluate_trained_canonical_job(
                 job=job,
                 target_update=update,
                 identity=identity,
+                evaluation_torch_threads=config.evaluation_torch_threads,
             )
             retain = False
             try:
@@ -490,7 +513,10 @@ def evaluate_trained_canonical_job(
                     checkpoint_built.close()
         if built is None or final_checkpoint is None or final_transport is None:
             raise RuntimeError("canonical evaluation lacks its final session")
-        _, _, _, deployment = _deployment(built.session.model)
+        _, _, _, deployment = _deployment(
+            built.session.model,
+            torch_threads=config.evaluation_torch_threads,
+        )
         exact_final_task = _evaluation_task(
             inputs=inputs,
             worker=worker,
@@ -548,6 +574,7 @@ def evaluate_trained_canonical_job(
                     job=job,
                     target_update=resume_update,
                     identity=identity,
+                    evaluation_torch_threads=config.evaluation_torch_threads,
                 )
             )
             if (

@@ -1441,6 +1441,37 @@ class DeploymentPolicyIdentity:
         )
 
 
+def deployment_policy_identity_for_threads(
+    model: RecurrentActorCritic,
+    encoder: object,
+    kind_mask: Tensor,
+    wait_mask: Tensor,
+    *,
+    torch_threads: int,
+) -> DeploymentPolicyIdentity:
+    """Capture deployment identity under its explicit inference thread setting."""
+
+    if (
+        isinstance(torch_threads, bool)
+        or not isinstance(torch_threads, int)
+        or torch_threads <= 0
+    ):
+        raise ValueError("deployment Torch thread count must be a positive integer")
+    previous = torch.get_num_threads()
+    try:
+        if previous != torch_threads:
+            torch.set_num_threads(torch_threads)
+        return DeploymentPolicyIdentity.from_components(
+            model,
+            encoder,
+            kind_mask,
+            wait_mask,
+        )
+    finally:
+        if torch.get_num_threads() != previous:
+            torch.set_num_threads(previous)
+
+
 def _mapping(observation: object) -> Mapping[str, Any]:
     if isinstance(observation, Mapping):
         return observation
