@@ -156,19 +156,22 @@ measurements, not R3 acceptance results.
 
 The frozen protocol comprises 66,800 optimizer updates and 116,864 bounded
 logical episode cells: 82,816 exact and 34,048 portable. Artifact-cache reuse
-can make the number of physical executions slightly lower. The measured
-single-report and process-level gains project the 36-job calibration queue into
-roughly a 10-14 hour window on the reference host, but a fresh fixed-source
-canonical job must establish the end-to-end duration before this becomes an
-operational estimate. This is not a deadline or an acceptance result: policy
-survival length, portable work, checkpoint restoration, persistence, and
-resume-audit cost vary by job. Rerun the benchmark and use completed validation
-durations to reserve each sealed learner-job window separately; pending sealed
-jobs are safe between commands. Reserve the one-shot baseline batch as its own
-uninterrupted window, and retain enough disk for all immutable checkpoints and
-reports. The checked runner intentionally serializes jobs while running up to
-nine independent reports inside one job; launching competing canonical runners
-on the same host is rejected by the global run lock.
+can make the number of physical executions slightly lower. On clean source
+revision `fc1ee1b`, two fresh, verified canonical calibration jobs completed
+end to end in 623.638 and 1,231.372 seconds. That includes training, checkpoint
+restoration, all nine reports, portable parity, the exact resume audit,
+publication, and workflow completion. Their 15-minute-28-second mean projects
+36 jobs to about 9.3 hours. Use a 9-12 hour planning window until more arms
+establish the survival-length distribution. This is not a deadline or an
+acceptance result: policy survival length, portable work, checkpoint
+restoration, persistence, and resume-audit cost vary by job. Rerun the
+benchmark and use completed validation durations to reserve each sealed
+learner-job window separately; pending sealed jobs are safe between commands.
+Reserve the one-shot baseline batch as its own uninterrupted window, and retain
+enough disk for all immutable checkpoints and reports. The checked runner
+intentionally serializes jobs while running up to nine independent reports
+inside one job; launching competing canonical runners on the same host is
+rejected by the global run lock.
 
 Evaluation is a preregistered bounded-horizon benchmark. An episode that reaches
 the 8,192-tick bound is explicitly recorded as truncated, and
