@@ -15,6 +15,8 @@ from .seeds import SeedAllocator
 
 
 class Encoder(Protocol):
+    """Batch encoder; may opt into subset encoding with ``lane_independent=True``."""
+
     def encode(self, observations: Sequence[object]) -> EncodedBatch: ...
 
 
@@ -533,6 +535,10 @@ class MacroVectorAdapter:
         start_gauges = tuple(self._raw_gauges)
         start_gauge_maxes = tuple(self._raw_gauge_maxes)
         primitive_actions = [self.action_spec.press(action) for action in validated]
+        lane_independent_encoding = (
+            self.observation_transform is None
+            and getattr(self.encoder, "lane_independent", False) is True
+        )
         try:
             observations, rewards, terminated, truncated, infos = self.env.step(
                 primitive_actions
@@ -540,18 +546,30 @@ class MacroVectorAdapter:
             self._require_lengths(
                 self.num_envs, observations, rewards, terminated, truncated, infos
             )
-            first_encoded = self._encode(
-                observations,
-                lane_ids=range(self.num_envs),
-                phase="macro_first",
-                actions=validated,
+            first_encoded = (
+                self._encode(
+                    observations,
+                    lane_ids=range(self.num_envs),
+                    phase="macro_first",
+                    actions=validated,
+                )
+                if not lane_independent_encoding
+                else None
             )
         except BaseException as exc:
             self._fail_closed(exc)
 
         try:
-            final_raw = list(observations)
-            final_encoded = [first_encoded.row(index) for index in range(self.num_envs)]
+            final_encoded = (
+                [first_encoded.row(index) for index in range(self.num_envs)]
+                if first_encoded is not None
+                else None
+            )
+            end_ticks = [int(getattr(value, "tick", 0)) for value in observations]
+            end_scores = [int(getattr(value, "score", 0)) for value in observations]
+            end_gauge_fields = [self._gauge_fields(value) for value in observations]
+            end_gauges = [value[0] for value in end_gauge_fields]
+            end_gauge_maxes = [value[1] for value in end_gauge_fields]
             total_rewards = [int(value) for value in rewards]
             event_counts = [len(info.get("events", ())) for info in infos]
             total_events = (
@@ -583,6 +601,23 @@ class MacroVectorAdapter:
             and not final_terminated[index]
             and not final_truncated[index]
         ]
+        if final_encoded is None:
+            final_encoded = [None] * self.num_envs
+            stable_lanes = [
+                index for index in range(self.num_envs) if index not in release_lanes
+            ]
+            if stable_lanes:
+                try:
+                    stable_encoded = self._encode(
+                        [observations[index] for index in stable_lanes],
+                        lane_ids=stable_lanes,
+                        phase="macro_final",
+                        actions=[validated[index] for index in stable_lanes],
+                    )
+                    for offset, lane in enumerate(stable_lanes):
+                        final_encoded[lane] = stable_encoded.row(offset)
+                except BaseException as exc:
+                    self._fail_closed(exc)
         if release_lanes:
             try:
                 release_result = self.env.step_many(
@@ -607,9 +642,18 @@ class MacroVectorAdapter:
                 release_encoded = self._encode(
                     release_observations,
                     lane_ids=release_lanes,
-                    phase="release",
+                    phase="macro_final" if lane_independent_encoding else "release",
                     actions=[validated[lane] for lane in release_lanes],
                 )
+                release_end_ticks = [
+                    int(getattr(value, "tick", 0)) for value in release_observations
+                ]
+                release_end_scores = [
+                    int(getattr(value, "score", 0)) for value in release_observations
+                ]
+                release_end_gauges = [
+                    self._gauge_fields(value) for value in release_observations
+                ]
                 release_event_counts = [
                     len(info.get("events", ())) for info in release_infos
                 ]
@@ -627,8 +671,10 @@ class MacroVectorAdapter:
             except BaseException as exc:
                 self._fail_closed(exc)
             for offset, lane in enumerate(release_lanes):
-                final_raw[lane] = release_observations[offset]
                 final_encoded[lane] = release_encoded.row(offset)
+                end_ticks[lane] = release_end_ticks[offset]
+                end_scores[lane] = release_end_scores[offset]
+                end_gauges[lane], end_gauge_maxes[lane] = release_end_gauges[offset]
                 total_rewards[lane] += int(release_rewards[offset])
                 total_events[lane] += release_events[offset]
                 event_counts[lane] += release_event_counts[offset]
@@ -643,15 +689,9 @@ class MacroVectorAdapter:
             raise RuntimeError(
                 "validated semantic action produced a native invalid action"
             )
-
-        try:
-            end_ticks = [int(getattr(value, "tick", 0)) for value in final_raw]
-            end_scores = [int(getattr(value, "score", 0)) for value in final_raw]
-            end_gauge_fields = [self._gauge_fields(value) for value in final_raw]
-            end_gauges = [value[0] for value in end_gauge_fields]
-            end_gauge_maxes = [value[1] for value in end_gauge_fields]
-        except BaseException as exc:
-            self._fail_closed(exc)
+        if any(value is None for value in final_encoded):
+            self._fail_closed(RuntimeError("completed macro encoding is incomplete"))
+        final_encoded = [value for value in final_encoded if value is not None]
         elapsed = [end - start for start, end in zip(start_ticks, end_ticks)]
         if any(value <= 0 for value in elapsed):
             self._poisoned = True

@@ -258,8 +258,7 @@ class RecurrentActorCritic(nn.Module):
         """Run a time-major sequence shaped ``[T, B, ...]``.
 
         ``reset_before[t, b]`` clears lane ``b`` before consuming timestep
-        ``t``. The explicit loop is intentional: hidden-state resets within a
-        packed rollout cannot be represented by one monolithic GRU call.
+        ``t``. Maximal spans without resets share one GRU call.
         """
 
         if global_features.ndim != 3:
@@ -308,9 +307,18 @@ class RecurrentActorCritic(nn.Module):
         fused = self.fusion(torch.cat((global_embedding, body_embedding), dim=-1))
         hidden = recurrent_state
         sequence: list[Tensor] = []
-        for index in range(time):
+        start = 0
+        reset_rows = torch.nonzero(
+            reset_before.any(dim=1), as_tuple=False
+        ).flatten().tolist()
+        for index in reset_rows:
+            if index > start:
+                value, hidden = self.recurrent(fused[start:index], hidden)
+                sequence.append(value)
             hidden = hidden * (~reset_before[index])[None, :, None]
-            value, hidden = self.recurrent(fused[index : index + 1], hidden)
+            start = index
+        if start < time:
+            value, hidden = self.recurrent(fused[start:time], hidden)
             sequence.append(value)
         encoded = torch.cat(sequence, dim=0)
         raw_coordinates = self.coordinate_head(encoded).reshape(time, batch, 2, 2, 2)

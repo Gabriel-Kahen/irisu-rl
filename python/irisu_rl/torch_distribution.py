@@ -167,6 +167,11 @@ class TorchConditionalActionDistribution:
 
     def entropy(self) -> Tensor:
         components = self.entropy_components()
+        return self.entropy_from_components(components)
+
+    def entropy_from_components(self, components: EntropyComponents) -> Tensor:
+        """Combine already-computed branch entropies."""
+
         kind_probability = self._kind.probs
         return (
             components.kind
