@@ -24,6 +24,7 @@ class RecurrentModelConfig:
     coordinate_parameterization: str = "independent-alpha-beta"
     coordinate_concentration_log_bias: float = 2.0
     critic_condition_features: int = 0
+    value_quantile_count: int = 0
 
     def __post_init__(self) -> None:
         widths = (
@@ -42,6 +43,20 @@ class RecurrentModelConfig:
             self.critic_condition_features, bool
         ) or self.critic_condition_features not in (0, 1):
             raise ValueError("critic condition feature count must be zero or one")
+        if (
+            isinstance(self.value_quantile_count, bool)
+            or not isinstance(self.value_quantile_count, int)
+            or (
+                self.value_quantile_count != 0
+                and not (
+                    3 <= self.value_quantile_count <= 101
+                    and self.value_quantile_count % 2 == 1
+                )
+            )
+        ):
+            raise ValueError(
+                "value quantile count must be zero or an odd integer within [3, 101]"
+            )
         if not 1.0 <= self.minimum_concentration <= 10.0:
             raise ValueError("minimum concentration must be within [1, 10]")
         if (
@@ -59,6 +74,8 @@ class RecurrentModelConfig:
         manifest = asdict(self)
         if self.critic_condition_features == 0:
             manifest.pop("critic_condition_features")
+        if self.value_quantile_count == 0:
+            manifest.pop("value_quantile_count")
         if self.coordinate_parameterization == "independent-alpha-beta":
             manifest.pop("coordinate_parameterization")
             manifest.pop("coordinate_concentration_log_bias")
@@ -73,6 +90,7 @@ class PolicyValueOutput:
     coordinate_beta: Tensor
     values: Tensor
     recurrent_state: Tensor
+    value_quantiles: Tensor | None = None
 
 
 class MaskedBodySetEncoder(nn.Module):
@@ -151,6 +169,11 @@ class RecurrentActorCritic(nn.Module):
         self.wait_head = nn.Linear(hidden, len(self.action_spec.wait_choices))
         self.coordinate_head = nn.Linear(hidden, 2 * 2 * 2)
         self.value_head = nn.Linear(hidden, 1)
+        self.value_quantile_head = (
+            nn.Linear(hidden, self.config.value_quantile_count)
+            if self.config.value_quantile_count
+            else None
+        )
         self.critic_condition_head = (
             nn.Linear(hidden, self.config.critic_condition_features)
             if self.config.critic_condition_features
@@ -168,6 +191,8 @@ class RecurrentActorCritic(nn.Module):
                     self.config.coordinate_concentration_log_bias
                 )
         nn.init.orthogonal_(self.value_head.weight, gain=1.0)
+        if self.value_quantile_head is not None:
+            nn.init.orthogonal_(self.value_quantile_head.weight, gain=1.0)
         if self.critic_condition_head is not None:
             nn.init.orthogonal_(self.critic_condition_head.weight, gain=1.0)
 
@@ -305,18 +330,27 @@ class RecurrentActorCritic(nn.Module):
             )
             alpha, beta = concentration[..., 0], concentration[..., 1]
         values = self.value_head(encoded).squeeze(-1)
+        value_quantiles = (
+            self.value_quantile_head(encoded)
+            if self.value_quantile_head is not None
+            else None
+        )
         if self.critic_condition_head is not None:
             # Potential shaping is linear in its episode coefficient, but its
             # value-function shift is state dependent. A learned state slope
             # represents that interaction without exposing the coefficient to
             # the recurrent core or any actor head.
             condition_slope = self.critic_condition_head(encoded)
-            values = values + (condition_slope * critic_condition).sum(dim=-1)
+            condition_shift = (condition_slope * critic_condition).sum(dim=-1)
+            values = values + condition_shift
+            if value_quantiles is not None:
+                value_quantiles = value_quantiles + condition_shift.unsqueeze(-1)
         return PolicyValueOutput(
-            self.kind_head(encoded),
-            self.wait_head(encoded),
-            alpha,
-            beta,
-            values,
-            hidden,
+            kind_logits=self.kind_head(encoded),
+            wait_logits=self.wait_head(encoded),
+            coordinate_alpha=alpha,
+            coordinate_beta=beta,
+            values=values,
+            recurrent_state=hidden,
+            value_quantiles=value_quantiles,
         )
