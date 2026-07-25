@@ -1161,10 +1161,16 @@ class R3ATrainingSession:
         tail_mode = "train"
         if self.tail_controller is not None:
             assert isinstance(self.task, CurriculumTaskContract)
+            tail_phase_before = self.tail_controller.phase
             tail_mode = self.tail_controller.collection_mode(
                 completed_updates=self.trainer.schedule.completed_updates,
                 lane_shaping_weight_ppm=(self.task.coordinator.shaping_weights_ppm()),
             )
+            if (
+                tail_phase_before == "draining"
+                and self.tail_controller.phase == "score_only"
+            ):
+                self.consecutive_skips = 0
             if tail_mode == "closed":
                 raise RuntimeError("score-only tail is complete")
         tail_draining = tail_mode == "drain"

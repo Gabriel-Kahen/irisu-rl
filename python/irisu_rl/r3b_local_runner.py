@@ -14,7 +14,7 @@ import torch
 from irisu_env import IrisuEnv, PaddedVectorEnv
 
 from .actions import ActionSpec
-from .collector import CollectorConfig
+from .collector import CollectorConfig, R3ATrainingSession
 from .curriculum import CurriculumSpec, StageSpec
 from .encoding import TeacherStateEncoder
 from .models import RecurrentActorCritic, RecurrentModelConfig
@@ -364,6 +364,47 @@ def _checkpoint(
     )
     workflow.record_checkpoint(claim, completed, envelope.artifact_id)
     return envelope.artifact_id
+
+
+def _checkpoint_due_after_update(
+    previous_updates: int,
+    completed_updates: int,
+    *,
+    optimizer_completed: bool,
+    target: int,
+    interval: int,
+) -> bool:
+    """Return whether one optimizer-clock advance reached a durable boundary."""
+
+    if completed_updates == previous_updates:
+        if optimizer_completed:
+            raise RuntimeError("optimizer result did not advance the training clock")
+        return False
+    if completed_updates != previous_updates + 1:
+        raise RuntimeError("training update clock advanced unexpectedly")
+    if not optimizer_completed:
+        raise RuntimeError("training clock advanced without an optimizer result")
+    return completed_updates % interval == 0 or completed_updates == target
+
+
+def _run_update_and_checkpoint_due(
+    session: R3ATrainingSession,
+    *,
+    target: int,
+    interval: int,
+) -> tuple[int, bool]:
+    """Run one collection attempt and classify its optimizer-clock progress."""
+
+    previous_updates = session.trainer.schedule.completed_updates
+    update = session.run_update()
+    completed_updates = session.trainer.schedule.completed_updates
+    return completed_updates, _checkpoint_due_after_update(
+        previous_updates,
+        completed_updates,
+        optimizer_completed=update.optimizer is not None,
+        target=target,
+        interval=interval,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -741,12 +782,12 @@ def _run_local_training_updates(
             ]
         )
         while built.session.trainer.schedule.completed_updates < target:
-            built.session.run_update()
-            completed_updates = built.session.trainer.schedule.completed_updates
-            if (
-                completed_updates % plan.checkpoint_interval_updates == 0
-                or completed_updates == target
-            ):
+            completed_updates, checkpoint_due = _run_update_and_checkpoint_due(
+                built.session,
+                target=target,
+                interval=plan.checkpoint_interval_updates,
+            )
+            if checkpoint_due:
                 checkpoint_sha = _checkpoint(
                     run_root=root,
                     workflow=workflow,
