@@ -170,6 +170,34 @@ def decode_fake_exact_transition(
 
 
 class ExactBackendArgumentTests(unittest.TestCase):
+    def test_evaluator_lease_descriptor_is_forwarded_only_when_safe(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            lease = Path(directory) / "lease"
+            descriptor = os.open(lease, os.O_RDWR | os.O_CREAT, 0o600)
+            try:
+                with mock.patch.dict(
+                    os.environ,
+                    {"IRISU_R3B_EVALUATOR_LEASE_FD": str(descriptor)},
+                ):
+                    self.assertEqual(
+                        exact_ipc_module._exact_worker_pass_fds(), (descriptor,)
+                    )
+                os.chmod(lease, 0o640)
+                with mock.patch.dict(
+                    os.environ,
+                    {"IRISU_R3B_EVALUATOR_LEASE_FD": str(descriptor)},
+                ), self.assertRaisesRegex(ExactWorkerError, "metadata is unsafe"):
+                    exact_ipc_module._exact_worker_pass_fds()
+            finally:
+                os.close(descriptor)
+
+    def test_evaluator_lease_descriptor_rejects_malformed_value(self) -> None:
+        with mock.patch.dict(
+            os.environ,
+            {"IRISU_R3B_EVALUATOR_LEASE_FD": "not-an-fd"},
+        ), self.assertRaisesRegex(ExactWorkerError, "malformed"):
+            exact_ipc_module._exact_worker_pass_fds()
+
     @staticmethod
     def worker_info(**changes: object) -> ExactWorkerInfo:
         values = {

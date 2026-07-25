@@ -13,6 +13,7 @@ from ctypes import CDLL, get_errno
 from concurrent.futures import Future, ProcessPoolExecutor, as_completed
 from contextlib import ExitStack
 from dataclasses import dataclass
+from multiprocessing.connection import wait as wait_connections
 from pathlib import Path
 from typing import Any
 
@@ -62,6 +63,16 @@ _CHECKPOINT_VERSION = "r3b-training-checkpoint-package-v2"
 _EVALUATION_SHUTDOWN_SECONDS = 5.0
 _PR_SET_PDEATHSIG = 1
 _EVALUATION_LEASE_DESCRIPTOR: int | None = None
+_EVALUATOR_LEASE_FD_ENV = "IRISU_R3B_EVALUATOR_LEASE_FD"
+
+
+@dataclass(frozen=True, slots=True)
+class _EvaluationProcessGroup:
+    process: Any
+    pgid: int
+    pidfd: int
+    lease_device: int
+    lease_inode: int
 
 
 def _terminate_evaluation_process_group(_signum: int, _frame: object | None) -> None:
@@ -69,7 +80,11 @@ def _terminate_evaluation_process_group(_signum: int, _frame: object | None) -> 
     os.killpg(os.getpgrp(), signal.SIGTERM)
 
 
-def _evaluation_worker_initializer(parent_pid: int, lease_path: str) -> None:
+def _evaluation_worker_initializer(
+    parent_pid: int,
+    lease_path: str,
+    ready_gate: Any | None = None,
+) -> None:
     """Make evaluator descendants die as one group when their owner disappears."""
 
     global _EVALUATION_LEASE_DESCRIPTOR
@@ -84,6 +99,9 @@ def _evaluation_worker_initializer(parent_pid: int, lease_path: str) -> None:
     if os.getppid() != parent_pid:
         _terminate_evaluation_process_group(signal.SIGTERM, None)
     _EVALUATION_LEASE_DESCRIPTOR = hold_evaluator_lease(lease_path)
+    os.environ[_EVALUATOR_LEASE_FD_ENV] = str(_EVALUATION_LEASE_DESCRIPTOR)
+    if ready_gate is not None:
+        ready_gate.wait()
 
 
 def _evaluation_processes(executor: ProcessPoolExecutor) -> tuple[Any, ...]:
@@ -91,23 +109,231 @@ def _evaluation_processes(executor: ProcessPoolExecutor) -> tuple[Any, ...]:
     return tuple(processes.values()) if isinstance(processes, dict) else ()
 
 
-def _signal_evaluation_process(process: Any, sig: signal.Signals) -> None:
-    pid = getattr(process, "pid", None)
-    if not isinstance(pid, int) or pid <= 0:
-        return
-    if os.name == "posix":
-        try:
-            if os.getpgid(pid) == pid:
-                os.killpg(pid, sig)
-        except ProcessLookupError:
-            pass
+def _capture_evaluation_process_groups(
+    executor: ProcessPoolExecutor,
+    *,
+    timeout_seconds: float = _EVALUATION_SHUTDOWN_SECONDS,
+) -> tuple[_EvaluationProcessGroup, ...]:
+    """Pin every initialized evaluator group before trusted work proceeds."""
+
+    captured = getattr(executor, "_irisu_process_groups", ())
+    if getattr(executor, "_irisu_process_groups_captured", False) and all(
+        isinstance(group, _EvaluationProcessGroup) for group in captured
+    ):
+        return captured
+    expected = getattr(executor, "_max_workers", None)
+    lease_path = getattr(executor, "_irisu_evaluator_lease_path", None)
+    if (
+        sys.platform != "linux"
+        or isinstance(expected, bool)
+        or not isinstance(expected, int)
+        or expected <= 0
+        or not hasattr(os, "pidfd_open")
+        or not hasattr(signal, "pidfd_send_signal")
+        or not isinstance(lease_path, str)
+    ):
+        raise RuntimeError("canonical evaluator group capture requires Linux pidfds")
+    groups = {
+        group.pgid: group
+        for group in captured
+        if isinstance(group, _EvaluationProcessGroup)
+    }
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        processes = _evaluation_processes(executor)
+        for process in processes:
+            pid = getattr(process, "pid", None)
+            if not isinstance(pid, int) or pid <= 0 or pid in groups:
+                continue
+            if getattr(process, "exitcode", None) is not None:
+                raise RuntimeError(
+                    "isolated canonical evaluator exited before group capture"
+                )
+            try:
+                pgid = os.getpgid(pid)
+            except ProcessLookupError:
+                continue
+            if pgid != pid:
+                continue
+            try:
+                pidfd = os.pidfd_open(pid, 0)
+            except ProcessLookupError:
+                continue
+            if wait_connections([process.sentinel], timeout=0):
+                os.close(pidfd)
+                raise RuntimeError(
+                    "isolated canonical evaluator exited during group capture"
+                )
+            try:
+                if os.getpgid(pid) != pid:
+                    os.close(pidfd)
+                    raise RuntimeError(
+                        "isolated canonical evaluator group identity changed"
+                    )
+            except ProcessLookupError:
+                os.close(pidfd)
+                raise RuntimeError(
+                    "isolated canonical evaluator exited during group capture"
+                ) from None
+            try:
+                lease = os.stat(lease_path, follow_symlinks=False)
+            except FileNotFoundError:
+                os.close(pidfd)
+                continue
+            groups[pid] = _EvaluationProcessGroup(
+                process,
+                pgid,
+                pidfd,
+                lease.st_dev,
+                lease.st_ino,
+            )
+            setattr(
+                executor,
+                "_irisu_process_groups",
+                tuple(groups[member] for member in sorted(groups)),
+            )
+        if len(groups) == expected:
+            result = tuple(groups[pid] for pid in sorted(groups))
+            setattr(executor, "_irisu_process_groups", result)
+            setattr(executor, "_irisu_process_groups_captured", True)
+            ready_gate = getattr(executor, "_irisu_ready_gate", None)
+            if ready_gate is not None:
+                ready_gate.set()
+            return result
+        time.sleep(0.01)
+    raise RuntimeError("isolated canonical evaluator groups were not initialized")
+
+
+def _signal_evaluation_group(
+    group: _EvaluationProcessGroup,
+    sig: signal.Signals,
+) -> None:
+    descriptors = _evaluation_lease_holders(group)
     try:
-        if sig == signal.SIGTERM:
-            process.terminate()
+        for descriptor in (group.pidfd, *descriptors):
+            try:
+                signal.pidfd_send_signal(descriptor, sig)
+            except ProcessLookupError:
+                pass
+    finally:
+        for descriptor in descriptors:
+            os.close(descriptor)
+
+
+def _evaluation_lease_holders(group: _EvaluationProcessGroup) -> tuple[int, ...]:
+    """Pin live processes that still hold this evaluator's exact lease file."""
+
+    descriptors: list[int] = []
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdecimal():
+            continue
+        try:
+            _, fields = (entry / "stat").read_text(encoding="utf-8").rsplit(") ", 1)
+        except FileNotFoundError:
+            continue
+        except PermissionError:
+            raise RuntimeError("cannot inspect evaluator descendant state")
+        except ValueError:
+            continue
+        values = fields.split()
+        if (
+            len(values) < 3
+            or values[0] == "Z"
+            or not values[2].isdecimal()
+            or int(values[2]) != group.pgid
+        ):
+            continue
+        try:
+            if entry.stat().st_uid != os.geteuid():
+                continue
+        except FileNotFoundError:
+            continue
+        try:
+            pidfd = os.pidfd_open(int(entry.name), 0)
+        except ProcessLookupError:
+            continue
+        try:
+            held = any(
+                (metadata := descriptor.stat()).st_dev == group.lease_device
+                and metadata.st_ino == group.lease_inode
+                for descriptor in (entry / "fd").iterdir()
+            )
+        except FileNotFoundError:
+            os.close(pidfd)
+            continue
+        except PermissionError:
+            os.close(pidfd)
+            raise RuntimeError("cannot inspect evaluator descendant descriptors")
+        if held:
+            descriptors.append(pidfd)
         else:
-            process.kill()
-    except (ProcessLookupError, ValueError):
+            os.close(pidfd)
+    return tuple(descriptors)
+
+
+def _evaluation_group_alive(group: _EvaluationProcessGroup) -> bool:
+    descriptors = _evaluation_lease_holders(group)
+    for descriptor in descriptors:
+        os.close(descriptor)
+    return bool(descriptors)
+
+
+def _wait_for_evaluation_groups(
+    groups: tuple[_EvaluationProcessGroup, ...],
+    deadline: float,
+) -> tuple[_EvaluationProcessGroup, ...]:
+    while time.monotonic() < deadline:
+        active = tuple(
+            group
+            for group in groups
+            if group.process.is_alive() or _evaluation_group_alive(group)
+        )
+        if not active:
+            return ()
+        for group in active:
+            group.process.join(min(0.05, max(0.0, deadline - time.monotonic())))
+    return tuple(
+        group
+        for group in groups
+        if group.process.is_alive() or _evaluation_group_alive(group)
+    )
+
+
+def _wait_for_processes(processes: tuple[Any, ...], deadline: float) -> tuple[Any, ...]:
+    while time.monotonic() < deadline:
+        active = tuple(process for process in processes if process.is_alive())
+        if not active:
+            return ()
+        for process in active:
+            process.join(min(0.05, max(0.0, deadline - time.monotonic())))
+    return tuple(process for process in processes if process.is_alive())
+
+
+def _signal_unpinned_process(process: Any, sig: signal.Signals) -> None:
+    pid = getattr(process, "pid", None)
+    sentinel = getattr(process, "sentinel", None)
+    if not isinstance(pid, int) or pid <= 0 or not isinstance(sentinel, int):
+        return
+    try:
+        descriptor = os.pidfd_open(pid, 0)
+    except ProcessLookupError:
+        return
+    try:
+        if wait_connections([sentinel], timeout=0):
+            return
+        signal.pidfd_send_signal(descriptor, sig)
+    except ProcessLookupError:
         pass
+    finally:
+        os.close(descriptor)
+
+
+def _close_evaluation_groups(groups: tuple[_EvaluationProcessGroup, ...]) -> None:
+    for group in groups:
+        try:
+            os.close(group.pidfd)
+        except OSError:
+            pass
 
 
 def _stop_evaluation_executor(
@@ -117,39 +343,57 @@ def _stop_evaluation_executor(
 ) -> None:
     """Cancel queued work and bound teardown of evaluators and descendants."""
 
-    processes = _evaluation_processes(executor)
-    if not processes:
+    groups = tuple(
+        group
+        for group in getattr(executor, "_irisu_process_groups", ())
+        if isinstance(group, _EvaluationProcessGroup)
+    )
+    grouped_processes = {id(group.process) for group in groups}
+    ungrouped = tuple(
+        process
+        for process in _evaluation_processes(executor)
+        if id(process) not in grouped_processes
+    )
+    manager = getattr(executor, "_executor_manager_thread", None)
+    try:
         executor.shutdown(wait=False, cancel_futures=True)
-        return
-    executor.shutdown(wait=False, cancel_futures=True)
-    for process in processes:
-        _signal_evaluation_process(process, signal.SIGTERM)
-    deadline = time.monotonic() + timeout_seconds
-    while time.monotonic() < deadline:
-        active = tuple(process for process in processes if process.is_alive())
-        if not active:
-            break
-        for process in active:
-            process.join(min(0.05, max(0.0, deadline - time.monotonic())))
-    survivors = tuple(process for process in processes if process.is_alive())
-    for process in survivors:
-        _signal_evaluation_process(process, signal.SIGKILL)
-    deadline = time.monotonic() + timeout_seconds
-    while time.monotonic() < deadline:
-        active = tuple(process for process in survivors if process.is_alive())
-        if not active:
-            break
-        for process in active:
-            process.join(min(0.05, max(0.0, deadline - time.monotonic())))
-    remaining = tuple(process for process in survivors if process.is_alive())
-    if remaining:
-        details = tuple(
-            (getattr(process, "pid", None), getattr(process, "exitcode", None))
-            for process in remaining
-        )
-        raise RuntimeError(
-            f"isolated canonical evaluator cleanup did not finish: {details}"
-        )
+        for group in groups:
+            _signal_evaluation_group(group, signal.SIGTERM)
+        for process in ungrouped:
+            _signal_unpinned_process(process, signal.SIGTERM)
+        deadline = time.monotonic() + timeout_seconds
+        survivors = _wait_for_evaluation_groups(groups, deadline)
+        ungrouped_survivors = _wait_for_processes(ungrouped, deadline)
+        for group in survivors:
+            _signal_evaluation_group(group, signal.SIGKILL)
+        for process in ungrouped_survivors:
+            _signal_unpinned_process(process, signal.SIGKILL)
+        deadline = time.monotonic() + timeout_seconds
+        remaining = _wait_for_evaluation_groups(survivors, deadline)
+        remaining_processes = _wait_for_processes(ungrouped_survivors, deadline)
+        if manager is not None:
+            manager.join(max(0.0, deadline - time.monotonic()))
+        manager_alive = bool(manager is not None and manager.is_alive())
+        if remaining or remaining_processes or manager_alive:
+            details = (
+                tuple(
+                    (group.pgid, getattr(group.process, "exitcode", None))
+                    for group in remaining
+                )
+                + tuple(
+                    (
+                        getattr(process, "pid", None),
+                        getattr(process, "exitcode", None),
+                    )
+                    for process in remaining_processes
+                )
+                + ((("manager-thread", None),) if manager_alive else ())
+            )
+            raise RuntimeError(
+                f"isolated canonical evaluator cleanup did not finish: {details}"
+            )
+    finally:
+        _close_evaluation_groups(groups)
 
 
 def _deployment(
@@ -654,12 +898,17 @@ def evaluate_trained_canonical_job(
         if len({task.sha256 for task in evaluation_tasks}) != len(evaluation_tasks):
             raise RuntimeError("canonical evaluation task grid contains duplicates")
         ArtifactLookupIndex(root / "evaluation-index.sqlite3")
+        process_context = multiprocessing.get_context("spawn")
+        ready_gate = process_context.Event()
+        lease_path = str(evaluator_lease_path())
         executor = ProcessPoolExecutor(
             max_workers=min(config.evaluation_processes, len(evaluation_tasks)),
-            mp_context=multiprocessing.get_context("spawn"),
+            mp_context=process_context,
             initializer=_evaluation_worker_initializer,
-            initargs=(os.getpid(), str(evaluator_lease_path())),
+            initargs=(os.getpid(), lease_path, ready_gate),
         )
+        setattr(executor, "_irisu_ready_gate", ready_gate)
+        setattr(executor, "_irisu_evaluator_lease_path", lease_path)
         futures: dict[
             Future[CanonicalEvaluationTaskResult], CanonicalEvaluationTask
         ] = {}
@@ -667,6 +916,7 @@ def evaluate_trained_canonical_job(
         try:
             for task in evaluation_tasks:
                 futures[executor.submit(evaluate_canonical_task, task)] = task
+            _capture_evaluation_process_groups(executor)
             resume_update = job.budget_updates - plan.checkpoint_interval_updates
             resume_checkpoint, resume_generation = packages[resume_update]
             resume_built, restored_resume_checkpoint, restored_resume_generation = (
@@ -718,9 +968,7 @@ def evaluate_trained_canonical_job(
             if failed:
                 for future in futures:
                     future.cancel()
-                _stop_evaluation_executor(executor)
-            else:
-                executor.shutdown(wait=True)
+            _stop_evaluation_executor(executor)
 
         checkpoint_evaluations = tuple(
             CheckpointEvaluation(
