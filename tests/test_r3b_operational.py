@@ -16,15 +16,16 @@ from irisu_rl.r3b_operational import (
     CANONICAL_OPERATIONAL_CONFIG_SHA256,
     CANONICAL_PAIRING_SHA256S,
     CANONICAL_PORTABLE_SNAPSHOT_BUNDLE_SHA256,
+    PREREGISTERED_CANONICAL_OPERATIONAL_CONFIG_SHA256S,
     R3BOperationalConfig,
     R3BWorkflow,
 )
-from tests.test_r3b_experiments import validation_authorization
 
+from tests.test_r3b_experiments import validation_authorization
 
 ROOT = Path(__file__).resolve().parents[1]
 PLAN = ROOT / "configs/rl/experiments/r3b-completion-v1.toml"
-CONFIG = ROOT / "configs/rl/experiments/r3b-operational-v1.toml"
+CONFIG = ROOT / "configs/rl/experiments/r3b-operational-v2.toml"
 HASH = hashlib.sha256(b"nonzero").hexdigest()
 
 
@@ -50,6 +51,18 @@ class R3BOperationalTests(unittest.TestCase):
     def test_config_binds_all_nonplan_choices_and_rejects_unknown_keys(self) -> None:
         self.assertEqual(self.config.primary_backend, "exact")
         self.assertFalse(self.config.transfer_eligible)
+        self.assertEqual(
+            (
+                self.config.lanes,
+                self.config.workers,
+                self.config.evaluation_lanes,
+                self.config.evaluation_workers,
+                self.config.evaluation_processes,
+                self.config.evaluation_torch_threads,
+                self.config.evaluation_shards,
+            ),
+            (16, 16, 16, 16, 9, 1, 2),
+        )
         manifest = self.config.manifest()
         self.assertEqual(
             R3BOperationalConfig.from_manifest(manifest).sha256,
@@ -65,6 +78,19 @@ class R3BOperationalTests(unittest.TestCase):
                 self.config,
                 evaluation_max_decisions=self.config.evaluation_max_simulated_ticks - 1,
             )
+        with self.assertRaisesRegex(ValueError, "invalid"):
+            replace(self.config, evaluation_workers=self.config.evaluation_lanes + 1)
+        with self.assertRaisesRegex(ValueError, "invalid"):
+            replace(self.config, evaluation_processes=17)
+        with self.assertRaisesRegex(ValueError, "invalid"):
+            replace(
+                self.config,
+                evaluation_lanes=257,
+                evaluation_workers=1,
+                evaluation_processes=1,
+            )
+        with self.assertRaisesRegex(ValueError, "invalid"):
+            replace(self.config, evaluation_torch_threads=29)
 
     def test_progressive_calibration_uses_one_final_job_per_arm_seed(self) -> None:
         jobs = self.workflow.calibration_jobs(self.plan)
@@ -84,6 +110,14 @@ class R3BOperationalTests(unittest.TestCase):
 
     def test_canonical_workflow_requires_every_preregistered_input(self) -> None:
         self.assertEqual(self.config.sha256, CANONICAL_OPERATIONAL_CONFIG_SHA256)
+        self.assertEqual(
+            PREREGISTERED_CANONICAL_OPERATIONAL_CONFIG_SHA256S,
+            {
+                CANONICAL_OPERATIONAL_CONFIG_SHA256,
+                "76f56fe6b6cbeb9ab5796aabaf92d76fab969ca24abed20fca0953cf39c86a15",
+                "b59828dfcf0bf933ba940ad8f219765784e8328cde8a5ca39b09411d2a4d275c",
+            },
+        )
         canonical_path = Path(self.temporary.name) / "canonical.sqlite3"
         workflow = R3BWorkflow.create(
             canonical_path,

@@ -10,10 +10,9 @@ from unittest import mock
 
 from irisu_rl.r3b_cli import main
 
-
 ROOT = Path(__file__).resolve().parents[1]
 PLAN = ROOT / "configs/rl/experiments/r3b-completion-v1.toml"
-CONFIG = ROOT / "configs/rl/experiments/r3b-operational-v1.toml"
+CONFIG = ROOT / "configs/rl/experiments/r3b-operational-v2.toml"
 
 
 class R3BCLITests(unittest.TestCase):

@@ -10,10 +10,10 @@ import secrets
 import sqlite3
 import stat
 import tomllib
+from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from time import time_ns
-from typing import Mapping, Sequence
 
 from .r3b_experiments import (
     R3BExperimentPlan,
@@ -22,14 +22,20 @@ from .r3b_experiments import (
     ValidationRunAuthorization,
 )
 
-
 _SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 _SHA256_ZERO = "0" * 64
 CANONICAL_PLAN_SHA256 = (
     "68860ef26686c954960c176afe67a44da34e2ffab03dd02ba5aa7c1fc193baf8"
 )
 CANONICAL_OPERATIONAL_CONFIG_SHA256 = (
-    "b59828dfcf0bf933ba940ad8f219765784e8328cde8a5ca39b09411d2a4d275c"
+    "002a3f0deb1119b47aa55114f733c17322ec9aeaa1a5e13847ab834895a5577e"
+)
+PREREGISTERED_CANONICAL_OPERATIONAL_CONFIG_SHA256S = frozenset(
+    {
+        CANONICAL_OPERATIONAL_CONFIG_SHA256,
+        "76f56fe6b6cbeb9ab5796aabaf92d76fab969ca24abed20fca0953cf39c86a15",
+        "b59828dfcf0bf933ba940ad8f219765784e8328cde8a5ca39b09411d2a4d275c",
+    }
 )
 CANONICAL_EXACT_SNAPSHOT_BUNDLE_SHA256 = (
     "2371129c883ade88b309e509c2d8a7399a85944dc5dd7e841fc14d977527eb7a"
@@ -112,6 +118,10 @@ class R3BOperationalConfig:
     ppo_target_kl: float
     curve_snapshots: int
     evaluation_shards: int
+    evaluation_lanes: int
+    evaluation_workers: int
+    evaluation_processes: int
+    evaluation_torch_threads: int
     calibration_repetitions: int
     validation_repetitions: int
     test_repetitions: int
@@ -125,7 +135,7 @@ class R3BOperationalConfig:
     checkpoint_retention: str
     primary_backend: str
     transfer_eligible: bool
-    version: str = "r3b-operational-config-v1"
+    version: str = "r3b-operational-config-v2"
 
     def __post_init__(self) -> None:
         positive = (
@@ -143,6 +153,10 @@ class R3BOperationalConfig:
             self.ppo_lane_minibatch_size,
             self.curve_snapshots,
             self.evaluation_shards,
+            self.evaluation_lanes,
+            self.evaluation_workers,
+            self.evaluation_processes,
+            self.evaluation_torch_threads,
             self.calibration_repetitions,
             self.validation_repetitions,
             self.test_repetitions,
@@ -162,7 +176,7 @@ class R3BOperationalConfig:
             self.ppo_target_kl,
         )
         if (
-            self.version != "r3b-operational-config-v1"
+            self.version != "r3b-operational-config-v2"
             or any(
                 isinstance(value, bool) or not isinstance(value, int) or value <= 0
                 for value in positive
@@ -178,6 +192,10 @@ class R3BOperationalConfig:
             or not 0 <= float(self.ppo_entropy_coefficient) < float("inf")
             or not 0 < self.collector_lambda_tick <= 1
             or self.workers > self.lanes
+            or self.evaluation_workers > self.evaluation_lanes
+            or self.evaluation_processes > 64
+            or self.evaluation_processes * self.evaluation_lanes > 256
+            or self.evaluation_processes * self.evaluation_torch_threads > 256
             or self.lanes % self.ppo_lane_minibatch_size
             or self.curve_snapshots
             > min(
@@ -255,6 +273,10 @@ class R3BOperationalConfig:
             {
                 "curve_snapshots",
                 "shards",
+                "lanes",
+                "workers",
+                "processes",
+                "torch_threads",
                 "calibration_repetitions",
                 "validation_repetitions",
                 "test_repetitions",
@@ -300,6 +322,10 @@ class R3BOperationalConfig:
                 ppo_target_kl=ppo["target_kl"],  # type: ignore[arg-type]
                 curve_snapshots=evaluation["curve_snapshots"],  # type: ignore[arg-type]
                 evaluation_shards=evaluation["shards"],  # type: ignore[arg-type]
+                evaluation_lanes=evaluation["lanes"],  # type: ignore[arg-type]
+                evaluation_workers=evaluation["workers"],  # type: ignore[arg-type]
+                evaluation_processes=evaluation["processes"],  # type: ignore[arg-type]
+                evaluation_torch_threads=evaluation["torch_threads"],  # type: ignore[arg-type]
                 calibration_repetitions=evaluation["calibration_repetitions"],  # type: ignore[arg-type]
                 validation_repetitions=evaluation["validation_repetitions"],  # type: ignore[arg-type]
                 test_repetitions=evaluation["test_repetitions"],  # type: ignore[arg-type]
@@ -866,7 +892,7 @@ class R3BWorkflow:
             if manifest.get("run_class") == "canonical" and (
                 manifest.get("plan_sha256") != CANONICAL_PLAN_SHA256
                 or manifest.get("operational_config_sha256")
-                != CANONICAL_OPERATIONAL_CONFIG_SHA256
+                not in PREREGISTERED_CANONICAL_OPERATIONAL_CONFIG_SHA256S
                 or manifest.get("snapshot_bundle_sha256")
                 != CANONICAL_EXACT_SNAPSHOT_BUNDLE_SHA256
                 or manifest.get("portable_snapshot_bundle_sha256")

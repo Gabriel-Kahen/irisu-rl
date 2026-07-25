@@ -1,4 +1,4 @@
-version = "r3b-operational-config-v1"
+version = "r3b-operational-config-v2"
 
 [runtime]
 lanes = 16
@@ -29,9 +29,15 @@ entropy_coefficient = 0.01
 max_gradient_norm = 0.5
 target_kl = 0.03
 
+# Each isolated evaluator keeps one live lane per exact worker. Nine processes
+# cover the seven curve reports plus the exact and portable final reports.
 [evaluation]
 curve_snapshots = 32
 shards = 2
+lanes = 16
+workers = 16
+processes = 9
+torch_threads = 1
 calibration_repetitions = 1
 validation_repetitions = 1
 test_repetitions = 1

@@ -681,23 +681,24 @@ class ArtifactLookupIndex:
             envelope, ArtifactEnvelope
         ):
             raise ArtifactStoreError("artifact lookup record is malformed")
+        expected = (
+            envelope.artifact_id,
+            envelope.kind,
+            envelope.version,
+        )
         with closing(self._connect()) as connection:
             with connection:
+                connection.execute(
+                    "INSERT INTO lookup(lookup_key,artifact_id,kind,version) "
+                    "VALUES (?,?,?,?) "
+                    "ON CONFLICT(lookup_key) DO NOTHING",
+                    (lookup_key, *expected),
+                )
                 existing = connection.execute(
                     "SELECT artifact_id,kind,version FROM lookup WHERE lookup_key=?",
                     (lookup_key,),
                 ).fetchone()
-                expected = (
-                    envelope.artifact_id,
-                    envelope.kind,
-                    envelope.version,
-                )
-                if existing is None:
-                    connection.execute(
-                        "INSERT INTO lookup VALUES (?,?,?,?)",
-                        (lookup_key, *expected),
-                    )
-                elif existing != expected:
+                if existing != expected:
                     raise ArtifactIntegrityError(
                         "artifact lookup key already binds different content"
                     )

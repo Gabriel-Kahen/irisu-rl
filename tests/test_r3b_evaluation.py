@@ -124,6 +124,41 @@ class ConfiguredTeacherEncoder(TeacherStateEncoder):
         self.scale = scale
 
 
+class BatchSensitiveRecurrentActorCritic(RecurrentActorCritic):
+    """Expose action drift if inference ever batches independent cells."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            TEACHER_V1,
+            config=RecurrentModelConfig(8, 8, 12, 12, 1),
+        )
+        self.inference_shapes: list[tuple[int, int]] = []
+
+    def forward(
+        self,
+        global_features,
+        body_features,
+        body_mask,
+        recurrent_state,
+        **arguments,
+    ):
+        self.inference_shapes.append(
+            (int(global_features.shape[1]), int(body_features.shape[-2]))
+        )
+        output = super().forward(
+            global_features,
+            body_features,
+            body_mask,
+            recurrent_state,
+            **arguments,
+        )
+        logits = torch.zeros_like(output.kind_logits)
+        logits[..., 2] = -1.0
+        epsilon = torch.finfo(logits.dtype).eps
+        logits[..., 1 if global_features.shape[1] == 1 else 0] = epsilon
+        return replace(output, kind_logits=logits)
+
+
 class R3BEvaluationTests(unittest.TestCase):
     def test_episode_metrics_preserve_signed_final_gauge(self) -> None:
         manifest = {
@@ -483,6 +518,117 @@ class R3BEvaluationTests(unittest.TestCase):
         for baseline_id in baseline_ids:
             policy = ScriptedBaselineSpec(baseline_id).build(23)
             self.assertTrue(callable(policy.act))
+
+    def test_recurrent_inference_is_cell_independent_across_active_batches(
+        self,
+    ) -> None:
+        torch.manual_seed(20260724)
+        model = BatchSensitiveRecurrentActorCritic()
+        encoder = TeacherStateEncoder()
+        batched = RecurrentSemanticPolicy(model)
+        singles = tuple(RecurrentSemanticPolicy(model) for _ in range(3))
+        batched.reset(3)
+        for policy in singles:
+            policy.reset(1)
+
+        for tick in range(3):
+            observations = tuple(observation(tick + lane) for lane in range(3))
+            encoded = encoder.encode(observations)
+            body_widths = (1, 3, 7)
+            for lane, width in enumerate(body_widths):
+                encoded.body_mask[lane, :width] = True
+                encoded.body_features[lane, :width] = lane + 1
+            kind = torch.ones((3, 3), dtype=torch.bool)
+            wait = torch.ones(
+                (3, len(model.action_spec.wait_choices)), dtype=torch.bool
+            )
+            model.inference_shapes.clear()
+            actual = batched.act(encoded, kind, wait)
+            self.assertEqual(
+                model.inference_shapes,
+                [(1, width) for width in body_widths],
+            )
+            expected = tuple(
+                policy.act(
+                    encoded.row(lane),
+                    kind[lane : lane + 1],
+                    wait[lane : lane + 1],
+                )[0]
+                for lane, policy in enumerate(singles)
+            )
+            self.assertEqual(actual, expected)
+            self.assertTrue(
+                all(action.kind == 1 for action in actual),
+                "the unrestricted near-tie fixture must select the singleton action",
+            )
+            for lane, policy in enumerate(singles):
+                self.assertTrue(
+                    torch.equal(
+                        batched._state[:, lane : lane + 1],  # noqa: SLF001
+                        policy._state,  # noqa: SLF001
+                    )
+                )
+
+    def test_recurrent_sparse_refill_preserves_other_lane_history(self) -> None:
+        torch.manual_seed(20260724)
+        model = RecurrentActorCritic(
+            TEACHER_V1,
+            config=RecurrentModelConfig(8, 8, 12, 12, 1),
+        )
+        encoder = TeacherStateEncoder()
+        policy = RecurrentSemanticPolicy(model)
+        references = [RecurrentSemanticPolicy(model) for _ in range(3)]
+        policy.reset(3)
+        for reference in references:
+            reference.reset(1)
+        kind = torch.ones((3, 3), dtype=torch.bool)
+        wait = torch.ones((3, len(model.action_spec.wait_choices)), dtype=torch.bool)
+        first = encoder.encode(tuple(observation(lane) for lane in range(3)))
+        self.assertEqual(
+            policy.act(first, kind, wait),
+            tuple(
+                reference.act(
+                    first.row(lane),
+                    kind[lane : lane + 1],
+                    wait[lane : lane + 1],
+                )[0]
+                for lane, reference in enumerate(references)
+            ),
+        )
+        lane_zero = policy._state[:, 0:1].clone()  # noqa: SLF001
+        policy.reset_lanes((1,))
+        references[1].reset(1)
+        self.assertTrue(
+            torch.equal(policy._state[:, 0:1], lane_zero)  # noqa: SLF001
+        )
+
+        selected = (2, 1)
+        second = encoder.encode((observation(12), observation(21)))
+        actual = policy.act(
+            second,
+            kind[:2],
+            wait[:2],
+            lane_indices=selected,
+        )
+        expected = tuple(
+            references[lane].act(
+                second.row(offset),
+                kind[offset : offset + 1],
+                wait[offset : offset + 1],
+            )[0]
+            for offset, lane in enumerate(selected)
+        )
+        self.assertEqual(actual, expected)
+        self.assertTrue(
+            torch.equal(policy._state[:, 0:1], lane_zero)  # noqa: SLF001
+        )
+        for lane in selected:
+            self.assertTrue(
+                torch.equal(
+                    policy._state[:, lane : lane + 1],  # noqa: SLF001
+                    references[lane]._state,  # noqa: SLF001
+                )
+            )
 
     def test_recurrent_evaluator_is_deterministic_and_critic_alpha_is_zero(
         self,

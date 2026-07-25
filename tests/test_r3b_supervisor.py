@@ -1,8 +1,15 @@
 from __future__ import annotations
 
 import hashlib
+import multiprocessing
+import os
+import signal
+import subprocess
+import sys
 import tempfile
+import time
 import unittest
+from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -13,8 +20,11 @@ from irisu_rl.r3b_supervisor import (
     _deployment,
     _checkpoint_package,
     _fresh_restored_checkpoint,
+    _evaluation_worker_initializer,
+    _stop_evaluation_executor,
     evaluate_trained_canonical_job,
 )
+from irisu_rl.r3b_lock import evaluator_lease_path
 from tests.test_r3a_session_resume import PORTABLE, build_session
 
 
@@ -22,7 +32,87 @@ def _hash(character: str) -> str:
     return character * 64
 
 
+def _sleep_for_test(seconds: float) -> None:
+    time.sleep(seconds)
+
+
+def _fail_for_test() -> None:
+    raise RuntimeError("expected evaluator failure")
+
+
 class R3BSupervisorTests(unittest.TestCase):
+    @unittest.skipUnless(
+        sys.platform == "linux", "parent-death isolation is Linux-only"
+    )
+    def test_evaluator_and_descendant_die_with_parent(self) -> None:
+        script = """
+import os
+import subprocess
+import time
+from irisu_rl.r3b_supervisor import _evaluation_worker_initializer
+
+owner_pid = os.getpid()
+evaluator_pid = os.fork()
+if evaluator_pid == 0:
+    from irisu_rl.r3b_lock import evaluator_lease_path
+    _evaluation_worker_initializer(owner_pid, str(evaluator_lease_path()))
+    descendant = subprocess.Popen(["sleep", "60"])
+    print(f"{os.getpid()} {descendant.pid}", flush=True)
+    time.sleep(60)
+    raise SystemExit(0)
+time.sleep(60)
+"""
+        owner = subprocess.Popen(
+            [sys.executable, "-c", script],
+            stdout=subprocess.PIPE,
+            text=True,
+        )
+        self.assertIsNotNone(owner.stdout)
+        line = owner.stdout.readline()
+        evaluator_pid, descendant_pid = (int(value) for value in line.split())
+        try:
+            os.kill(owner.pid, signal.SIGKILL)
+            owner.wait(timeout=2)
+            deadline = time.monotonic() + 3
+            while time.monotonic() < deadline:
+                states = []
+                for pid in (evaluator_pid, descendant_pid):
+                    try:
+                        states.append(Path(f"/proc/{pid}/stat").read_text().split()[2])
+                    except FileNotFoundError:
+                        states.append("gone")
+                if all(state in {"gone", "Z"} for state in states):
+                    break
+                time.sleep(0.02)
+            self.assertTrue(all(state in {"gone", "Z"} for state in states), states)
+        finally:
+            for pid in (evaluator_pid, descendant_pid):
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            if owner.poll() is None:
+                owner.kill()
+                owner.wait()
+            owner.stdout.close()
+
+    @unittest.skipUnless(sys.platform == "linux", "evaluator isolation is Linux-only")
+    def test_failed_evaluation_stops_blocked_workers_within_bound(self) -> None:
+        executor = ProcessPoolExecutor(
+            max_workers=2,
+            mp_context=multiprocessing.get_context("spawn"),
+            initializer=_evaluation_worker_initializer,
+            initargs=(os.getpid(), str(evaluator_lease_path())),
+        )
+        blocked = executor.submit(_sleep_for_test, 60.0)
+        failed = executor.submit(_fail_for_test)
+        with self.assertRaisesRegex(RuntimeError, "expected evaluator failure"):
+            failed.result(timeout=10)
+        started = time.monotonic()
+        _stop_evaluation_executor(executor, timeout_seconds=2.0)
+        self.assertLess(time.monotonic() - started, 5.0)
+        self.assertTrue(blocked.done())
+
     def test_rejects_phase_without_opening_a_run(self) -> None:
         with self.assertRaisesRegex(ValueError, "phase"):
             evaluate_trained_canonical_job(

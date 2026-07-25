@@ -11,7 +11,6 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import torch
-
 from irisu_env import IrisuEnv, PaddedVectorEnv
 
 from .actions import ActionSpec
@@ -21,7 +20,7 @@ from .encoding import TeacherStateEncoder
 from .models import RecurrentActorCritic, RecurrentModelConfig
 from .ppo import PPOConfig
 from .r3b_artifacts import ArtifactStore, ensure_private_directory, publish_private_file
-from .r3b_evaluation import DeploymentPolicyIdentity
+from .r3b_evaluation import deployment_policy_identity_for_threads
 from .r3b_experiments import (
     R3BExperimentPlan,
     SealedTestJobLease,
@@ -313,6 +312,7 @@ def _checkpoint(
     built: object,
     identity: dict[str, object],
     plan: R3BExperimentPlan,
+    evaluation_torch_threads: int,
 ) -> str:
     session = built.session
     completed = session.trainer.schedule.completed_updates
@@ -324,11 +324,12 @@ def _checkpoint(
     model = session.model
     kind_mask = torch.ones((1, 3), dtype=torch.bool)
     wait_mask = torch.ones((1, len(model.action_spec.wait_choices)), dtype=torch.bool)
-    deployment = DeploymentPolicyIdentity.from_components(
+    deployment = deployment_policy_identity_for_threads(
         model,
         TeacherStateEncoder(),
         kind_mask,
         wait_mask,
+        torch_threads=evaluation_torch_threads,
     )
     checkpoint_manifest_sha256 = hashlib.sha256(manifest_payload).hexdigest()
     artifact = TrainingCheckpointArtifact(
@@ -635,6 +636,7 @@ def _run_local_training_updates(
                 built=built,
                 identity=identity,
                 plan=plan,
+                evaluation_torch_threads=config.evaluation_torch_threads,
             )
         else:
             update = int(latest["completed_updates"])
@@ -752,6 +754,7 @@ def _run_local_training_updates(
                     built=built,
                     identity=identity,
                     plan=plan,
+                    evaluation_torch_threads=config.evaluation_torch_threads,
                 )
                 last_published_update = completed_updates
         if (

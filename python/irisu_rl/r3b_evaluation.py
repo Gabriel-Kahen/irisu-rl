@@ -8,17 +8,16 @@ import math
 import os
 import platform
 import sys
-from functools import lru_cache
+from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, field
+from functools import lru_cache
 from numbers import Integral
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
 
 import irisu_env
 import numpy as np
 import torch
-from torch import Tensor
-
 from irisu_env import Action, ActionKind
 from irisu_env.policies import (
     DirectMatcherPolicy,
@@ -28,6 +27,7 @@ from irisu_env.policies import (
     RandomPolicy,
     SideEjectorPolicy,
 )
+from torch import Tensor
 
 from .actions import ActionSpec, SemanticAction, SemanticActionKind
 from .collector import model_state_sha256
@@ -1441,6 +1441,37 @@ class DeploymentPolicyIdentity:
         )
 
 
+def deployment_policy_identity_for_threads(
+    model: RecurrentActorCritic,
+    encoder: object,
+    kind_mask: Tensor,
+    wait_mask: Tensor,
+    *,
+    torch_threads: int,
+) -> DeploymentPolicyIdentity:
+    """Capture deployment identity under its explicit inference thread setting."""
+
+    if (
+        isinstance(torch_threads, bool)
+        or not isinstance(torch_threads, int)
+        or torch_threads <= 0
+    ):
+        raise ValueError("deployment Torch thread count must be a positive integer")
+    previous = torch.get_num_threads()
+    try:
+        if previous != torch_threads:
+            torch.set_num_threads(torch_threads)
+        return DeploymentPolicyIdentity.from_components(
+            model,
+            encoder,
+            kind_mask,
+            wait_mask,
+        )
+    finally:
+        if torch.get_num_threads() != previous:
+            torch.set_num_threads(previous)
+
+
 def _mapping(observation: object) -> Mapping[str, Any]:
     if isinstance(observation, Mapping):
         return observation
@@ -1470,6 +1501,20 @@ def semantic_from_native(action: Action, spec: ActionSpec) -> SemanticAction:
     )
 
 
+def _trim_trailing_masked_bodies(
+    body_features: np.ndarray,
+    body_mask: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Compact only the masked tail for deployment-style inference."""
+
+    occupied = np.flatnonzero(np.any(body_mask, axis=0))
+    width = int(occupied[-1]) + 1 if occupied.size else 1
+    return (
+        np.ascontiguousarray(body_features[:, :width]),
+        np.ascontiguousarray(body_mask[:, :width]),
+    )
+
+
 class RecurrentSemanticPolicy:
     """Deterministic deployment-style recurrent inference at semantic boundaries."""
 
@@ -1485,21 +1530,63 @@ class RecurrentSemanticPolicy:
         self._state = self.model.initial_state(lanes).detach()
         self._reset_before = torch.ones(lanes, dtype=torch.bool, device=self.device)
 
+    def reset_lanes(self, lanes: Sequence[int]) -> None:
+        if self._state is None or self._reset_before is None:
+            raise RuntimeError("recurrent evaluation policy must be reset")
+        selected = tuple(lanes)
+        lane_count = int(self._reset_before.numel())
+        if (
+            not selected
+            or len(set(selected)) != len(selected)
+            or any(
+                isinstance(lane, bool)
+                or not isinstance(lane, int)
+                or not 0 <= lane < lane_count
+                for lane in selected
+            )
+        ):
+            raise ValueError("policy reset lanes are malformed")
+        indices = torch.tensor(selected, dtype=torch.long, device=self.device)
+        state = self._state.clone()
+        state.index_copy_(1, indices, self.model.initial_state(len(selected)).detach())
+        reset_before = self._reset_before.clone()
+        reset_before[indices] = True
+        self._state = state
+        self._reset_before = reset_before
+
     def act(
         self,
         observation: EncodedBatch,
         kind_mask: Tensor,
         wait_mask: Tensor,
+        *,
+        lane_indices: Sequence[int] | None = None,
     ) -> tuple[SemanticAction, ...]:
         observation.validate()
         if observation.schema != self.model.schema:
             raise ValueError("encoded evaluation batch uses the wrong tensor schema")
-        lanes = observation.global_features.shape[0]
+        batch_size = observation.global_features.shape[0]
         if self._state is None or self._reset_before is None:
             raise RuntimeError("recurrent evaluation policy must be reset")
-        if kind_mask.shape != (lanes, 3) or kind_mask.dtype != torch.bool:
+        total_lanes = int(self._reset_before.numel())
+        selected = (
+            tuple(range(total_lanes)) if lane_indices is None else tuple(lane_indices)
+        )
+        if (
+            len(selected) != batch_size
+            or len(set(selected)) != len(selected)
+            or any(
+                isinstance(lane, bool)
+                or not isinstance(lane, int)
+                or not 0 <= lane < total_lanes
+                for lane in selected
+            )
+        ):
+            raise ValueError("evaluation policy lane selection is malformed")
+        indices = torch.tensor(selected, dtype=torch.long, device=self.device)
+        if kind_mask.shape != (batch_size, 3) or kind_mask.dtype != torch.bool:
             raise ValueError("evaluation kind mask must be boolean [B, 3]")
-        expected_wait = (lanes, len(self.model.action_spec.wait_choices))
+        expected_wait = (batch_size, len(self.model.action_spec.wait_choices))
         if wait_mask.shape != expected_wait or wait_mask.dtype != torch.bool:
             raise ValueError("evaluation wait mask does not match the action schema")
         if not bool(torch.all(kind_mask.any(dim=1))):
@@ -1507,65 +1594,92 @@ class RecurrentSemanticPolicy:
         wait_lanes = kind_mask[:, int(SemanticActionKind.WAIT)]
         if bool(torch.any(wait_lanes & ~wait_mask.any(dim=1))):
             raise ValueError("WAIT is enabled without a legal wait duration")
-        global_features = (
-            torch.from_numpy(observation.global_features).to(self.device).unsqueeze(0)
-        )
-        body_features = (
-            torch.from_numpy(observation.body_features).to(self.device).unsqueeze(0)
-        )
-        body_mask = torch.from_numpy(observation.body_mask).to(self.device).unsqueeze(0)
-        arguments: dict[str, Tensor] = {}
-        if self.model.config.critic_condition_features:
-            arguments["critic_condition"] = torch.zeros(
-                (1, lanes, self.model.config.critic_condition_features),
-                dtype=torch.float32,
-                device=self.device,
-            )
         prior_mode = self.model.training
+        state = self._state.clone()
+        actions: list[SemanticAction] = []
         self.model.eval()
         try:
-            with torch.no_grad():
-                output = self.model(
-                    global_features,
-                    body_features,
-                    body_mask,
-                    self._state,
-                    reset_before=self._reset_before.unsqueeze(0),
-                    **arguments,
-                )
+            with torch.inference_mode():
+                for offset, lane in enumerate(selected):
+                    global_features = (
+                        torch.from_numpy(
+                            observation.global_features[offset : offset + 1]
+                        )
+                        .to(self.device)
+                        .unsqueeze(0)
+                    )
+                    active_body_features, active_body_mask = (
+                        _trim_trailing_masked_bodies(
+                            observation.body_features[offset : offset + 1],
+                            observation.body_mask[offset : offset + 1],
+                        )
+                    )
+                    body_features = (
+                        torch.from_numpy(active_body_features)
+                        .to(self.device)
+                        .unsqueeze(0)
+                    )
+                    body_mask = (
+                        torch.from_numpy(active_body_mask).to(self.device).unsqueeze(0)
+                    )
+                    arguments: dict[str, Tensor] = {}
+                    if self.model.config.critic_condition_features:
+                        arguments["critic_condition"] = torch.zeros(
+                            (
+                                1,
+                                1,
+                                self.model.config.critic_condition_features,
+                            ),
+                            dtype=torch.float32,
+                            device=self.device,
+                        )
+                    output = self.model(
+                        global_features,
+                        body_features,
+                        body_mask,
+                        self._state[:, lane : lane + 1],
+                        reset_before=self._reset_before[lane : lane + 1].unsqueeze(0),
+                        **arguments,
+                    )
+                    kind_value = int(
+                        output.kind_logits[0, 0]
+                        .masked_fill(
+                            ~kind_mask[offset].to(self.device),
+                            -torch.inf,
+                        )
+                        .argmax(-1)
+                    )
+                    wait_value = int(
+                        output.wait_logits[0, 0]
+                        .masked_fill(
+                            ~wait_mask[offset].to(self.device),
+                            -torch.inf,
+                        )
+                        .argmax(-1)
+                    )
+                    coordinate_mean = output.coordinate_alpha[0, 0] / (
+                        output.coordinate_alpha[0, 0] + output.coordinate_beta[0, 0]
+                    )
+                    xy = (
+                        coordinate_mean[kind_value - 1]
+                        if kind_value > 0
+                        else torch.zeros(2, device=self.device)
+                    )
+                    actions.append(
+                        self.model.action_spec.decode(
+                            kind_value,
+                            wait_value,
+                            float(xy[0]),
+                            float(xy[1]),
+                        )
+                    )
+                    state[:, lane : lane + 1] = output.recurrent_state.detach()
         finally:
             self.model.train(prior_mode)
-        kind = (
-            output.kind_logits[0]
-            .masked_fill(~kind_mask.to(self.device), -torch.inf)
-            .argmax(-1)
-        )
-        wait = (
-            output.wait_logits[0]
-            .masked_fill(~wait_mask.to(self.device), -torch.inf)
-            .argmax(-1)
-        )
-        coordinate_mean = output.coordinate_alpha[0] / (
-            output.coordinate_alpha[0] + output.coordinate_beta[0]
-        )
-        actions = []
-        for lane in range(lanes):
-            kind_value = int(kind[lane])
-            xy = (
-                coordinate_mean[lane, kind_value - 1]
-                if kind_value > 0
-                else torch.zeros(2, device=self.device)
-            )
-            actions.append(
-                self.model.action_spec.decode(
-                    kind_value,
-                    int(wait[lane]),
-                    float(xy[0]),
-                    float(xy[1]),
-                )
-            )
-        self._state = output.recurrent_state.detach()
-        self._reset_before = torch.zeros(lanes, dtype=torch.bool, device=self.device)
+        reset_before = self._reset_before.clone()
+        reset_before[indices] = False
+        self._state = state
+        self._reset_before = reset_before
         return tuple(actions)
 
 
@@ -1798,38 +1912,48 @@ def evaluate_recurrent_policy_vectorized(
     if len(initialized) != int(lane_count):
         raise RuntimeError("vector reset returned the wrong lane count")
 
-    episodes: list[EpisodeMetrics] = []
-    for start in range(0, len(ordered_cells), int(lane_count)):
-        batch = ordered_cells[start : start + int(lane_count)]
-        lanes = tuple(range(len(batch)))
-        snapshots = tuple(store[snapshot_id] for snapshot_id, _ in batch)
-        observations = [
-            materialize(value) for value in simulator.restore_many(lanes, snapshots)
-        ]
-        if len(observations) != len(batch):
-            raise RuntimeError("vector restore returned the wrong lane count")
+    capacity = min(int(lane_count), len(ordered_cells))
+    policy = RecurrentSemanticPolicy(model)
+    policy.reset(capacity)
+    lane_cells: list[tuple[str, int] | None] = [None] * capacity
+    observations: list[dict[str, Any]] = [{} for _ in range(capacity)]
+    initial_ticks = [0] * capacity
+    initial_scores = [0] * capacity
+    minimum_gauges = [0] * capacity
+    seeds = [0] * capacity
+    decisions = [0] * capacity
+    invalid_actions = [0] * capacity
+    accumulated_rewards = [0] * capacity
+    terminated = [False] * capacity
+    truncated = [False] * capacity
+    episodes: dict[tuple[str, int], EpisodeMetrics] = {}
+
+    def assign(
+        lanes: tuple[int, ...], cells_to_assign: tuple[tuple[str, int], ...]
+    ) -> None:
+        snapshots = tuple(store[snapshot_id] for snapshot_id, _ in cells_to_assign)
+        restored = tuple(simulator.restore_many(lanes, snapshots))
         config_hashes = tuple(simulator.config_hash_many(lanes))
         state_hashes = tuple(simulator.state_hash_many(lanes))
-        if len(config_hashes) != len(batch) or len(state_hashes) != len(batch):
-            raise RuntimeError("vector identity query returned the wrong lane count")
-
-        initial_ticks: list[int] = []
-        initial_scores: list[int] = []
-        minimum_gauges: list[int] = []
-        seeds: list[int] = []
-        for lane, ((snapshot_id, repetition), observation) in enumerate(
-            zip(batch, observations)
+        if any(
+            len(values) != len(lanes)
+            for values in (restored, config_hashes, state_hashes)
         ):
+            raise RuntimeError("vector restore or identity query returned wrong count")
+        policy.reset_lanes(lanes)
+        for offset, (lane, cell) in enumerate(zip(lanes, cells_to_assign)):
+            snapshot_id, repetition = cell
             recipe = recipes[snapshot_id]
+            observation = materialize(restored[offset])
             config = getattr(envs[lane], "config", None)
             config = config() if callable(config) else config
             gauge = observation.get("gauge")
             gauge_max = observation.get("gauge_max")
-            if int(config_hashes[lane]) != recipe.config_hash:
+            if int(config_hashes[offset]) != recipe.config_hash:
                 raise ValueError("evaluated simulator config hash mismatch")
             if _canonical_sha256(config) != recipe.config_sha256:
                 raise ValueError("evaluated simulator canonical config mismatch")
-            if int(state_hashes[lane]) != recipe.expected_state_hash:
+            if int(state_hashes[offset]) != recipe.expected_state_hash:
                 raise ValueError("evaluation snapshot state hash mismatch")
             if (
                 int(observation.get("tick", -1)) != recipe.expected_tick
@@ -1846,38 +1970,73 @@ def evaluate_recurrent_policy_vectorized(
                 raise ValueError(
                     "evaluation snapshot is not the declared live boundary"
                 )
-            initial_ticks.append(int(observation["tick"]))
-            initial_scores.append(int(observation["score"]))
-            minimum_gauges.append(int(observation["gauge"]))
-            seeds.append(suite.episode_seed(snapshot_id, repetition))
+            lane_cells[lane] = cell
+            observations[lane] = observation
+            initial_ticks[lane] = int(observation["tick"])
+            initial_scores[lane] = int(observation["score"])
+            minimum_gauges[lane] = int(observation["gauge"])
+            seeds[lane] = suite.episode_seed(snapshot_id, repetition)
+            decisions[lane] = 0
+            invalid_actions[lane] = 0
+            accumulated_rewards[lane] = 0
+            terminated[lane] = False
+            truncated[lane] = False
 
-        policy = RecurrentSemanticPolicy(model)
-        policy.reset(len(batch))
-        batch_kind_mask = kind_mask.expand(len(batch), -1).clone()
-        batch_wait_mask = wait_mask.expand(len(batch), -1).clone()
-        decisions = [0] * len(batch)
-        invalid_actions = [0] * len(batch)
-        accumulated_rewards = [0] * len(batch)
-        terminated = [False] * len(batch)
-        truncated = [False] * len(batch)
+    def finish(lane: int) -> None:
+        cell = lane_cells[lane]
+        if cell is None or cell in episodes:
+            raise RuntimeError("evaluation lane completion state is inconsistent")
+        snapshot_id, repetition = cell
+        final = observations[lane]
+        final_score = int(final["score"])
+        elapsed = int(final["tick"]) - initial_ticks[lane]
+        if elapsed > suite.max_simulated_ticks:
+            raise ValueError("evaluation exceeded its simulated-tick horizon")
+        if accumulated_rewards[lane] != final_score - initial_scores[lane]:
+            raise ValueError("evaluation raw reward does not equal score delta")
+        budget_cut = not terminated[lane] and not truncated[lane]
+        episodes[cell] = EpisodeMetrics(
+            snapshot_id,
+            repetition,
+            seeds[lane],
+            initial_scores[lane],
+            final_score,
+            final_score - initial_scores[lane],
+            elapsed,
+            decisions[lane],
+            terminated[lane],
+            truncated[lane] or budget_cut,
+            invalid_actions[lane],
+            minimum_gauges[lane],
+            int(final["gauge"]),
+        )
+        lane_cells[lane] = None
 
-        while True:
-            active = tuple(
-                lane
-                for lane, observation in enumerate(observations)
-                if not terminated[lane]
-                and not truncated[lane]
-                and decisions[lane] < suite.max_decisions
-                and int(observation["tick"]) - initial_ticks[lane]
-                < suite.max_simulated_ticks
+    next_cell = capacity
+    assign(tuple(range(capacity)), ordered_cells[:capacity])
+    while any(cell is not None for cell in lane_cells):
+        active = tuple(
+            lane
+            for lane, cell in enumerate(lane_cells)
+            if cell is not None
+            and not terminated[lane]
+            and not truncated[lane]
+            and decisions[lane] < suite.max_decisions
+            and int(observations[lane]["tick"]) - initial_ticks[lane]
+            < suite.max_simulated_ticks
+        )
+        if active:
+            encoded = encoder.encode(tuple(observations[lane] for lane in active))
+            semantic_actions = policy.act(
+                encoded,
+                kind_mask.expand(len(active), -1),
+                wait_mask.expand(len(active), -1),
+                lane_indices=active,
             )
-            if not active:
-                break
-            encoded = encoder.encode(tuple(observations))
-            semantic_actions = policy.act(encoded, batch_kind_mask, batch_wait_mask)
             first_actions: list[Action] = []
-            for lane in active:
-                semantic = model.action_spec.validate(semantic_actions[lane])
+            semantic_by_lane = dict(zip(active, semantic_actions))
+            for lane, semantic in semantic_by_lane.items():
+                semantic = model.action_spec.validate(semantic)
                 elapsed = int(observations[lane]["tick"]) - initial_ticks[lane]
                 remaining = suite.max_simulated_ticks - elapsed
                 first_actions.append(
@@ -1904,7 +2063,7 @@ def evaluate_recurrent_policy_vectorized(
             release_lanes = tuple(
                 lane
                 for lane in active
-                if semantic_actions[lane].kind is not SemanticActionKind.WAIT
+                if semantic_by_lane[lane].kind is not SemanticActionKind.WAIT
                 and not terminated[lane]
                 and not truncated[lane]
                 and int(observations[lane]["tick"]) - initial_ticks[lane]
@@ -1931,39 +2090,38 @@ def evaluate_recurrent_policy_vectorized(
             for lane in active:
                 decisions[lane] += 1
 
-        for lane, (snapshot_id, repetition) in enumerate(batch):
-            final = observations[lane]
-            final_score = int(final["score"])
-            elapsed = int(final["tick"]) - initial_ticks[lane]
-            if elapsed > suite.max_simulated_ticks:
-                raise ValueError("evaluation exceeded its simulated-tick horizon")
-            if accumulated_rewards[lane] != final_score - initial_scores[lane]:
-                raise ValueError("evaluation raw reward does not equal score delta")
-            budget_cut = not terminated[lane] and not truncated[lane]
-            episodes.append(
-                EpisodeMetrics(
-                    snapshot_id,
-                    repetition,
-                    seeds[lane],
-                    initial_scores[lane],
-                    final_score,
-                    final_score - initial_scores[lane],
-                    elapsed,
-                    decisions[lane],
-                    terminated[lane],
-                    truncated[lane] or budget_cut,
-                    invalid_actions[lane],
-                    minimum_gauges[lane],
-                    int(final["gauge"]),
-                )
+        ready = tuple(
+            lane
+            for lane, cell in enumerate(lane_cells)
+            if cell is not None
+            and (
+                terminated[lane]
+                or truncated[lane]
+                or decisions[lane] >= suite.max_decisions
+                or int(observations[lane]["tick"]) - initial_ticks[lane]
+                >= suite.max_simulated_ticks
             )
+        )
+        if not ready:
+            if active:
+                continue
+            raise RuntimeError("vector evaluation made no progress")
+        for lane in ready:
+            finish(lane)
+        refill_count = min(len(ready), len(ordered_cells) - next_cell)
+        if refill_count:
+            refill_lanes = ready[:refill_count]
+            refill_cells = ordered_cells[next_cell : next_cell + refill_count]
+            assign(refill_lanes, refill_cells)
+            next_cell += refill_count
+
     return EvaluationReport(
         suite.sha256,
         deployment_identity.sha256,
         evaluator_sha256,
         runtime.sha256,
         execution_identity_sha256,
-        tuple(episodes),
+        tuple(episodes[cell] for cell in ordered_cells),
     )
 
 

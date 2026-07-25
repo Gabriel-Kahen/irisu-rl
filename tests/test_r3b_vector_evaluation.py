@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import hashlib
+import struct
 import unittest
+from dataclasses import replace
 
 import torch
-
 from irisu_rl.actions import ActionSpec
-from irisu_rl.curriculum import SnapshotBlobStore
+from irisu_rl.curriculum import SnapshotBlobStore, SnapshotLibrary
 from irisu_rl.encoding import TeacherStateEncoder
 from irisu_rl.models import RecurrentActorCritic, RecurrentModelConfig
 from irisu_rl.r3b_evaluation import (
@@ -14,6 +16,7 @@ from irisu_rl.r3b_evaluation import (
     evaluate_recurrent_policy_vectorized,
 )
 from irisu_rl.schema import TEACHER_V1
+
 from tests.test_r3b_evaluation import (
     FakeHorizonUnderflowSimulator,
     FakeSingleSimulator,
@@ -88,6 +91,94 @@ class WrongStateVectorSimulator(FakePaddedVectorSimulator):
         return tuple(values)
 
 
+class FakeDurationSimulator(FakeSingleSimulator):
+    def restore_state(self, snapshot: bytes):
+        observation = super().restore_state(snapshot)
+        self.remaining = int(self.gauge) - 100
+        return observation
+
+    def step(self, action):
+        self.tick += 1
+        self.score += 1
+        self.gauge = max(0, self.gauge - 1)
+        self.remaining -= 1
+        return (
+            self._observation(),
+            1,
+            self.remaining == 0,
+            False,
+            {"invalid_action": False},
+        )
+
+
+class RecordingTeacherEncoder(TeacherStateEncoder):
+    def __init__(self) -> None:
+        self.batch_sizes: list[int] = []
+
+    def encode(self, observations):
+        self.batch_sizes.append(len(observations))
+        return super().encode(observations)
+
+
+def _duration_store() -> SnapshotBlobStore:
+    spec, _ = _fixture()
+    template = spec.library["validation"]
+    snapshot_struct = struct.Struct("<qqqQ")
+    definitions = (
+        ("a-slow", 3, 101),
+        ("b-fast", 1, 102),
+        ("c-fast", 1, 103),
+        ("d-fast", 1, 104),
+    )
+    blobs = {
+        snapshot_id: snapshot_struct.pack(0, 0, 100 + duration, state_hash)
+        for snapshot_id, duration, state_hash in definitions
+    }
+    recipes = tuple(
+        replace(
+            template,
+            snapshot_id=snapshot_id,
+            scenario_family=f"family-{snapshot_id}",
+            reset_seed=1000 + index,
+            expected_tick=0,
+            expected_score=0,
+            expected_state_hash=state_hash,
+            snapshot_sha256=hashlib.sha256(blobs[snapshot_id]).hexdigest(),
+        )
+        for index, (snapshot_id, _duration, state_hash) in enumerate(definitions)
+    )
+    return SnapshotBlobStore(SnapshotLibrary(recipes), blobs)
+
+
+def _duration_suite(
+    store: SnapshotBlobStore,
+    model: RecurrentActorCritic,
+    *,
+    snapshot_ids: tuple[str, ...] | None = None,
+) -> EvaluationSuite:
+    spec, _ = _fixture()
+    selected = (
+        tuple(recipe.snapshot_id for recipe in store.library.recipes)
+        if snapshot_ids is None
+        else snapshot_ids
+    )
+    return EvaluationSuite(
+        "work-conserving-validation-v1",
+        "validation",
+        selected,
+        1,
+        20260724,
+        4,
+        4,
+        _RUNTIME_SHA256,
+        spec.assignment_sha256,
+        store.library.sha256,
+        store.sha256,
+        model.action_spec.sha256,
+        tuple(store.library[snapshot_id].sha256 for snapshot_id in selected),
+    )
+
+
 def _model() -> RecurrentActorCritic:
     torch.manual_seed(20260723)
     return RecurrentActorCritic(
@@ -132,6 +223,7 @@ def _evaluate(
     *,
     vector: bool,
     cells=None,
+    encoder=None,
 ):
     evaluator = (
         evaluate_recurrent_policy_vectorized if vector else evaluate_recurrent_policy
@@ -141,7 +233,7 @@ def _evaluate(
         store,
         suite,
         model,
-        TeacherStateEncoder(),
+        TeacherStateEncoder() if encoder is None else encoder,
         kind_mask,
         wait_mask,
         evaluator_sha256="e" * 64,
@@ -266,6 +358,100 @@ class R3BVectorEvaluationTests(unittest.TestCase):
         self.assertTrue(all(value.truncated for value in vector.episodes))
         self.assertTrue(all(value.minimum_gauge == -48 for value in vector.episodes))
         self.assertTrue(all(value.final_gauge == -48 for value in vector.episodes))
+
+    def test_completed_lane_is_refilled_without_waiting_for_slow_lane(self) -> None:
+        store = _duration_store()
+        model = _model()
+        suite = _duration_suite(store, model)
+        kind_mask = torch.zeros((1, 3), dtype=torch.bool)
+        kind_mask[:, 0] = True
+        wait_mask = torch.zeros(
+            (1, len(model.action_spec.wait_choices)), dtype=torch.bool
+        )
+        wait_mask[:, 0] = True
+        single = _evaluate(
+            FakeDurationSimulator(),
+            store,
+            suite,
+            model,
+            kind_mask,
+            wait_mask,
+            vector=False,
+        )
+        vector_simulator = FakePaddedVectorSimulator(2, FakeDurationSimulator)
+        vector = _evaluate(
+            vector_simulator,
+            store,
+            suite,
+            model,
+            kind_mask,
+            wait_mask,
+            vector=True,
+        )
+        self.assertEqual(vector, single)
+        self.assertEqual(
+            vector_simulator.restore_many_calls,
+            [(0, 1), (1,), (1,)],
+        )
+
+    def test_work_conserving_reports_match_across_lane_counts(self) -> None:
+        store = _duration_store()
+        model = _model()
+        suite = _duration_suite(store, model)
+        kind_mask = torch.zeros((1, 3), dtype=torch.bool)
+        kind_mask[:, 0] = True
+        wait_mask = torch.zeros(
+            (1, len(model.action_spec.wait_choices)), dtype=torch.bool
+        )
+        wait_mask[:, 0] = True
+        expected = _evaluate(
+            FakeDurationSimulator(),
+            store,
+            suite,
+            model,
+            kind_mask,
+            wait_mask,
+            vector=False,
+        )
+        for lanes in (1, 2, 4):
+            with self.subTest(lanes=lanes):
+                actual = _evaluate(
+                    FakePaddedVectorSimulator(lanes, FakeDurationSimulator),
+                    store,
+                    suite,
+                    model,
+                    kind_mask,
+                    wait_mask,
+                    vector=True,
+                )
+                self.assertEqual(actual, expected)
+
+    def test_inference_excludes_finished_lanes(self) -> None:
+        store = _duration_store()
+        model = _model()
+        snapshot_ids = tuple(recipe.snapshot_id for recipe in store.library.recipes[:2])
+        suite = _duration_suite(store, model, snapshot_ids=snapshot_ids)
+        kind_mask = torch.zeros((1, 3), dtype=torch.bool)
+        kind_mask[:, 0] = True
+        wait_mask = torch.zeros(
+            (1, len(model.action_spec.wait_choices)), dtype=torch.bool
+        )
+        wait_mask[:, 0] = True
+        encoder = RecordingTeacherEncoder()
+        vector_simulator = FakePaddedVectorSimulator(2, FakeDurationSimulator)
+        report = _evaluate(
+            vector_simulator,
+            store,
+            suite,
+            model,
+            kind_mask,
+            wait_mask,
+            vector=True,
+            encoder=encoder,
+        )
+        self.assertEqual(len(report.episodes), 2)
+        self.assertEqual(encoder.batch_sizes, [2, 1, 1])
+        self.assertEqual(vector_simulator.step_many_calls, [(0, 1), (0,), (0,)])
 
     def test_rejects_nonvector_and_identity_mismatch_before_execution(self) -> None:
         model = _model()

@@ -3,17 +3,24 @@
 from __future__ import annotations
 
 import argparse
-from contextlib import nullcontext
 import hashlib
 import json
 import os
 import subprocess
 import sys
+from collections.abc import Sequence
+from contextlib import nullcontext
 from pathlib import Path
-from typing import Sequence
 
 from irisu_env import IrisuEnv
 
+from .curriculum import SnapshotBlobStore, SnapshotLibrary
+from .r3b_artifacts import ArtifactStore, ArtifactTypeError
+from .r3b_baselines import run_sealed_baselines
+from .r3b_canonical_runner import (
+    CanonicalRunInputs,
+    load_published_canonical_outcome,
+)
 from .r3b_experiments import (
     R3BExperimentPlan,
     SealedLearnerOutcomeReference,
@@ -21,19 +28,23 @@ from .r3b_experiments import (
     finalize_persisted_sealed_test,
     load_plan,
 )
-from .r3b_canonical_runner import (
-    CanonicalRunInputs,
-    load_published_canonical_outcome,
-)
 from .r3b_local_runner import (
     run_local_canonical_updates,
     run_local_smoke_updates,
 )
+from .r3b_lock import R3BRunLock
 from .r3b_operational import (
     CANONICAL_OPERATIONAL_CONFIG_SHA256,
     CANONICAL_PLAN_SHA256,
     R3BOperationalConfig,
     R3BWorkflow,
+)
+from .r3b_phases import (
+    acquire_sealed_job,
+    load_sealed_authorization,
+    load_validation_authorization,
+    prepare_sealed_test_phase,
+    prepare_validation_phase,
 )
 from .r3b_snapshots import (
     SnapshotBundle,
@@ -44,17 +55,6 @@ from .r3b_snapshots import (
     pair_snapshot_bundles,
 )
 from .r3b_supervisor import evaluate_trained_canonical_job
-from .r3b_artifacts import ArtifactStore, ArtifactTypeError
-from .r3b_baselines import run_sealed_baselines
-from .r3b_lock import R3BRunLock
-from .r3b_phases import (
-    acquire_sealed_job,
-    load_sealed_authorization,
-    load_validation_authorization,
-    prepare_sealed_test_phase,
-    prepare_validation_phase,
-)
-from .curriculum import SnapshotBlobStore, SnapshotLibrary
 
 
 def _canonical_bytes(value: object) -> bytes:
@@ -711,7 +711,7 @@ def _parser() -> argparse.ArgumentParser:
     config_verify = config_commands.add_parser("verify")
     config_verify.add_argument(
         "--config",
-        default="configs/rl/experiments/r3b-operational-v1.toml",
+        default="configs/rl/experiments/r3b-operational-v2.toml",
     )
     config_verify.add_argument(
         "--plan",
@@ -733,7 +733,7 @@ def _parser() -> argparse.ArgumentParser:
     initialize.add_argument("--output", required=True)
     initialize.add_argument(
         "--config",
-        default="configs/rl/experiments/r3b-operational-v1.toml",
+        default="configs/rl/experiments/r3b-operational-v2.toml",
     )
     initialize.add_argument(
         "--plan",

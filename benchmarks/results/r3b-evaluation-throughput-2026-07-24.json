@@ -1,0 +1,108 @@
+{
+  "comparison": {
+    "aggregate_speedup": 5.780281491580785,
+    "duration_metric": "workflow finished_ns minus started_ns; excludes pre-claim input verification and post-completion CLI teardown",
+    "jobs": [
+      {
+        "job_sha256": "03ed01e870efff85ecc1f393f126e513bc929722b10be3ca0eed48fdf2cfa2ff",
+        "optimized": {
+          "output_sha256": "7297d5e0514d86f80fcbcd7acc1c397df7647522e2ecfa4e6f6d86689969fe88",
+          "workflow_active_seconds": 581.584538031
+        },
+        "prior": {
+          "output_sha256": "bec33c3a3d7b00ab0ed2aa5fb962d8cf1af5ae0a16bcf7cd2a0b404eb1cdd66f",
+          "workflow_active_seconds": 1826.288410273
+        },
+        "speedup": 3.1401942294684146
+      },
+      {
+        "job_sha256": "0af764a53ef1eb1b9d245ddac43ba306aff59660edf209372c6f221841ed2674",
+        "optimized": {
+          "output_sha256": "7981b8123f4ea71f41028cf2a14c79316975e9671ec9a14d15ac9f3c8515c4f9",
+          "workflow_active_seconds": 1189.215293318
+        },
+        "prior": {
+          "output_sha256": "1f67fd84ee0af5fe234b5a0c7be1a122447a2072c0c3a725de4fb8131680b54b",
+          "workflow_active_seconds": 8409.433080168
+        },
+        "speedup": 7.071413500498342
+      }
+    ],
+    "optimized_mean_workflow_active_seconds": 885.3999156745,
+    "projected_36_job_workflow_active_hours": 8.853999156745001
+  },
+  "final_cell_independence_probe": {
+    "cells": 64,
+    "episode_content_sha256": "2c39615161b60c32fb8b892f987d8126fe76482426d759e8483d0db6641a6636",
+    "exact_worker_sha256": "4faa4508a89df3e1e62b80e2871b6a35b5913f220d53fe5de43408ad6512c261",
+    "final": {
+      "deployment_policy_sha256": "2fbc157afcf0eed895075226cb5e971bb873729ae0b76901e722afcb6edad194",
+      "evaluation_module_sha256": "08cabf235afbbc4726b105ea483b75c9e66f32da18d13c946358b5a53a194c5c",
+      "operational_config_sha256": "002a3f0deb1119b47aa55114f733c17322ec9aeaa1a5e13847ab834895a5577e",
+      "simulated_ticks_per_second": 21682.855159209194,
+      "source_revision": "80281e205f44881bd94f84a9ed8ceb2f68ab5a04",
+      "source_tracked_clean": true,
+      "suite_sha256": "98e83975c6b8bb230ecadff669f1c88424334f70e1ee71107193e3043f4d7b50",
+      "untracked_test_setup": [
+        "build",
+        "reference/runs"
+      ],
+      "wall_seconds": 4.847009271994466
+    },
+    "max_simulated_ticks": 2048,
+    "model_state_sha256": "51e8ee90bbfac0efe750201d7066844c4b64031cdb9dd23597492626e502a763",
+    "pre_cell_independence": {
+      "simulated_ticks_per_second": 25900.788345967427,
+      "source_revision": "fc1ee1b665207726a1687dfd570646290e92efa4",
+      "wall_seconds": 4.057675719988765
+    },
+    "relative_throughput": 0.837150393632133,
+    "simulated_ticks": 105097,
+    "snapshot_bundle_sha256": "2371129c883ade88b309e509c2d8a7399a85944dc5dd7e841fc14d977527eb7a",
+    "torch_threads": 1,
+    "topology": {
+      "lanes": 16,
+      "replicas": 1,
+      "workers": 16
+    }
+  },
+  "fixed_inputs": {
+    "exact_snapshot_bundle_sha256": "2371129c883ade88b309e509c2d8a7399a85944dc5dd7e841fc14d977527eb7a",
+    "exact_worker_sha256": "4faa4508a89df3e1e62b80e2871b6a35b5913f220d53fe5de43408ad6512c261",
+    "pairing_sha256s": {
+      "calibration": "bc669a86d398d1f94228de29477b59b2e3228f7e8b60ea093ebbe0ac9001b7cf",
+      "test": "058040f869e445487f558e115eb51881ae21fc88b8577f28f97d0434f41b712e",
+      "validation": "3cff35fa8cda87cffa04cf5945f1af2470459b8d764295eb62a1d2963229d0fb"
+    },
+    "plan_sha256": "68860ef26686c954960c176afe67a44da34e2ffab03dd02ba5aa7c1fc193baf8",
+    "portable_library_sha256": "4f6928f18c83159b0db1cb895891007ac805d2542954b41d767619eedf3f7c79",
+    "portable_snapshot_bundle_sha256": "e8ee8ae85037a9db86e8a60cc5274e4be35414958317fce1b09dd36bed713354"
+  },
+  "host": {
+    "cpu": "AMD Ryzen 7 3700X 8-Core Processor",
+    "logical_cpus": 16,
+    "physical_cores": 8
+  },
+  "interpretation": "Engineering throughput comparison only; not policy-quality, acceptance, or transfer evidence.",
+  "limitations": [
+    "The two source revisions intentionally use different evaluator and operational-config identities, so output artifact identities differ.",
+    "The matched jobs predate the final batch-1 cell-independence and evaluator-lifecycle hardening changes; they establish the optimization direction, not final-commit throughput.",
+    "Two matched jobs do not establish the duration distribution across all learning-rate arms and seeds.",
+    "The projection excludes phase transitions, validation, sealed test, and the one-shot baseline batch."
+  ],
+  "optimized_run": {
+    "operational_config_sha256": "76f56fe6b6cbeb9ab5796aabaf92d76fab969ca24abed20fca0953cf39c86a15",
+    "run_id": "r3b-throughput-fixed-fc1ee1b",
+    "source_identity_sha256": "7c872ce71df9f10c572f0a234a68038c86cec3cfb07dd285a4310effac028e48",
+    "source_revision": "fc1ee1b665207726a1687dfd570646290e92efa4",
+    "workflow_valid": true
+  },
+  "prior_run": {
+    "operational_config_sha256": "b59828dfcf0bf933ba940ad8f219765784e8328cde8a5ca39b09411d2a4d275c",
+    "run_id": "r3b-canonical-20260724-001",
+    "source_identity_sha256": "9c8c6e7b705900a88c2e6764f42296d85e813d326e74611ea672b7b9f38fa200",
+    "source_revision": "506985ebc4e9006a1f1882d24368912b22a597b0",
+    "workflow_valid": true
+  },
+  "version": "r3b-evaluation-throughput-comparison-v1"
+}

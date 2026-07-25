@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
 import math
+from dataclasses import asdict, dataclass
 
 import torch
 from torch import Tensor, nn
@@ -38,10 +38,9 @@ class RecurrentModelConfig:
             for value in widths
         ):
             raise ValueError("model widths and layer count must be positive integers")
-        if (
-            isinstance(self.critic_condition_features, bool)
-            or self.critic_condition_features not in (0, 1)
-        ):
+        if isinstance(
+            self.critic_condition_features, bool
+        ) or self.critic_condition_features not in (0, 1):
             raise ValueError("critic condition feature count must be zero or one")
         if not 1.0 <= self.minimum_concentration <= 10.0:
             raise ValueError("minimum concentration must be within [1, 10]")
@@ -202,8 +201,7 @@ class RecurrentActorCritic(nn.Module):
             if self.config.critic_condition_features
             else (
                 "recurrent-actor-critic-v2"
-                if self.config.coordinate_parameterization
-                == "mean-log-concentration"
+                if self.config.coordinate_parameterization == "mean-log-concentration"
                 else "recurrent-actor-critic-v1"
             )
         )
@@ -244,14 +242,11 @@ class RecurrentActorCritic(nn.Module):
         time, batch, global_count = global_features.shape
         if time <= 0 or batch <= 0:
             raise ValueError("observation sequence dimensions must be nonzero")
-        expected_body = (
-            time,
-            batch,
-            self.schema.capacity,
-            len(self.schema.body_features),
-        )
+        body_prefix = body_features.shape[-2] if body_features.ndim == 4 else 0
+        expected_body = (time, batch, body_prefix, len(self.schema.body_features))
         if (
             global_count != len(self.schema.global_features)
+            or not 0 < body_prefix <= self.schema.capacity
             or body_features.shape != expected_body
         ):
             raise ValueError("observation tensor does not match the model schema")

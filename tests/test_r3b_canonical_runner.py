@@ -1,19 +1,19 @@
 from __future__ import annotations
 
-import tempfile
-import unittest
 import hashlib
 import json
+import tempfile
+import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
+from irisu_rl.actions import ActionSpec
 from irisu_rl.curriculum import (
     SnapshotBlobStore,
     SnapshotLibrary,
     SnapshotRecipe,
 )
-from irisu_rl.actions import ActionSpec
 from irisu_rl.r3b_artifacts import ArtifactStore
 from irisu_rl.r3b_canonical_runner import (
     CanonicalRunInputs,
@@ -163,6 +163,10 @@ def _config() -> R3BOperationalConfig:
         ppo_target_kl=0.1,
         curve_snapshots=2,
         evaluation_shards=2,
+        evaluation_lanes=2,
+        evaluation_workers=2,
+        evaluation_processes=2,
+        evaluation_torch_threads=1,
         calibration_repetitions=1,
         validation_repetitions=1,
         test_repetitions=1,
@@ -646,7 +650,9 @@ class CanonicalRunnerTests(unittest.TestCase):
                 }[value]  # type: ignore[index]
 
             with (
-                patch.object(store, "load", side_effect=lambda identity, **_: packages[identity]),
+                patch.object(
+                    store, "load", side_effect=lambda identity, **_: packages[identity]
+                ),
                 patch(
                     "irisu_rl.r3b_canonical_runner._source_identity",
                     return_value=_hash("7"),
