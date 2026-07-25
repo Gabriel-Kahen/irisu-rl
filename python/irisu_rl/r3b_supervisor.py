@@ -95,10 +95,14 @@ def _signal_evaluation_process(process: Any, sig: signal.Signals) -> None:
     pid = getattr(process, "pid", None)
     if not isinstance(pid, int) or pid <= 0:
         return
+    if os.name == "posix":
+        try:
+            if os.getpgid(pid) == pid:
+                os.killpg(pid, sig)
+        except ProcessLookupError:
+            pass
     try:
-        if os.name == "posix" and os.getpgid(pid) == pid:
-            os.killpg(pid, sig)
-        elif sig == signal.SIGTERM:
+        if sig == signal.SIGTERM:
             process.terminate()
         else:
             process.kill()
@@ -129,8 +133,15 @@ def _stop_evaluation_executor(
     deadline = time.monotonic() + timeout_seconds
     for process in survivors:
         process.join(max(0.0, deadline - time.monotonic()))
-    if any(process.is_alive() for process in survivors):
-        raise RuntimeError("isolated canonical evaluator cleanup did not finish")
+    remaining = tuple(process for process in survivors if process.is_alive())
+    if remaining:
+        details = tuple(
+            (getattr(process, "pid", None), getattr(process, "exitcode", None))
+            for process in remaining
+        )
+        raise RuntimeError(
+            f"isolated canonical evaluator cleanup did not finish: {details}"
+        )
 
 
 def _deployment(
