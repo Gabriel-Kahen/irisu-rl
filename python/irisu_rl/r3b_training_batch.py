@@ -8,6 +8,7 @@ import os
 import re
 import secrets
 from concurrent.futures import ProcessPoolExecutor
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -35,6 +36,56 @@ from .r3b_supervisor import (
 _SAFE_OWNER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,119}$")
 
 
+def _task_ids(task_root: Path = Path("/proc/self/task")) -> tuple[int, ...]:
+    try:
+        task_ids = tuple(
+            sorted(
+                int(entry.name)
+                for entry in task_root.iterdir()
+                if entry.name.isdecimal()
+            )
+        )
+    except OSError as exc:
+        raise RuntimeError("training process threads could not be inspected") from exc
+    if not task_ids:
+        raise RuntimeError("training process has no inspectable threads")
+    return task_ids
+
+
+def _set_process_affinity(
+    cpu_ids: tuple[int, ...],
+    *,
+    task_root: Path = Path("/proc/self/task"),
+) -> None:
+    """Restrict every existing thread and verify a stable process-wide mask."""
+
+    target = frozenset(cpu_ids)
+    if not target:
+        raise ValueError("training CPU affinity cannot be empty")
+    os.sched_setaffinity(0, target)
+    for _attempt in range(16):
+        before = _task_ids(task_root)
+        for task_id in before:
+            with suppress(ProcessLookupError):
+                os.sched_setaffinity(task_id, target)
+        after = _task_ids(task_root)
+        if after != before:
+            continue
+        for task_id in after:
+            try:
+                actual = os.sched_getaffinity(task_id)
+            except ProcessLookupError:
+                break
+            if actual != target:
+                raise RuntimeError(
+                    "training CPU affinity did not apply to every thread"
+                )
+        else:
+            if _task_ids(task_root) == after:
+                return
+    raise RuntimeError("training process threads changed while applying CPU affinity")
+
+
 def _train_one(
     run_directory: str,
     worker_path: str,
@@ -44,7 +95,7 @@ def _train_one(
     training_cpu_ids: tuple[int, ...],
     authorization: ValidationRunAuthorization | None,
 ) -> LocalTrainingResult:
-    os.sched_setaffinity(0, training_cpu_ids)
+    _set_process_affinity(training_cpu_ids)
     return run_local_canonical_updates(
         run_directory,
         worker_path=worker_path,
@@ -62,7 +113,9 @@ class CanonicalBatchResult:
     cpu_plan: TrainingCpuPlan
     training: tuple[LocalTrainingResult, ...]
     evaluation: tuple[CanonicalEvaluationResult, ...]
-    version: str = "r3b-canonical-training-batch-v1"
+    wave_complete: bool
+    remaining_jobs: int
+    version: str = "r3b-canonical-training-batch-v2"
 
     def manifest(self) -> dict[str, object]:
         return {
@@ -71,6 +124,8 @@ class CanonicalBatchResult:
             "cpu_plan_sha256": self.cpu_plan.sha256,
             "training": [value.manifest() for value in self.training],
             "evaluation": [value.manifest() for value in self.evaluation],
+            "wave_complete": self.wave_complete,
+            "remaining_jobs": self.remaining_jobs,
             "acceptance_eligible": True,
             "transfer_eligible": False,
         }
@@ -110,10 +165,10 @@ def _bind_cpu_wave_identity(
     path = _wave_identity_path(root, phase)
     payload = _canonical_bytes(
         {
-            "version": "r3b-training-cpu-wave-identity-v1",
+            "version": "r3b-training-cpu-wave-identity-v2",
             "phase": phase,
             "owner": owner,
-            "cpu_plan": plan.manifest(),
+            "cpu_policy": plan.policy_manifest(),
         }
     )
     if path.exists():
@@ -159,11 +214,11 @@ def _load_cpu_wave(
         raise ValueError("training CPU wave is malformed") from exc
     if (
         not isinstance(value, dict)
-        or set(value) != {"version", "phase", "owner", "cpu_plan", "jobs"}
-        or value.get("version") != "r3b-training-cpu-wave-v1"
+        or set(value) != {"version", "phase", "owner", "cpu_policy", "jobs"}
+        or value.get("version") != "r3b-training-cpu-wave-v2"
         or value.get("phase") != phase
         or value.get("owner") != owner
-        or value.get("cpu_plan") != plan.manifest()
+        or value.get("cpu_policy") != plan.policy_manifest()
         or path.read_bytes() != _canonical_bytes(value)
         or not isinstance(value.get("jobs"), list)
     ):
@@ -195,10 +250,10 @@ def _publish_cpu_wave(
     claims: tuple[JobClaim, ...],
 ) -> None:
     value = {
-        "version": "r3b-training-cpu-wave-v1",
+        "version": "r3b-training-cpu-wave-v2",
         "phase": phase,
         "owner": owner,
-        "cpu_plan": plan.manifest(),
+        "cpu_policy": plan.policy_manifest(),
         "jobs": [
             {"job_sha256": claim.job_sha256, "owner": claim.owner} for claim in claims
         ],
@@ -215,6 +270,73 @@ def _clear_cpu_wave(root: Path, phase: str) -> None:
         os.fsync(parent_fd)
     finally:
         os.close(parent_fd)
+
+
+def _fsync_directory(path: Path) -> None:
+    descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _batch_owner_pattern(owner: str) -> re.Pattern[str]:
+    return re.compile(rf"^{re.escape(owner)}-([1-9][0-9]*)$")
+
+
+def _phase_intents(
+    secret_root: Path,
+    phase: str,
+) -> tuple[tuple[Path, str, str], ...]:
+    intents: list[tuple[Path, str, str]] = []
+    for path in sorted(secret_root.glob(f"{phase}*.intent.json")):
+        intent_phase, token, intent_owner = _load_claim_intent(path)
+        if intent_phase == phase:
+            intents.append((path, token, intent_owner))
+    return tuple(intents)
+
+
+def _preflight_batch_recovery(
+    root: Path,
+    *,
+    workflow: R3BWorkflow,
+    phase: str,
+    owner: str,
+) -> None:
+    """Reject foreign or unrecoverable active work before binding a batch."""
+
+    secret_root = ensure_private_directory(root / "secrets")
+    owner_pattern = _batch_owner_pattern(owner)
+    intent_owners = {
+        intent_owner
+        for _path, _token, intent_owner in _phase_intents(secret_root, phase)
+    }
+    foreign = sorted(
+        intent_owner
+        for intent_owner in intent_owners
+        if owner_pattern.fullmatch(intent_owner) is None
+    )
+    active = [
+        record
+        for record in workflow.phase_job_records(phase)
+        if record["status"] in {"claimed", "running", "trained"}
+    ]
+    foreign.extend(
+        str(record["owner"])
+        for record in active
+        if owner_pattern.fullmatch(str(record["owner"])) is None
+    )
+    if foreign:
+        raise RuntimeError(
+            "parallel training cannot adopt active claims owned by "
+            + ", ".join(sorted(set(foreign)))
+        )
+    for record in active:
+        job_sha256 = str(record["job_sha256"])
+        record_owner = str(record["owner"])
+        secret = secret_root / f"{job_sha256}.claim.json"
+        if not secret.exists() and record_owner not in intent_owners:
+            raise RuntimeError("active batch claim has no durable recovery secret")
 
 
 def _prepare_claims(
@@ -236,15 +358,64 @@ def _prepare_claims(
             if claim.owner in active:
                 raise RuntimeError("parallel training owner has multiple active claims")
             active[claim.owner] = claim
-    prepared: list[JobClaim] = []
-    for index in range(count):
-        worker_owner = f"{owner}-{index + 1}"
-        claim = active.get(worker_owner)
-        if claim is not None:
-            if claim.phase != phase:
-                raise ValueError("parallel training claim belongs to another phase")
-            prepared.append(claim)
+    owner_pattern = _batch_owner_pattern(owner)
+    batch_active: dict[int, JobClaim] = {}
+    foreign: list[str] = []
+    for active_owner, claim in active.items():
+        match = owner_pattern.fullmatch(active_owner)
+        if match is None:
+            foreign.append(active_owner)
             continue
+        slot = int(match.group(1))
+        if slot in batch_active:
+            raise RuntimeError("parallel training slot has multiple active claims")
+        batch_active[slot] = claim
+    if foreign:
+        raise RuntimeError(
+            "parallel training cannot adopt active claims owned by "
+            + ", ".join(sorted(foreign))
+        )
+    intent_slots: dict[int, tuple[Path, str, str]] = {}
+    for path, token, intent_owner in _phase_intents(secret_root, phase):
+        match = owner_pattern.fullmatch(intent_owner)
+        if match is None:
+            raise RuntimeError(
+                f"parallel training cannot adopt active claims owned by {intent_owner}"
+            )
+        slot = int(match.group(1))
+        if slot in intent_slots:
+            raise RuntimeError("parallel training slot has multiple claim intents")
+        intent_slots[slot] = (path, token, intent_owner)
+    for slot, (intent, token, intent_owner) in sorted(intent_slots.items()):
+        claim = batch_active.get(slot)
+        if claim is None:
+            claim = workflow.resume_unstarted_claim(
+                phase,
+                owner=intent_owner,
+                token=token,
+            )
+            if claim is None:
+                claim = workflow.claim_next(
+                    phase,
+                    owner=intent_owner,
+                    token=token,
+                )
+            if claim is not None:
+                _write_claim(secret_root / f"{claim.job_sha256}.claim.json", claim)
+                batch_active[slot] = claim
+        elif (
+            claim.phase != phase or claim.owner != intent_owner or claim.token != token
+        ):
+            raise RuntimeError("parallel claim intent differs from active claim")
+        intent.unlink()
+        _fsync_directory(secret_root)
+    for _slot, claim in sorted(batch_active.items()):
+        if claim.phase != phase:
+            raise ValueError("parallel training claim belongs to another phase")
+    for slot in range(1, count + 1):
+        if slot in batch_active:
+            continue
+        worker_owner = f"{owner}-{slot}"
         intent = secret_root / f"{phase}.{worker_owner}.intent.json"
         if intent.exists():
             intent_phase, token, intent_owner = _load_claim_intent(intent)
@@ -269,13 +440,9 @@ def _prepare_claims(
             continue
         _write_claim(secret_root / f"{claim.job_sha256}.claim.json", claim)
         intent.unlink()
-        parent_fd = os.open(secret_root, os.O_RDONLY | os.O_DIRECTORY)
-        try:
-            os.fsync(parent_fd)
-        finally:
-            os.close(parent_fd)
-        prepared.append(claim)
-    return tuple(prepared)
+        _fsync_directory(secret_root)
+        batch_active[slot] = claim
+    return tuple(claim for _slot, claim in sorted(batch_active.items()))
 
 
 def run_canonical_training_batch(
@@ -304,6 +471,12 @@ def run_canonical_training_batch(
     workflow = R3BWorkflow(root / "workflow.sqlite3")
     if not _SAFE_OWNER.fullmatch(owner):
         raise ValueError("batch owner is unsafe")
+    _preflight_batch_recovery(
+        root,
+        workflow=workflow,
+        phase=phase,
+        owner=owner,
+    )
     _bind_cpu_wave_identity(
         root,
         phase=phase,
@@ -345,15 +518,16 @@ def run_canonical_training_batch(
     ]
     if failed:
         raise RuntimeError(f"training CPU wave contains failed jobs: {failed}")
-    claims = tuple(
+    unfinished = tuple(
         claim
         for claim in wave_claims
         if records[claim.job_sha256]["status"] != "completed"
     )
+    claims = unfinished[: cpu_plan.parallel_jobs]
     jobs = len(claims)
     if jobs <= 0:
         _clear_cpu_wave(root, phase)
-        return CanonicalBatchResult(cpu_plan, (), ())
+        return CanonicalBatchResult(cpu_plan, (), (), True, 0)
 
     context = multiprocessing.get_context("spawn")
     ready_gate = context.Event()
@@ -418,10 +592,17 @@ def run_canonical_training_batch(
         )
         for result in training
     )
-    if not all(
-        workflow.job_record(claim.job_sha256)["status"] == "completed"
-        for claim in wave_claims
-    ):
-        raise RuntimeError("training CPU wave did not complete every job")
-    _clear_cpu_wave(root, phase)
-    return CanonicalBatchResult(cpu_plan, training, evaluation)
+    final_statuses = tuple(
+        workflow.job_record(claim.job_sha256)["status"] for claim in wave_claims
+    )
+    remaining_jobs = sum(status != "completed" for status in final_statuses)
+    wave_complete = remaining_jobs == 0
+    if wave_complete:
+        _clear_cpu_wave(root, phase)
+    return CanonicalBatchResult(
+        cpu_plan,
+        training,
+        evaluation,
+        wave_complete,
+        remaining_jobs,
+    )

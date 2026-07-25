@@ -866,7 +866,7 @@ def _parser() -> argparse.ArgumentParser:
     canonical_batch.add_argument("--owner", default="canonical-batch")
     canonical_batch.add_argument("--target-cpu-percent", type=int, default=80)
     canonical_batch.add_argument("--reserve-cpus", type=int, default=1)
-    canonical_batch.add_argument("--max-parallel-jobs", type=int, default=4)
+    canonical_batch.add_argument("--max-parallel-jobs", type=int, default=16)
     canonical_batch.set_defaults(handler=_command_experiment_canonical_run_batch)
     baselines = experiment_commands.add_parser(
         "run-baselines",

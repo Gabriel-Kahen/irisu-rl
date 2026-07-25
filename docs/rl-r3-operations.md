@@ -49,15 +49,26 @@ stop on the frozen 50-update grid; sealed test jobs must train and evaluate in
 one uninterrupted command.
 
 The batch defaults to 80% of the process-visible logical CPU capacity, rounded
-to an integer slot count after the tightest finite cgroup-v2 quota and an
-explicit one-CPU reserve. Training children and their exact workers inherit
-that CPU set, so the training wave has a hard scheduling ceiling; evaluation
-runs only after those children exit and retains its frozen topology. The
-resolved plan, owner, and job IDs are stored for the active phase wave and must
-match on resume; the binding is cleared only after every wave job completes.
+to an integer slot count after the tightest finite cgroup-v1/v2 quota and an
+explicit one-CPU reserve. It prefers one logical CPU from every physical core
+before SMT siblings. Every existing training thread is restricted and
+verified before work starts; later threads and exact workers inherit that CPU
+set, so the training wave has a hard scheduling ceiling. Evaluation runs only
+after those children exit and retains its frozen topology. The stable resource
+policy, owner, and job IDs are stored for the active phase wave and must match
+on resume. Ephemeral affinity IDs and quota values are re-resolved, so a
+smaller resumed allocation processes the unfinished wave in bounded subwaves.
+Each result reports `wave_complete` and `remaining_jobs`; the binding is
+cleared only after every wave job completes.
 `--target-cpu-percent`, `--reserve-cpus`, and
 `--max-parallel-jobs` are resource controls, not scientific overrides.
+The default 16-job safety cap scales through typical large workstations; an
+explicit lower cap is reported as unsatisfied when the per-job estimate cannot
+fill the requested CPU target.
 Workload stalls mean the ceiling cannot guarantee an exact utilization.
+If a still-active claim belongs to the single-job operator or another batch
+owner, the batch refuses to create more claims; finish or recover that original
+claim with its owning command first.
 On the profiled 8-core/16-thread host, the checked
 [exact scaling artifact](../benchmarks/results/exact-padded-scaling-ceiling-2026-07-21.json)
 measured one frozen 16-lane job at 6.55 average cores (40.94%). The default plan
