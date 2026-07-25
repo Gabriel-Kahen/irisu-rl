@@ -60,7 +60,7 @@ class R3BOperationalTests(unittest.TestCase):
                 self.config.evaluation_torch_threads,
                 self.config.evaluation_shards,
             ),
-            (16, 16, 16, 16, 9, 1, 1),
+            (16, 16, 16, 16, 9, 1, 2),
         )
         manifest = self.config.manifest()
         self.assertEqual(
@@ -81,6 +81,15 @@ class R3BOperationalTests(unittest.TestCase):
             replace(self.config, evaluation_workers=self.config.evaluation_lanes + 1)
         with self.assertRaisesRegex(ValueError, "invalid"):
             replace(self.config, evaluation_processes=17)
+        with self.assertRaisesRegex(ValueError, "invalid"):
+            replace(
+                self.config,
+                evaluation_lanes=257,
+                evaluation_workers=1,
+                evaluation_processes=1,
+            )
+        with self.assertRaisesRegex(ValueError, "invalid"):
+            replace(self.config, evaluation_torch_threads=29)
 
     def test_progressive_calibration_uses_one_final_job_per_arm_seed(self) -> None:
         jobs = self.workflow.calibration_jobs(self.plan)

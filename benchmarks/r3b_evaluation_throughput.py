@@ -8,7 +8,11 @@ import copy
 import hashlib
 import inspect
 import json
+import os
+import platform
 import resource
+import subprocess
+import sys
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from time import perf_counter, process_time
@@ -20,10 +24,15 @@ from irisu_rl.encoding import TeacherStateEncoder
 from irisu_rl.models import RecurrentActorCritic, RecurrentModelConfig
 from irisu_rl.r3b_evaluation import (
     EvaluationSuite,
+    deployment_policy_identity_for_threads,
     evaluate_recurrent_policy_vectorized,
 )
 from irisu_rl.r3b_snapshots import load_snapshot_bundle
 from irisu_rl.schema import TEACHER_V1
+
+_MAX_REPLICAS = 64
+_MAX_PARALLEL_ENVIRONMENTS = 256
+_MAX_PARALLEL_TORCH_THREADS = 256
 
 
 def _sha256(value: object) -> str:
@@ -31,6 +40,23 @@ def _sha256(value: object) -> str:
         value, sort_keys=True, separators=(",", ":"), allow_nan=False
     ).encode()
     return hashlib.sha256(payload).hexdigest()
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while block := handle.read(1 << 20):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _git_output(root: Path, *arguments: str) -> str:
+    return subprocess.run(
+        ("git", "-C", str(root), *arguments),
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
 
 
 def main() -> int:
@@ -57,10 +83,18 @@ def main() -> int:
         or args.max_ticks <= 0
         or args.torch_threads <= 0
         or args.replicas <= 0
+        or args.replicas > _MAX_REPLICAS
+        or args.replicas * args.lanes > _MAX_PARALLEL_ENVIRONMENTS
+        or args.replicas * args.torch_threads > _MAX_PARALLEL_TORCH_THREADS
     ):
         parser.error("numeric arguments are outside the supported range")
 
     worker = args.worker.resolve(strict=True)
+    repository = Path(__file__).resolve().parents[1]
+    benchmark_script = Path(__file__).resolve(strict=True)
+    evaluation_module = Path(
+        inspect.getfile(evaluate_recurrent_policy_vectorized)
+    ).resolve(strict=True)
     torch.set_num_threads(args.torch_threads)
     torch.manual_seed(20260724)
     with IrisuEnv(physics_backend="exact", worker_path=worker) as loader:
@@ -124,6 +158,13 @@ def main() -> int:
         wait_mask = torch.ones(
             (1, len(model.action_spec.wait_choices)), dtype=torch.bool
         )
+    deployment = deployment_policy_identity_for_threads(
+        model,
+        TeacherStateEncoder(),
+        kind_mask,
+        wait_mask,
+        torch_threads=args.torch_threads,
+    )
     evaluator_sha256 = _sha256({"evaluator": "throughput-v1"})
 
     def evaluate_replica(replica: int):
@@ -183,17 +224,60 @@ def main() -> int:
     print(
         json.dumps(
             {
-                "version": "r3b-evaluation-throughput-result-v1",
-                "evaluation_module": str(
-                    Path(
-                        inspect.getfile(evaluate_recurrent_policy_vectorized)
-                    ).resolve()
+                "version": "r3b-evaluation-throughput-result-v2",
+                "invocation": sys.argv,
+                "source_revision": _git_output(repository, "rev-parse", "HEAD"),
+                "source_dirty": bool(
+                    _git_output(
+                        repository,
+                        "status",
+                        "--porcelain",
+                        "--untracked-files=all",
+                    )
                 ),
+                "dependency_sha256s": {
+                    "pyproject.toml": _file_sha256(repository / "pyproject.toml"),
+                    "uv.lock": _file_sha256(repository / "uv.lock"),
+                },
+                "host": {
+                    "platform": platform.platform(),
+                    "python": sys.version,
+                    "torch": torch.__version__,
+                    "logical_cpus": os.cpu_count(),
+                },
+                "benchmark_script": {
+                    "path": str(benchmark_script),
+                    "sha256": _file_sha256(benchmark_script),
+                },
+                "evaluation_module": {
+                    "path": str(evaluation_module),
+                    "sha256": _file_sha256(evaluation_module),
+                },
+                "bundle": {
+                    "path": str(args.bundle.resolve(strict=True)),
+                    "sha256": bundle.sha256,
+                    "library_sha256": bundle.library.sha256,
+                    "snapshot_store_sha256": bundle.store.sha256,
+                },
+                "exact_worker": {
+                    "path": str(worker),
+                    "sha256": _file_sha256(worker),
+                },
+                "runtime_identity_sha256": bundle.runtime_identity_sha256,
+                "suite_sha256": suite.sha256,
+                "assignment_sha256": assignment_sha256,
+                "evaluator_sha256": evaluator_sha256,
+                "deployment_policy_sha256": deployment.sha256,
+                "execution_identity_sha256s": [
+                    report.execution_identity_sha256 for _, report in results
+                ],
                 "cells_per_replica": len(results[0][1].episodes),
                 "replicas": args.replicas,
+                "replica_concurrency": "threads",
                 "lanes": args.lanes,
                 "workers": args.workers,
                 "max_ticks": args.max_ticks,
+                "torch_threads": args.torch_threads,
                 "policy_source": policy_source,
                 "model_state_sha256": model_state_sha256(model),
                 "wall_seconds": elapsed,

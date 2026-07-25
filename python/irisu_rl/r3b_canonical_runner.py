@@ -87,6 +87,118 @@ def _sha256(value: object) -> str:
     return hashlib.sha256(_canonical_bytes(value)).hexdigest()
 
 
+def canonical_evaluation_identities(
+    inputs: CanonicalRunInputs,
+    suite: EvaluationSuite,
+) -> tuple[str, str]:
+    """Derive the evaluator and worker-topology identities for one suite."""
+
+    if not isinstance(inputs, CanonicalRunInputs) or not isinstance(
+        suite, EvaluationSuite
+    ):
+        raise TypeError("canonical evaluation identities require typed inputs")
+    evaluator_sha256 = _sha256(
+        {
+            "version": "r3b-canonical-evaluator-v4",
+            "workflow_manifest_sha256": inputs.workflow_manifest_sha256,
+            "action_spec_sha256": suite.action_spec_sha256,
+            "algorithm": "recurrent-semantic-work-conserving-cell-independent-v4",
+        }
+    )
+    effective_workers = min(
+        inputs.config.evaluation_lanes,
+        inputs.config.evaluation_workers,
+        inputs.config.evaluation_lanes if suite.backend == "exact" else 8,
+    )
+    worker_identity_sha256 = _sha256(
+        {
+            "version": "r3b-evaluation-worker-topology-v3",
+            "workflow_manifest_sha256": inputs.workflow_manifest_sha256,
+            "evaluator_sha256": evaluator_sha256,
+            "runtime_identity_sha256": suite.runtime_identity_sha256,
+            "lanes": inputs.config.evaluation_lanes,
+            "configured_workers": inputs.config.evaluation_workers,
+            "effective_workers": effective_workers,
+            "processes": inputs.config.evaluation_processes,
+            "torch_threads": inputs.config.evaluation_torch_threads,
+        }
+    )
+    return evaluator_sha256, worker_identity_sha256
+
+
+def canonical_shard_execution_identity(
+    *,
+    suite: EvaluationSuite,
+    shard: EvaluationShardPlan,
+    evaluator_sha256: str,
+    policy_sha256: str,
+    worker_identity_sha256: str,
+) -> str:
+    """Bind one immutable shard execution to its complete trusted topology."""
+
+    return _sha256(
+        {
+            "version": "r3b-evaluation-shard-execution-v1",
+            "suite_sha256": suite.sha256,
+            "shard_plan_sha256": shard.sha256,
+            "evaluator_sha256": evaluator_sha256,
+            "policy_sha256": policy_sha256,
+            "worker_identity_sha256": worker_identity_sha256,
+        }
+    )
+
+
+def verify_canonical_evaluation_report(
+    *,
+    suite: EvaluationSuite,
+    report: EvaluationReport,
+    shard_count: int,
+    evaluator_sha256: str,
+    policy_sha256: str,
+    worker_identity_sha256: str,
+) -> None:
+    """Reconstruct shard provenance and reject a foreign merged report."""
+
+    if (
+        not isinstance(suite, EvaluationSuite)
+        or not isinstance(report, EvaluationReport)
+        or isinstance(shard_count, bool)
+        or not isinstance(shard_count, int)
+        or shard_count <= 0
+    ):
+        raise ValueError("canonical evaluation report inputs are malformed")
+    plans = plan_evaluation_shards(suite, shard_count)
+    episodes = {
+        (episode.snapshot_id, episode.repetition): episode
+        for episode in report.episodes
+    }
+    expected_cells = {cell for shard in plans for cell in shard.cells}
+    if set(episodes) != expected_cells:
+        raise ValueError("canonical evaluation report cells differ")
+    shard_reports = tuple(
+        EvaluationShardReport(
+            shard,
+            EvaluationReport(
+                suite.sha256,
+                policy_sha256,
+                evaluator_sha256,
+                suite.runtime_identity_sha256,
+                canonical_shard_execution_identity(
+                    suite=suite,
+                    shard=shard,
+                    evaluator_sha256=evaluator_sha256,
+                    policy_sha256=policy_sha256,
+                    worker_identity_sha256=worker_identity_sha256,
+                ),
+                tuple(episodes[cell] for cell in shard.cells),
+            ),
+        )
+        for shard in plans
+    )
+    if merge_evaluation_shards(suite, shard_reports) != report:
+        raise ValueError("canonical evaluation report provenance differs")
+
+
 def _resume_verifier_identity(
     *,
     workflow_manifest_sha256: str,
@@ -468,31 +580,8 @@ def evaluate_recurrent_policy_sharded(
         or suite.snapshot_store_sha256 != bundle.store.sha256
     ):
         raise ValueError("evaluation suite is foreign to the canonical bundles")
-    evaluator_sha256 = _sha256(
-        {
-            "version": "r3b-canonical-evaluator-v3",
-            "workflow_manifest_sha256": inputs.workflow_manifest_sha256,
-            "action_spec_sha256": suite.action_spec_sha256,
-            "algorithm": "recurrent-semantic-work-conserving-compacted-vector-v3",
-        }
-    )
-    effective_workers = min(
-        inputs.config.evaluation_lanes,
-        inputs.config.evaluation_workers,
-        inputs.config.evaluation_lanes if suite.backend == "exact" else 8,
-    )
-    worker_identity_sha256 = _sha256(
-        {
-            "version": "r3b-evaluation-worker-topology-v3",
-            "workflow_manifest_sha256": inputs.workflow_manifest_sha256,
-            "evaluator_sha256": evaluator_sha256,
-            "runtime_identity_sha256": suite.runtime_identity_sha256,
-            "lanes": inputs.config.evaluation_lanes,
-            "configured_workers": inputs.config.evaluation_workers,
-            "effective_workers": effective_workers,
-            "processes": inputs.config.evaluation_processes,
-            "torch_threads": inputs.config.evaluation_torch_threads,
-        }
+    evaluator_sha256, worker_identity_sha256 = canonical_evaluation_identities(
+        inputs, suite
     )
     deployment_identity = DeploymentPolicyIdentity.from_components(
         model, encoder, kind_mask, wait_mask
@@ -503,15 +592,12 @@ def evaluate_recurrent_policy_sharded(
     index = ArtifactLookupIndex(artifact_store.root.parent / "evaluation-index.sqlite3")
     reports: list[EvaluationShardReport] = []
     for shard in plans:
-        execution_identity_sha256 = _sha256(
-            {
-                "version": "r3b-evaluation-shard-execution-v1",
-                "suite_sha256": suite.sha256,
-                "shard_plan_sha256": shard.sha256,
-                "evaluator_sha256": evaluator_sha256,
-                "policy_sha256": policy_sha256,
-                "worker_identity_sha256": worker_identity_sha256,
-            }
+        execution_identity_sha256 = canonical_shard_execution_identity(
+            suite=suite,
+            shard=shard,
+            evaluator_sha256=evaluator_sha256,
+            policy_sha256=policy_sha256,
+            worker_identity_sha256=worker_identity_sha256,
         )
         lookup_key = _sha256(
             {

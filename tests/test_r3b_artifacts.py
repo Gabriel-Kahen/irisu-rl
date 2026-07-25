@@ -4,7 +4,9 @@ import json
 import os
 import stat
 import tempfile
+import threading
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest import mock
 
@@ -25,6 +27,27 @@ from irisu_rl.r3b_experiments import (
     ExactResumeArtifact,
     _verified_exact_resume_artifact,
 )
+
+
+class _InsertBarrierConnection:
+    def __init__(self, connection: object, barrier: threading.Barrier) -> None:
+        self.connection = connection
+        self.barrier = barrier
+
+    def execute(self, sql: str, parameters: object = ()):
+        if sql.startswith("INSERT INTO lookup"):
+            self.barrier.wait(timeout=5)
+        return self.connection.execute(sql, parameters)
+
+    def __enter__(self):
+        self.connection.__enter__()
+        return self
+
+    def __exit__(self, *exc_info: object):
+        return self.connection.__exit__(*exc_info)
+
+    def close(self) -> None:
+        self.connection.close()
 
 
 class ArtifactStoreTests(unittest.TestCase):
@@ -240,6 +263,36 @@ class ArtifactStoreTests(unittest.TestCase):
             )
         after = len(tuple(descriptors.iterdir()))
         self.assertLessEqual(after, before + 1)
+
+    def test_lookup_index_concurrently_records_identical_content(self) -> None:
+        index = ArtifactLookupIndex(Path(self.temporary.name) / "index.sqlite3")
+        envelope = self.store.publish(kind="test", version="v1", payload={})
+        lookup_key = "7" * 64
+        barrier = threading.Barrier(2)
+        original_connect = index._connect
+
+        def connect() -> _InsertBarrierConnection:
+            return _InsertBarrierConnection(original_connect(), barrier)
+
+        with (
+            mock.patch.object(index, "_connect", side_effect=connect),
+            ThreadPoolExecutor(max_workers=2) as executor,
+        ):
+            futures = tuple(
+                executor.submit(index.record, lookup_key, envelope) for _ in range(2)
+            )
+            for future in futures:
+                future.result(timeout=10)
+
+        self.assertEqual(
+            index.lookup(
+                lookup_key,
+                self.store,
+                expected_kind="test",
+                expected_version="v1",
+            ),
+            envelope,
+        )
 
     def test_private_directory_rejects_links_and_unsafe_metadata(self) -> None:
         private = Path(self.temporary.name) / "private"

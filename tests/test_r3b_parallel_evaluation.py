@@ -1,16 +1,27 @@
 from __future__ import annotations
 
 import hashlib
+import multiprocessing
+import os
 import pickle
+import signal
+import subprocess
+import tempfile
+import time
 import unittest
-from concurrent.futures import Future
+from concurrent.futures import Future, ProcessPoolExecutor
 from dataclasses import replace
+from pathlib import Path
 
 import torch
 from irisu_rl.collector import model_state_sha256
 from irisu_rl.encoding import TeacherStateEncoder
 from irisu_rl.models import RecurrentActorCritic, RecurrentModelConfig
-from irisu_rl.r3b_canonical_runner import PairedEvaluationSuites
+from irisu_rl.r3b_canonical_runner import (
+    PairedEvaluationSuites,
+    canonical_evaluation_identities,
+    canonical_shard_execution_identity,
+)
 from irisu_rl.r3b_evaluation import (
     EpisodeMetrics,
     EvaluationReport,
@@ -22,7 +33,17 @@ from irisu_rl.r3b_parallel_evaluation import (
     _model_from_task,
     serialize_evaluation_model,
 )
-from irisu_rl.r3b_supervisor import _collect_evaluation_results
+from irisu_rl.r3b_evaluation_shards import (
+    EvaluationShardReport,
+    merge_evaluation_shards,
+    plan_evaluation_shards,
+)
+from irisu_rl.r3b_supervisor import (
+    _collect_evaluation_results,
+    _evaluation_worker_initializer,
+    _stop_evaluation_executor,
+)
+from irisu_rl.r3b_lock import R3BRunLock, evaluator_lease_path
 from irisu_rl.schema import TEACHER_V1
 
 from tests.test_r3b_canonical_runner import _inputs
@@ -30,6 +51,12 @@ from tests.test_r3b_canonical_runner import _inputs
 
 def _hash(character: str) -> str:
     return character * 64
+
+
+def _spawn_blocking_descendant(path: str) -> None:
+    child = subprocess.Popen(["sleep", "60"])
+    Path(path).write_text(f"{os.getpid()} {child.pid}\n", encoding="utf-8")
+    child.wait()
 
 
 def _task_fixture() -> tuple[
@@ -69,6 +96,9 @@ def _task_fixture() -> tuple[
         purpose="curve",
     ).exact
     transport = serialize_evaluation_model(model)
+    evaluator_sha256, worker_identity_sha256 = canonical_evaluation_identities(
+        inputs, suite
+    )
     task = CanonicalEvaluationTask(
         run_directory="/tmp/r3-canonical-run",
         exact_worker_path="/tmp/irisu-exact-worker",
@@ -86,6 +116,9 @@ def _task_fixture() -> tuple[
         suite_sha256=suite.sha256,
         model_sha256=model_state_sha256(model),
         deployment_policy_sha256=deployment.sha256,
+        evaluator_sha256=evaluator_sha256,
+        worker_identity_sha256=worker_identity_sha256,
+        evaluation_shards=inputs.config.evaluation_shards,
         model_transport_sha256=hashlib.sha256(transport).hexdigest(),
         model_transport=transport,
     )
@@ -152,14 +185,31 @@ class R3BParallelEvaluationTests(unittest.TestCase):
             )
             for snapshot_id in suite.snapshot_ids
         )
-        report = EvaluationReport(
-            suite.sha256,
-            task.deployment_policy_sha256,
-            _hash("c"),
-            suite.runtime_identity_sha256,
-            _hash("d"),
-            episodes,
+        shards = tuple(
+            EvaluationShardReport(
+                shard,
+                EvaluationReport(
+                    suite.sha256,
+                    task.deployment_policy_sha256,
+                    task.evaluator_sha256,
+                    suite.runtime_identity_sha256,
+                    canonical_shard_execution_identity(
+                        suite=suite,
+                        shard=shard,
+                        evaluator_sha256=task.evaluator_sha256,
+                        policy_sha256=task.deployment_policy_sha256,
+                        worker_identity_sha256=task.worker_identity_sha256,
+                    ),
+                    tuple(
+                        episode
+                        for episode in episodes
+                        if (episode.snapshot_id, episode.repetition) in shard.cells
+                    ),
+                ),
+            )
+            for shard in plan_evaluation_shards(suite, task.evaluation_shards)
         )
+        report = merge_evaluation_shards(suite, shards)
         result = CanonicalEvaluationTaskResult(
             task.sha256,
             task.suite_sha256,
@@ -171,6 +221,18 @@ class R3BParallelEvaluationTests(unittest.TestCase):
             result.report_for(replace(task, job_sha256=_hash("e")), suite)
         with self.assertRaisesRegex(ValueError, "another task"):
             replace(result, policy_sha256=_hash("f")).report_for(task, suite)
+        with self.assertRaisesRegex(ValueError, "identity differs"):
+            replace(
+                result,
+                report_manifest=replace(report, evaluator_sha256=_hash("c")).manifest(),
+            ).report_for(task, suite)
+        with self.assertRaisesRegex(ValueError, "provenance differs"):
+            replace(
+                result,
+                report_manifest=replace(
+                    report, execution_identity_sha256=_hash("d")
+                ).manifest(),
+            ).report_for(task, suite)
 
     def test_parent_collection_is_complete_and_fail_closed(self) -> None:
         task, _suite, _model = _task_fixture()
@@ -189,13 +251,51 @@ class R3BParallelEvaluationTests(unittest.TestCase):
 
         failed: Future[CanonicalEvaluationTaskResult] = Future()
         failed.set_exception(ValueError("worker failed"))
-        with self.assertRaisesRegex(RuntimeError, task.sha256):
+        with self.assertRaisesRegex(
+            RuntimeError, f"{task.sha256}.*ValueError: worker failed"
+        ):
             _collect_evaluation_results({failed: task})
 
         duplicate: Future[CanonicalEvaluationTaskResult] = Future()
         duplicate.set_result(result)
         with self.assertRaisesRegex(ValueError, "identity differs"):
             _collect_evaluation_results({completed: task, duplicate: task})
+
+    @unittest.skipUnless(os.name == "posix", "process-group cleanup is POSIX-only")
+    def test_failed_executor_bounds_descendant_cleanup(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "pids"
+            executor = ProcessPoolExecutor(
+                max_workers=1,
+                mp_context=multiprocessing.get_context("spawn"),
+                initializer=_evaluation_worker_initializer,
+                initargs=(os.getpid(), str(evaluator_lease_path(directory))),
+            )
+            executor.submit(_spawn_blocking_descendant, str(path))
+            deadline = time.monotonic() + 10
+            while not path.is_file() and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertTrue(path.is_file())
+            pids = tuple(int(value) for value in path.read_text().split())
+            try:
+                with self.assertRaisesRegex(RuntimeError, "another process"):
+                    with R3BRunLock(directory, global_directory=directory):
+                        pass
+                started = time.monotonic()
+                _stop_evaluation_executor(executor, timeout_seconds=1)
+                self.assertLess(time.monotonic() - started, 3)
+                deadline = time.monotonic() + 2
+                while time.monotonic() < deadline:
+                    if all(not Path(f"/proc/{pid}").exists() for pid in pids):
+                        break
+                    time.sleep(0.01)
+                self.assertTrue(all(not Path(f"/proc/{pid}").exists() for pid in pids))
+            finally:
+                for pid in pids:
+                    try:
+                        os.kill(pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
 
 
 if __name__ == "__main__":

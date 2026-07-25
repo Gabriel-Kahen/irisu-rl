@@ -5,6 +5,11 @@ from __future__ import annotations
 import hashlib
 import json
 import multiprocessing
+import os
+import signal
+import sys
+import time
+from ctypes import CDLL, get_errno
 from concurrent.futures import Future, ProcessPoolExecutor, as_completed
 from contextlib import ExitStack
 from dataclasses import dataclass
@@ -22,6 +27,7 @@ from .r3b_canonical_runner import (
     PairedEvaluationSuites,
     assemble_and_publish_outcome,
     audit_penultimate_checkpoint,
+    canonical_evaluation_identities,
     complete_nonsealed_workflow_job,
     complete_sealed_workflow_job,
 )
@@ -42,6 +48,7 @@ from .r3b_local_runner import (
     _load_claim,
     _read_resolved_run,
 )
+from .r3b_lock import evaluator_lease_path, hold_evaluator_lease
 from .r3b_operational import JobClaim, R3BWorkflow
 from .r3b_parallel_evaluation import (
     CanonicalEvaluationTask,
@@ -52,6 +59,78 @@ from .r3b_parallel_evaluation import (
 
 _CHECKPOINT_KIND = "irisu.r3b.training-checkpoint"
 _CHECKPOINT_VERSION = "r3b-training-checkpoint-package-v2"
+_EVALUATION_SHUTDOWN_SECONDS = 5.0
+_PR_SET_PDEATHSIG = 1
+_EVALUATION_LEASE_DESCRIPTOR: int | None = None
+
+
+def _terminate_evaluation_process_group(_signum: int, _frame: object | None) -> None:
+    signal.signal(signal.SIGTERM, signal.SIG_DFL)
+    os.killpg(os.getpgrp(), signal.SIGTERM)
+
+
+def _evaluation_worker_initializer(parent_pid: int, lease_path: str) -> None:
+    """Make evaluator descendants die as one group when their owner disappears."""
+
+    global _EVALUATION_LEASE_DESCRIPTOR
+    if sys.platform != "linux" or parent_pid <= 1:
+        raise RuntimeError("canonical evaluator isolation requires Linux")
+    os.setsid()
+    signal.signal(signal.SIGTERM, _terminate_evaluation_process_group)
+    libc = CDLL(None, use_errno=True)
+    if libc.prctl(_PR_SET_PDEATHSIG, signal.SIGTERM, 0, 0, 0) != 0:
+        error = get_errno()
+        raise OSError(error, os.strerror(error))
+    if os.getppid() != parent_pid:
+        _terminate_evaluation_process_group(signal.SIGTERM, None)
+    _EVALUATION_LEASE_DESCRIPTOR = hold_evaluator_lease(lease_path)
+
+
+def _evaluation_processes(executor: ProcessPoolExecutor) -> tuple[Any, ...]:
+    processes = getattr(executor, "_processes", None)
+    return tuple(processes.values()) if isinstance(processes, dict) else ()
+
+
+def _signal_evaluation_process(process: Any, sig: signal.Signals) -> None:
+    pid = getattr(process, "pid", None)
+    if not isinstance(pid, int) or pid <= 0:
+        return
+    try:
+        if os.name == "posix" and os.getpgid(pid) == pid:
+            os.killpg(pid, sig)
+        elif sig == signal.SIGTERM:
+            process.terminate()
+        else:
+            process.kill()
+    except (ProcessLookupError, ValueError):
+        pass
+
+
+def _stop_evaluation_executor(
+    executor: ProcessPoolExecutor,
+    *,
+    timeout_seconds: float = _EVALUATION_SHUTDOWN_SECONDS,
+) -> None:
+    """Cancel queued work and bound teardown of evaluators and descendants."""
+
+    processes = _evaluation_processes(executor)
+    if not processes:
+        executor.shutdown(wait=False, cancel_futures=True)
+        return
+    executor.shutdown(wait=False, cancel_futures=True)
+    for process in processes:
+        _signal_evaluation_process(process, signal.SIGTERM)
+    deadline = time.monotonic() + timeout_seconds
+    for process in processes:
+        process.join(max(0.0, deadline - time.monotonic()))
+    survivors = tuple(process for process in processes if process.is_alive())
+    for process in survivors:
+        _signal_evaluation_process(process, signal.SIGKILL)
+    deadline = time.monotonic() + timeout_seconds
+    for process in survivors:
+        process.join(max(0.0, deadline - time.monotonic()))
+    if any(process.is_alive() for process in survivors):
+        raise RuntimeError("isolated canonical evaluator cleanup did not finish")
 
 
 def _deployment(
@@ -61,9 +140,7 @@ def _deployment(
     kind_mask = torch.ones((1, 3), dtype=torch.bool)
     wait_mask = torch.ones((1, len(model.action_spec.wait_choices)), dtype=torch.bool)
     identity = (
-        DeploymentPolicyIdentity.from_components(
-            model, encoder, kind_mask, wait_mask
-        )
+        DeploymentPolicyIdentity.from_components(model, encoder, kind_mask, wait_mask)
         if torch_threads is None
         else deployment_policy_identity_for_threads(
             model,
@@ -280,6 +357,9 @@ def _evaluation_task(
         if model_transport is None
         else model_transport
     )
+    evaluator_sha256, worker_identity_sha256 = canonical_evaluation_identities(
+        inputs, suite
+    )
     return CanonicalEvaluationTask(
         run_directory=str(inputs.root),
         exact_worker_path=str(worker),
@@ -297,6 +377,9 @@ def _evaluation_task(
         suite_sha256=suite.sha256,
         model_sha256=checkpoint.model_sha256,
         deployment_policy_sha256=checkpoint.deployment_policy_sha256,
+        evaluator_sha256=evaluator_sha256,
+        worker_identity_sha256=worker_identity_sha256,
+        evaluation_shards=inputs.config.evaluation_shards,
         model_transport_sha256=hashlib.sha256(transport).hexdigest(),
         model_transport=transport,
     )
@@ -316,7 +399,8 @@ def _collect_evaluation_results(
             raise RuntimeError(
                 "isolated canonical evaluation task "
                 f"{task.sha256} ({task.purpose}/{task.backend}, "
-                f"update {task.completed_updates}) failed"
+                f"update {task.completed_updates}) failed: "
+                f"{type(exc).__name__}: {exc}"
             ) from exc
         if isinstance(result, CanonicalEvaluationTaskResult):
             result.__post_init__()
@@ -554,6 +638,8 @@ def evaluate_trained_canonical_job(
         executor = ProcessPoolExecutor(
             max_workers=min(config.evaluation_processes, len(evaluation_tasks)),
             mp_context=multiprocessing.get_context("spawn"),
+            initializer=_evaluation_worker_initializer,
+            initargs=(os.getpid(), str(evaluator_lease_path())),
         )
         futures: dict[
             Future[CanonicalEvaluationTaskResult], CanonicalEvaluationTask
@@ -613,7 +699,9 @@ def evaluate_trained_canonical_job(
             if failed:
                 for future in futures:
                     future.cancel()
-            executor.shutdown(wait=True, cancel_futures=failed)
+                _stop_evaluation_executor(executor)
+            else:
+                executor.shutdown(wait=True)
 
         checkpoint_evaluations = tuple(
             CheckpointEvaluation(

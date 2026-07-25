@@ -36,10 +36,12 @@ without introducing a post-hoc elimination rule.
 
 The operator command `canonical-run-job` owns one job from claim through
 training, exact-resume audit, exact/portable evaluation, artifact publication,
-and workflow completion. A private no-follow process lock prevents two local
-operators from restoring or evaluating the same job concurrently. Canonical
-training may only stop on the frozen 50-update grid; sealed test jobs must train
-and evaluate in one uninterrupted command.
+and workflow completion. A host-wide no-follow process lock admits only one
+local R3 operator, while a per-run lock protects the selected workflow.
+Evaluator children retain a shared host lease, so recovery is rejected until
+children from an interrupted operator have exited. Canonical training may only
+stop on the frozen 50-update grid; sealed test jobs must train and evaluate in
+one uninterrupted command.
 
 Calibration and validation may recover only from the last identity-bound
 checkpoint. A stale worker token immediately loses authority. Test jobs use the
@@ -123,13 +125,19 @@ in parallel with the report queue. Children may publish only immutable shard
 packages. They cannot advance workflow state, and the parent completes the job
 only after every typed result returns and revalidates in canonical order.
 Failure cancels pending work and leaves the job trained and retryable; already
-published immutable shards remain reusable.
+published immutable shards remain reusable. Evaluators and their exact-worker
+descendants run in isolated process groups and are terminated within a bounded
+cleanup window after a child failure or operator interruption.
 
-The inference algorithm, process count, per-report lane/worker count, and
-PyTorch thread count are source-, config-, evaluator-, and worker-identity
-bound. They must also be shared by the actual-game policy runner. Episode
-ordering, seeds, action masks, horizons, raw-score accounting, and per-cell
-reports remain unchanged.
+Each active evaluation cell uses batch-1 actor inference and compacts only its
+own masked body tail. That makes its action independent of the survival,
+refill, and body occupancy of every other vector lane, and reproduces the
+numerical shape intended for the live-game runner. The inference algorithm and
+PyTorch thread count are deployment-policy-identity bound and must be shared by
+that runner. Evaluation process, lane, and worker counts remain bound to the
+canonical execution evidence, but they are orchestration details and do not
+need to be reproduced live. Episode ordering, seeds, action masks, horizons,
+raw-score accounting, and per-cell reports remain unchanged.
 
 A durable lookup index maps each frozen suite/policy/worker/shard key to its
 immutable artifact. The index is only an accelerator: retrieved artifacts are
@@ -143,25 +151,22 @@ and portable diagnostics use the complete phase suite: 64 calibration cells
 and 512 validation/test cells. Curve and final suite identities are stored
 separately and cannot be substituted.
 
-On the local Ryzen 7 3700X reference host, a representative 64-cell,
-2,048-tick learned-policy exact replay improved from 89.29 simulated ticks/s
-on the prior evaluator to 170.05 ticks/s after work-conserving scheduling,
-active-lane inference, and safe body-tail compaction (1.90x), with identical
-episode content. At the 512-tick saturation workload, nine isolated
-one-thread evaluators sustained about 1,461 aggregate simulated ticks/s and
-used about 11 CPU cores. All nine produced the same episode-content SHA-256.
-Eight processes were about 2.7% slower in aggregate and would also force a
-ninth canonical report into a second scheduling wave. These are engineering
-measurements, not R3 acceptance results.
+Exploratory exact-worker probes established the nine-process topology and
+checked identical episode content across replicas. The benchmark command now
+records its invocation, script and evaluator hashes, snapshot-bundle and
+runtime identities, suite, policy, execution identities, and complete
+topology. Exploratory probe timings are not retained as acceptance evidence;
+the checked end-to-end comparison below is the durable engineering result.
 
 The frozen protocol comprises 66,800 optimizer updates and 116,864 bounded
 logical episode cells: 82,816 exact and 34,048 portable. Artifact-cache reuse
-can make the number of physical executions slightly lower. On clean source
-revision `fc1ee1b`, two fresh, verified canonical calibration jobs completed
-end to end in 623.638 and 1,231.372 seconds. That includes training, checkpoint
-restoration, all nine reports, portable parity, the exact resume audit,
-publication, and workflow completion. Their 15-minute-28-second mean projects
-36 jobs to about 9.3 hours. Use a 9-12 hour planning window until more arms
+can make the number of physical executions slightly lower. The
+[checked matched-job comparison](../benchmarks/results/r3b-evaluation-throughput-2026-07-24.json)
+records two fresh, verified canonical calibration jobs on clean source revision
+`fc1ee1b`. Measured from workflow start through durable completion, the matched
+jobs improved from 1,826.288 to 581.585 seconds (3.14x) and from 8,409.433 to
+1,189.215 seconds (7.07x). Their 14-minute-45-second optimized mean projects 36
+jobs to about 8.9 hours. Use a 9-12 hour planning window until more arms
 establish the survival-length distribution. This is not a deadline or an
 acceptance result: policy survival length, portable work, checkpoint
 restoration, persistence, and resume-audit cost vary by job. Rerun the

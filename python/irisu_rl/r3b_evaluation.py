@@ -1594,71 +1594,88 @@ class RecurrentSemanticPolicy:
         wait_lanes = kind_mask[:, int(SemanticActionKind.WAIT)]
         if bool(torch.any(wait_lanes & ~wait_mask.any(dim=1))):
             raise ValueError("WAIT is enabled without a legal wait duration")
-        global_features = (
-            torch.from_numpy(observation.global_features).to(self.device).unsqueeze(0)
-        )
-        active_body_features, active_body_mask = _trim_trailing_masked_bodies(
-            observation.body_features,
-            observation.body_mask,
-        )
-        body_features = (
-            torch.from_numpy(active_body_features).to(self.device).unsqueeze(0)
-        )
-        body_mask = torch.from_numpy(active_body_mask).to(self.device).unsqueeze(0)
-        arguments: dict[str, Tensor] = {}
-        if self.model.config.critic_condition_features:
-            arguments["critic_condition"] = torch.zeros(
-                (1, batch_size, self.model.config.critic_condition_features),
-                dtype=torch.float32,
-                device=self.device,
-            )
         prior_mode = self.model.training
+        state = self._state.clone()
+        actions: list[SemanticAction] = []
         self.model.eval()
         try:
             with torch.inference_mode():
-                output = self.model(
-                    global_features,
-                    body_features,
-                    body_mask,
-                    self._state.index_select(1, indices),
-                    reset_before=self._reset_before.index_select(0, indices).unsqueeze(
-                        0
-                    ),
-                    **arguments,
-                )
+                for offset, lane in enumerate(selected):
+                    global_features = (
+                        torch.from_numpy(
+                            observation.global_features[offset : offset + 1]
+                        )
+                        .to(self.device)
+                        .unsqueeze(0)
+                    )
+                    active_body_features, active_body_mask = (
+                        _trim_trailing_masked_bodies(
+                            observation.body_features[offset : offset + 1],
+                            observation.body_mask[offset : offset + 1],
+                        )
+                    )
+                    body_features = (
+                        torch.from_numpy(active_body_features)
+                        .to(self.device)
+                        .unsqueeze(0)
+                    )
+                    body_mask = (
+                        torch.from_numpy(active_body_mask).to(self.device).unsqueeze(0)
+                    )
+                    arguments: dict[str, Tensor] = {}
+                    if self.model.config.critic_condition_features:
+                        arguments["critic_condition"] = torch.zeros(
+                            (
+                                1,
+                                1,
+                                self.model.config.critic_condition_features,
+                            ),
+                            dtype=torch.float32,
+                            device=self.device,
+                        )
+                    output = self.model(
+                        global_features,
+                        body_features,
+                        body_mask,
+                        self._state[:, lane : lane + 1],
+                        reset_before=self._reset_before[lane : lane + 1].unsqueeze(0),
+                        **arguments,
+                    )
+                    kind_value = int(
+                        output.kind_logits[0, 0]
+                        .masked_fill(
+                            ~kind_mask[offset].to(self.device),
+                            -torch.inf,
+                        )
+                        .argmax(-1)
+                    )
+                    wait_value = int(
+                        output.wait_logits[0, 0]
+                        .masked_fill(
+                            ~wait_mask[offset].to(self.device),
+                            -torch.inf,
+                        )
+                        .argmax(-1)
+                    )
+                    coordinate_mean = output.coordinate_alpha[0, 0] / (
+                        output.coordinate_alpha[0, 0] + output.coordinate_beta[0, 0]
+                    )
+                    xy = (
+                        coordinate_mean[kind_value - 1]
+                        if kind_value > 0
+                        else torch.zeros(2, device=self.device)
+                    )
+                    actions.append(
+                        self.model.action_spec.decode(
+                            kind_value,
+                            wait_value,
+                            float(xy[0]),
+                            float(xy[1]),
+                        )
+                    )
+                    state[:, lane : lane + 1] = output.recurrent_state.detach()
         finally:
             self.model.train(prior_mode)
-        kind = (
-            output.kind_logits[0]
-            .masked_fill(~kind_mask.to(self.device), -torch.inf)
-            .argmax(-1)
-        )
-        wait = (
-            output.wait_logits[0]
-            .masked_fill(~wait_mask.to(self.device), -torch.inf)
-            .argmax(-1)
-        )
-        coordinate_mean = output.coordinate_alpha[0] / (
-            output.coordinate_alpha[0] + output.coordinate_beta[0]
-        )
-        actions = []
-        for lane in range(batch_size):
-            kind_value = int(kind[lane])
-            xy = (
-                coordinate_mean[lane, kind_value - 1]
-                if kind_value > 0
-                else torch.zeros(2, device=self.device)
-            )
-            actions.append(
-                self.model.action_spec.decode(
-                    kind_value,
-                    int(wait[lane]),
-                    float(xy[0]),
-                    float(xy[1]),
-                )
-            )
-        state = self._state.clone()
-        state.index_copy_(1, indices, output.recurrent_state.detach())
         reset_before = self._reset_before.clone()
         reset_before[indices] = False
         self._state = state

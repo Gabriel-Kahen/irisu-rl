@@ -28,7 +28,7 @@ CANONICAL_PLAN_SHA256 = (
     "68860ef26686c954960c176afe67a44da34e2ffab03dd02ba5aa7c1fc193baf8"
 )
 CANONICAL_OPERATIONAL_CONFIG_SHA256 = (
-    "76f56fe6b6cbeb9ab5796aabaf92d76fab969ca24abed20fca0953cf39c86a15"
+    "002a3f0deb1119b47aa55114f733c17322ec9aeaa1a5e13847ab834895a5577e"
 )
 CANONICAL_EXACT_SNAPSHOT_BUNDLE_SHA256 = (
     "2371129c883ade88b309e509c2d8a7399a85944dc5dd7e841fc14d977527eb7a"
@@ -187,7 +187,8 @@ class R3BOperationalConfig:
             or self.workers > self.lanes
             or self.evaluation_workers > self.evaluation_lanes
             or self.evaluation_processes > 64
-            or self.evaluation_processes * self.evaluation_workers > 256
+            or self.evaluation_processes * self.evaluation_lanes > 256
+            or self.evaluation_processes * self.evaluation_torch_threads > 256
             or self.lanes % self.ppo_lane_minibatch_size
             or self.curve_snapshots
             > min(

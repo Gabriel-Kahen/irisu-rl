@@ -20,7 +20,9 @@ from .r3b_artifacts import ArtifactStore
 from .r3b_canonical_runner import (
     CanonicalRunInputs,
     PairedEvaluationSuites,
+    canonical_evaluation_identities,
     evaluate_recurrent_policy_sharded,
+    verify_canonical_evaluation_report,
 )
 from .r3b_evaluation import (
     EvaluationReport,
@@ -72,9 +74,12 @@ class CanonicalEvaluationTask:
     suite_sha256: str
     model_sha256: str
     deployment_policy_sha256: str
+    evaluator_sha256: str
+    worker_identity_sha256: str
+    evaluation_shards: int
     model_transport_sha256: str
     model_transport: bytes = field(repr=False, compare=False)
-    version: str = "r3b-canonical-evaluation-task-v1"
+    version: str = "r3b-canonical-evaluation-task-v2"
 
     def __post_init__(self) -> None:
         paths = (
@@ -90,10 +95,12 @@ class CanonicalEvaluationTask:
             self.suite_sha256,
             self.model_sha256,
             self.deployment_policy_sha256,
+            self.evaluator_sha256,
+            self.worker_identity_sha256,
             self.model_transport_sha256,
         )
         if (
-            self.version != "r3b-canonical-evaluation-task-v1"
+            self.version != "r3b-canonical-evaluation-task-v2"
             or self.phase not in {"calibration", "validation", "test"}
             or self.purpose not in {"curve", "final"}
             or self.backend not in {"exact", "portable"}
@@ -105,6 +112,9 @@ class CanonicalEvaluationTask:
             or isinstance(self.completed_updates, bool)
             or not isinstance(self.completed_updates, int)
             or self.completed_updates < 0
+            or isinstance(self.evaluation_shards, bool)
+            or not isinstance(self.evaluation_shards, int)
+            or self.evaluation_shards <= 0
             or any(not _is_nonzero_sha256(value) for value in hashes)
             or (
                 self.authorization_sha256 is not None
@@ -137,6 +147,9 @@ class CanonicalEvaluationTask:
             "suite_sha256": self.suite_sha256,
             "model_sha256": self.model_sha256,
             "deployment_policy_sha256": self.deployment_policy_sha256,
+            "evaluator_sha256": self.evaluator_sha256,
+            "worker_identity_sha256": self.worker_identity_sha256,
+            "evaluation_shards": self.evaluation_shards,
             "model_transport_sha256": self.model_transport_sha256,
         }
 
@@ -153,11 +166,11 @@ class CanonicalEvaluationTaskResult:
     suite_sha256: str
     policy_sha256: str
     report_manifest: dict[str, object]
-    version: str = "r3b-canonical-evaluation-task-result-v1"
+    version: str = "r3b-canonical-evaluation-task-result-v2"
 
     def __post_init__(self) -> None:
         if (
-            self.version != "r3b-canonical-evaluation-task-result-v1"
+            self.version != "r3b-canonical-evaluation-task-result-v2"
             or not _is_nonzero_sha256(self.task_sha256)
             or not _is_nonzero_sha256(self.suite_sha256)
             or not _is_nonzero_sha256(self.policy_sha256)
@@ -181,8 +194,18 @@ class CanonicalEvaluationTaskResult:
         if (
             report.suite_sha256 != task.suite_sha256
             or report.policy_sha256 != task.deployment_policy_sha256
+            or report.evaluator_sha256 != task.evaluator_sha256
+            or report.backend_identity_sha256 != suite.runtime_identity_sha256
         ):
             raise ValueError("canonical evaluation report identity differs")
+        verify_canonical_evaluation_report(
+            suite=suite,
+            report=report,
+            shard_count=task.evaluation_shards,
+            evaluator_sha256=task.evaluator_sha256,
+            policy_sha256=task.deployment_policy_sha256,
+            worker_identity_sha256=task.worker_identity_sha256,
+        )
         return report
 
 
@@ -325,10 +348,7 @@ def evaluate_canonical_task(
         or job.authorization_sha256 != task.authorization_sha256
         or task.completed_updates > job.budget_updates
         or task.completed_updates % inputs.plan.checkpoint_interval_updates
-        or (
-            task.purpose == "final"
-            and task.completed_updates != job.budget_updates
-        )
+        or (task.purpose == "final" and task.completed_updates != job.budget_updates)
     ):
         raise ValueError("canonical evaluation task job identity differs")
     suites = PairedEvaluationSuites.build(
@@ -341,6 +361,15 @@ def evaluate_canonical_task(
     suite = suites.exact if task.backend == "exact" else suites.portable
     if suite.sha256 != task.suite_sha256:
         raise ValueError("canonical evaluation task suite identity differs")
+    evaluator_sha256, worker_identity_sha256 = canonical_evaluation_identities(
+        inputs, suite
+    )
+    if (
+        evaluator_sha256 != task.evaluator_sha256
+        or worker_identity_sha256 != task.worker_identity_sha256
+        or inputs.config.evaluation_shards != task.evaluation_shards
+    ):
+        raise ValueError("canonical evaluation task evaluator identity differs")
     torch.set_num_threads(inputs.config.evaluation_torch_threads)
     model, encoder, kind_mask, wait_mask = _model_from_task(task, inputs)
     vector_arguments: dict[str, object] = {
@@ -377,6 +406,14 @@ def evaluate_canonical_task(
         or report.policy_sha256 != task.deployment_policy_sha256
     ):
         raise ValueError("isolated canonical evaluation produced a foreign report")
+    verify_canonical_evaluation_report(
+        suite=suite,
+        report=report,
+        shard_count=task.evaluation_shards,
+        evaluator_sha256=task.evaluator_sha256,
+        policy_sha256=task.deployment_policy_sha256,
+        worker_identity_sha256=task.worker_identity_sha256,
+    )
     return CanonicalEvaluationTaskResult(
         task.sha256,
         task.suite_sha256,
