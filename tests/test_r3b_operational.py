@@ -61,7 +61,7 @@ class R3BOperationalTests(unittest.TestCase):
                 self.config.evaluation_torch_threads,
                 self.config.evaluation_shards,
             ),
-            (16, 16, 16, 16, 9, 1, 1),
+            (16, 16, 16, 16, 9, 1, 2),
         )
         manifest = self.config.manifest()
         self.assertEqual(
@@ -114,6 +114,7 @@ class R3BOperationalTests(unittest.TestCase):
             PREREGISTERED_CANONICAL_OPERATIONAL_CONFIG_SHA256S,
             {
                 CANONICAL_OPERATIONAL_CONFIG_SHA256,
+                "76f56fe6b6cbeb9ab5796aabaf92d76fab969ca24abed20fca0953cf39c86a15",
                 "b59828dfcf0bf933ba940ad8f219765784e8328cde8a5ca39b09411d2a4d275c",
             },
         )
