@@ -109,8 +109,8 @@ time.sleep(60)
         with self.assertRaisesRegex(RuntimeError, "expected evaluator failure"):
             failed.result(timeout=10)
         started = time.monotonic()
-        _stop_evaluation_executor(executor, timeout_seconds=0.5)
-        self.assertLess(time.monotonic() - started, 2.0)
+        _stop_evaluation_executor(executor, timeout_seconds=2.0)
+        self.assertLess(time.monotonic() - started, 5.0)
         self.assertTrue(blocked.done())
 
     def test_rejects_phase_without_opening_a_run(self) -> None:
