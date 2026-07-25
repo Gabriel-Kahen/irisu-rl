@@ -164,7 +164,7 @@ topology. Exploratory probe timings are not retained as acceptance evidence;
 the checked end-to-end comparison below is the durable engineering result.
 The final batch-1 cell-independence hardening was replayed on the same learned
 model and 64-cell, 2,048-tick exact suite. Episode content remained
-byte-identical while throughput changed from 25,901 to 21,755 simulated
+byte-identical while throughput changed from 25,901 to 21,845 simulated
 ticks/s (0.84x). That bounded cost buys deployment-equivalent, cell-independent
 actions without giving up parallel simulator stepping.
 
