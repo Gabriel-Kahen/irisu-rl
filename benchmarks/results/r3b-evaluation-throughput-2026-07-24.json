@@ -31,6 +31,39 @@
     "optimized_mean_workflow_active_seconds": 885.3999156745,
     "projected_36_job_workflow_active_hours": 8.853999156745001
   },
+  "final_cell_independence_probe": {
+    "cells": 64,
+    "episode_content_sha256": "2c39615161b60c32fb8b892f987d8126fe76482426d759e8483d0db6641a6636",
+    "exact_worker_sha256": "4faa4508a89df3e1e62b80e2871b6a35b5913f220d53fe5de43408ad6512c261",
+    "final": {
+      "evaluation_module_sha256": "08cabf235afbbc4726b105ea483b75c9e66f32da18d13c946358b5a53a194c5c",
+      "operational_config_sha256": "002a3f0deb1119b47aa55114f733c17322ec9aeaa1a5e13847ab834895a5577e",
+      "simulated_ticks_per_second": 21754.686888362347,
+      "source_revision": "e5347a25ad01de38a43914ba0f8927331872cd97",
+      "source_tracked_clean": true,
+      "untracked_test_setup": [
+        "build",
+        "reference/runs"
+      ],
+      "wall_seconds": 4.8310049480060115
+    },
+    "max_simulated_ticks": 2048,
+    "model_state_sha256": "51e8ee90bbfac0efe750201d7066844c4b64031cdb9dd23597492626e502a763",
+    "pre_cell_independence": {
+      "simulated_ticks_per_second": 25900.788345967427,
+      "source_revision": "fc1ee1b665207726a1687dfd570646290e92efa4",
+      "wall_seconds": 4.057675719988765
+    },
+    "relative_throughput": 0.8399237350530067,
+    "simulated_ticks": 105097,
+    "snapshot_bundle_sha256": "2371129c883ade88b309e509c2d8a7399a85944dc5dd7e841fc14d977527eb7a",
+    "torch_threads": 1,
+    "topology": {
+      "lanes": 16,
+      "replicas": 1,
+      "workers": 16
+    }
+  },
   "fixed_inputs": {
     "exact_snapshot_bundle_sha256": "2371129c883ade88b309e509c2d8a7399a85944dc5dd7e841fc14d977527eb7a",
     "exact_worker_sha256": "4faa4508a89df3e1e62b80e2871b6a35b5913f220d53fe5de43408ad6512c261",
