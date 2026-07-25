@@ -9,9 +9,9 @@ import os
 import signal
 import sys
 import time
-from ctypes import CDLL, get_errno
 from concurrent.futures import Future, ProcessPoolExecutor, as_completed
 from contextlib import ExitStack
+from ctypes import CDLL, get_errno
 from dataclasses import dataclass
 from multiprocessing.connection import wait as wait_connections
 from pathlib import Path
@@ -450,7 +450,11 @@ def _deployment(
 
 
 def _active_claim(
-    root: Path, workflow: R3BWorkflow, phase: str
+    root: Path,
+    workflow: R3BWorkflow,
+    phase: str,
+    *,
+    job_sha256: str | None = None,
 ) -> tuple[Path, JobClaim]:
     secrets = root / "secrets"
     active: list[tuple[Path, JobClaim]] = []
@@ -458,7 +462,9 @@ def _active_claim(
         for path in sorted(secrets.glob("*.claim.json")):
             claim = _load_claim(path)
             record = workflow.job_record(claim.job_sha256)
-            if record["status"] in {"claimed", "running", "trained"}:
+            if record["status"] in {"claimed", "running", "trained"} and (
+                job_sha256 is None or claim.job_sha256 == job_sha256
+            ):
                 active.append((path, claim))
     if len(active) != 1:
         raise RuntimeError("canonical evaluation requires exactly one active claim")
@@ -745,6 +751,7 @@ def evaluate_trained_canonical_job(
     phase: str,
     authorization: ValidationRunAuthorization | SealedTestJobLease | None = None,
     sealed_test_ledger: SealedTestLedger | None = None,
+    job_sha256: str | None = None,
 ) -> CanonicalEvaluationResult:
     """Evaluate, audit, publish, and complete one fully trained canonical job."""
 
@@ -781,7 +788,7 @@ def evaluate_trained_canonical_job(
     library = supplied_library.resolve(strict=True)
     _read_resolved_run(root)
     workflow = R3BWorkflow(root / "workflow.sqlite3")
-    _, claim = _active_claim(root, workflow, phase)
+    _, claim = _active_claim(root, workflow, phase, job_sha256=job_sha256)
     record = workflow.job_record(claim.job_sha256)
     if record["status"] != "trained":
         raise RuntimeError("canonical evaluation requires completed training")
