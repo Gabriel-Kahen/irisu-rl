@@ -6,9 +6,8 @@ import unittest
 from dataclasses import astuple, replace
 
 import torch
-
-from irisu_rl.models import RecurrentActorCritic, RecurrentModelConfig
 from irisu_rl.checkpoints import load_checkpoint, save_checkpoint
+from irisu_rl.models import RecurrentActorCritic, RecurrentModelConfig
 from irisu_rl.ppo import (
     PPOConfig,
     PPOTrainer,
@@ -55,6 +54,44 @@ class RecurrentModelTests(unittest.TestCase):
         ignored = self.model(global_features, poisoned, mask, hidden)
         torch.testing.assert_close(ignored.kind_logits, baseline.kind_logits)
         torch.testing.assert_close(ignored.recurrent_state, baseline.recurrent_state)
+
+    def test_masked_body_prefix_preserves_inference_outputs(self) -> None:
+        global_features, bodies, mask = self.observations(time=1)
+        hidden = self.model.initial_state(2)
+        full = self.model(global_features, bodies, mask, hidden)
+        prefix = self.model(
+            global_features,
+            bodies[..., :3, :].contiguous(),
+            mask[..., :3].contiguous(),
+            hidden,
+        )
+        for name in (
+            "kind_logits",
+            "wait_logits",
+            "coordinate_alpha",
+            "coordinate_beta",
+            "values",
+            "recurrent_state",
+        ):
+            torch.testing.assert_close(
+                getattr(prefix, name),
+                getattr(full, name),
+                rtol=1e-5,
+                atol=1e-6,
+            )
+        self.assertTrue(
+            torch.equal(prefix.kind_logits.argmax(-1), full.kind_logits.argmax(-1))
+        )
+        self.assertTrue(
+            torch.equal(prefix.wait_logits.argmax(-1), full.wait_logits.argmax(-1))
+        )
+        with self.assertRaisesRegex(ValueError, "model schema"):
+            self.model(
+                global_features,
+                bodies[..., :0, :],
+                mask[..., :0],
+                hidden,
+            )
 
     def test_full_sequence_matches_repeated_single_steps_and_reset_clears_history(
         self,

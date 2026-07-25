@@ -9,10 +9,11 @@ action/capture contract, and R5 builds the causal actor.
 ## What is operational
 
 The operational layer freezes every choice left open by
-`r3b-completion-v1.toml`: vector size, worker and Torch concurrency, model
-dimensions, collector limits, PPO settings, evaluation repetitions/horizons,
-snapshot minimums, checkpoint retention, and the exact backend as the primary
-scientific backend. Unknown keys fail validation.
+`r3b-completion-v1.toml`: independent training and evaluation vector sizes,
+worker and Torch concurrency, model dimensions, collector limits, PPO settings,
+evaluation repetitions/horizons, snapshot minimums, checkpoint retention, and
+the exact backend as the primary scientific backend. Unknown keys fail
+validation.
 
 Long runs use two durable stores:
 
@@ -94,8 +95,41 @@ Every shard binds the complete suite, policy, evaluator, runtime, and its exact
 cell set. Merge rejects missing, duplicate, overlapping, or foreign cells and
 binds the merged execution identity to all shard report hashes. Shards may be
 resumed from immutable per-shard packages without changing policy seeds or the
-authoritative full-suite result. The checked runner executes missing shards
-sequentially; concurrent distributed workers are not part of the R3 contract.
+authoritative full-suite result. One report still executes its missing shards
+sequentially. Independent checkpoint/final reports execute concurrently in
+spawn-isolated local processes; concurrent distributed hosts are not part of
+the R3 contract.
+
+Operational config v2 keeps the scientifically relevant training topology at
+16 lanes. Each report runs one deep queue over 16 lanes, backed by 16 exact
+worker processes or the portable backend's eight-thread ceiling. Keeping more
+pending cells than live lanes avoids assigning the whole suite up front and
+draining into an underutilized long tail. The vector evaluator immediately
+restores a pending cell into any lane that finishes early, resets only that
+lane's recurrent state, and runs encoding/inference only for active lanes.
+Deployment inference also removes only the all-masked tail of the
+fixed-capacity body tensor before the masked-set encoder; every live body is
+retained, and training tensors remain unchanged.
+
+A calibration job has seven exact curve reports plus exact and portable final
+reports; validation and test jobs have 21 curve reports plus the two finals.
+The supervisor restores and verifies every checkpoint in the parent, copies
+only its learned model into a bounded identity-hashed transport, and executes
+the report queue through nine `spawn` processes. Every child reloads and
+verifies the frozen canonical run, job, suite, configuration, model, deployment
+policy, and runtime before creating its own simulator. Evaluation uses one
+PyTorch intra-op thread per child; training retains four. The resume audit runs
+in parallel with the report queue. Children may publish only immutable shard
+packages. They cannot advance workflow state, and the parent completes the job
+only after every typed result returns and revalidates in canonical order.
+Failure cancels pending work and leaves the job trained and retryable; already
+published immutable shards remain reusable.
+
+The inference algorithm, process count, per-report lane/worker count, and
+PyTorch thread count are source-, config-, evaluator-, and worker-identity
+bound. They must also be shared by the actual-game policy runner. Episode
+ordering, seeds, action masks, horizons, raw-score accounting, and per-cell
+reports remain unchanged.
 
 A durable lookup index maps each frozen suite/policy/worker/shard key to its
 immutable artifact. The index is only an accelerator: retrieved artifacts are
@@ -109,28 +143,32 @@ and portable diagnostics use the complete phase suite: 64 calibration cells
 and 512 validation/test cells. Curve and final suite identities are stored
 separately and cannot be substituted.
 
-On the local Ryzen 7 3700X reference host, a real exact 16-cell recurrent
-evaluation took 73.431 seconds scalar and 62.107 seconds with the 16-lane
-vector evaluator (1.18x). A real 50-update exact canonical segment took about
-64 seconds and produced 102,810 simulated ticks. These are engineering
+On the local Ryzen 7 3700X reference host, a representative 64-cell,
+2,048-tick learned-policy exact replay improved from 89.29 simulated ticks/s
+on the prior evaluator to 170.05 ticks/s after work-conserving scheduling,
+active-lane inference, and safe body-tail compaction (1.90x), with identical
+episode content. At the 512-tick saturation workload, nine isolated
+one-thread evaluators sustained about 1,461 aggregate simulated ticks/s and
+used about 11 CPU cores. All nine produced the same episode-content SHA-256.
+Eight processes were about 2.7% slower in aggregate and would also force a
+ninth canonical report into a second scheduling wave. These are engineering
 measurements, not R3 acceptance results.
 
 The frozen protocol comprises 66,800 optimizer updates and 116,864 bounded
 logical episode cells: 82,816 exact and 34,048 portable. Artifact-cache reuse
-can make the number of physical executions slightly lower. Extrapolating the
-reference measurements gives a best-observed serial floor of roughly five days
-before portable evaluation, persistence, and operational overhead. This is a
-capacity estimate, not a deadline or an acceptance result: the reference cells
-averaged only 1,576 of the allowed 8,192 ticks. At the same measured tick
-throughput, the all-cells-at-cap exact upper estimate is about 19 days before
-portable work. Rerun the benchmark and use completed validation durations to
-reserve each sealed learner-job window separately; pending sealed jobs are safe
-between commands. Reserve the one-shot baseline batch as its own uninterrupted
-window (about 35 hours of exact work at the tick-cap estimate, plus portable
-work and overhead), and retain enough disk for all immutable checkpoints and
-reports. The checked runner intentionally serializes jobs and evaluation shards;
-launching competing canonical runners on the same host is rejected by the
-global run lock.
+can make the number of physical executions slightly lower. The measured
+single-report and process-level gains project the 36-job calibration queue into
+roughly a 10-14 hour window on the reference host, but a fresh fixed-source
+canonical job must establish the end-to-end duration before this becomes an
+operational estimate. This is not a deadline or an acceptance result: policy
+survival length, portable work, checkpoint restoration, persistence, and
+resume-audit cost vary by job. Rerun the benchmark and use completed validation
+durations to reserve each sealed learner-job window separately; pending sealed
+jobs are safe between commands. Reserve the one-shot baseline batch as its own
+uninterrupted window, and retain enough disk for all immutable checkpoints and
+reports. The checked runner intentionally serializes jobs while running up to
+nine independent reports inside one job; launching competing canonical runners
+on the same host is rejected by the global run lock.
 
 Evaluation is a preregistered bounded-horizon benchmark. An episode that reaches
 the 8,192-tick bound is explicitly recorded as truncated, and

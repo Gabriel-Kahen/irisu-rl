@@ -14,6 +14,7 @@ from irisu_rl.r3b_experiments import (
     finalize_persisted_sealed_test,
 )
 from irisu_rl.r3b_operational import R3BOperationalConfig, R3BWorkflow
+
 from tests.test_r3b_experiments import (
     TEST_EVALUATION_SUITE,
     TEST_PLAN,
@@ -22,7 +23,6 @@ from tests.test_r3b_experiments import (
     valid_baseline_artifacts,
     validation_context,
 )
-
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -100,7 +100,7 @@ class SealedPersistenceIntegrationTests(unittest.TestCase):
             root = Path(directory)
             store = ArtifactStore(root / "artifacts")
             config = R3BOperationalConfig.from_toml(
-                ROOT / "configs/rl/experiments/r3b-operational-v1.toml"
+                ROOT / "configs/rl/experiments/r3b-operational-v2.toml"
             )
             workflow = R3BWorkflow.create(
                 root / "workflow.sqlite3",

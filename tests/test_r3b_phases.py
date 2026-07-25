@@ -11,6 +11,7 @@ from irisu_rl.r3b_phases import (
     PublishedSealedAuthorization,
     acquire_sealed_job,
 )
+
 from tests.test_r3b_experiments import (
     TEST_EVALUATION_SUITE,
     TEST_PLAN,
@@ -18,7 +19,6 @@ from tests.test_r3b_experiments import (
     authorization_validation_results,
     validation_context,
 )
-
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -58,7 +58,7 @@ class R3BPhaseTests(unittest.TestCase):
                 run_class="smoke",
                 plan=plan,
                 config=R3BOperationalConfig.from_toml(
-                    ROOT / "configs/rl/experiments/r3b-operational-v1.toml"
+                    ROOT / "configs/rl/experiments/r3b-operational-v2.toml"
                 ),
                 snapshot_bundle_sha256="1" * 64,
                 source_identity_sha256="2" * 64,

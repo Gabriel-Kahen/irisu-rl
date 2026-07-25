@@ -11,9 +11,10 @@ from __future__ import annotations
 import hashlib
 import json
 import subprocess
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Mapping
+from typing import Any
 
 from torch import Tensor
 
@@ -43,20 +44,20 @@ from .r3b_experiments import (
     EngineeringEvidence,
     ExactResumeArtifact,
     LearnerOutcome,
-    RawScoreMetricsArtifact,
     R3BExperimentPlan,
-    SealedTestLedger,
-    SealedTestJobLease,
+    RawScoreMetricsArtifact,
     SealedLearnerOutcomeReference,
+    SealedTestJobLease,
+    SealedTestLedger,
     TrainingCheckpointArtifact,
     TrialJob,
 )
+from .r3b_local_runner import _source_identity
 from .r3b_operational import (
     JobClaim,
     R3BOperationalConfig,
     R3BWorkflow,
 )
-from .r3b_local_runner import _source_identity
 from .r3b_runner import (
     BuiltTrial,
     verify_exact_resume_continuation,
@@ -66,7 +67,6 @@ from .r3b_snapshots import (
     load_snapshot_bundle,
     pair_snapshot_bundles,
 )
-
 
 _OUTPUT_KIND = "irisu.r3b.canonical-job-output"
 _OUTPUT_VERSION = "r3b-canonical-job-output-v1"
@@ -470,20 +470,28 @@ def evaluate_recurrent_policy_sharded(
         raise ValueError("evaluation suite is foreign to the canonical bundles")
     evaluator_sha256 = _sha256(
         {
-            "version": "r3b-canonical-evaluator-v1",
+            "version": "r3b-canonical-evaluator-v3",
             "workflow_manifest_sha256": inputs.workflow_manifest_sha256,
             "action_spec_sha256": suite.action_spec_sha256,
-            "algorithm": "recurrent-semantic-fixed-cell-vector-v1",
+            "algorithm": "recurrent-semantic-work-conserving-compacted-vector-v3",
         }
+    )
+    effective_workers = min(
+        inputs.config.evaluation_lanes,
+        inputs.config.evaluation_workers,
+        inputs.config.evaluation_lanes if suite.backend == "exact" else 8,
     )
     worker_identity_sha256 = _sha256(
         {
-            "version": "r3b-evaluation-worker-topology-v1",
+            "version": "r3b-evaluation-worker-topology-v3",
             "workflow_manifest_sha256": inputs.workflow_manifest_sha256,
             "evaluator_sha256": evaluator_sha256,
             "runtime_identity_sha256": suite.runtime_identity_sha256,
-            "lanes": inputs.config.lanes,
-            "workers": inputs.config.workers,
+            "lanes": inputs.config.evaluation_lanes,
+            "configured_workers": inputs.config.evaluation_workers,
+            "effective_workers": effective_workers,
+            "processes": inputs.config.evaluation_processes,
+            "torch_threads": inputs.config.evaluation_torch_threads,
         }
     )
     deployment_identity = DeploymentPolicyIdentity.from_components(
