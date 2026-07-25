@@ -8,6 +8,7 @@ import hmac
 import json
 import os
 import socket
+import stat
 import struct
 import subprocess
 import threading
@@ -957,6 +958,30 @@ def _exact_worker_launch_environment() -> dict[str, str]:
     return environment
 
 
+def _exact_worker_pass_fds() -> tuple[int, ...]:
+    """Preserve the optional canonical evaluator lease across worker exec."""
+
+    raw = os.environ.get("IRISU_R3B_EVALUATOR_LEASE_FD")
+    if raw is None:
+        return ()
+    if not raw.isascii() or not raw.isdecimal():
+        raise ExactWorkerError("evaluator lease descriptor is malformed")
+    descriptor = int(raw)
+    try:
+        metadata = os.fstat(descriptor)
+    except OSError as exc:
+        raise ExactWorkerError("evaluator lease descriptor is not open") from exc
+    if (
+        descriptor <= 2
+        or not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_uid != os.geteuid()
+        or stat.S_IMODE(metadata.st_mode) != 0o600
+        or metadata.st_nlink != 1
+    ):
+        raise ExactWorkerError("evaluator lease descriptor metadata is unsafe")
+    return (descriptor,)
+
+
 class ExactWorkerClient:
     """Own one persistent 32-bit exact worker and its single physics world."""
 
@@ -978,6 +1003,7 @@ class ExactWorkerClient:
                 bufsize=0,
                 cwd=os.sep,
                 env=_exact_worker_launch_environment(),
+                pass_fds=_exact_worker_pass_fds(),
             )
         except OSError as exc:
             raise ExactWorkerError(f"failed to launch exact worker {self.path}: {exc}") from exc
@@ -2120,7 +2146,7 @@ class ExactSimulator:
 
     def clone_state(self) -> bytes:
         with self._lock:
-            client = self._require_open()
+            self._require_open()
             if self._seed is None:
                 raise NativeError("exact simulator must be reset before clone_state")
             if self._pending_action is not None:
@@ -2162,7 +2188,7 @@ class ExactSimulator:
             raise NativeError(f"unsupported exact snapshot schema {schema}")
         if protocol != _PROTOCOL_VERSION or flags:
             raise NativeError("exact snapshot protocol metadata is incompatible")
-        client = self._require_open()
+        self._require_open()
         if config_hash != self._config_hash or identity != self._identity:
             raise NativeError("exact snapshot backend/config identity mismatch")
         if seed > 0xFFFFFFFF:

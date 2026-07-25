@@ -17,14 +17,17 @@ from unittest.mock import patch
 from irisu_rl.r3b_artifacts import ArtifactStore
 from irisu_rl.r3b_experiments import CandidateArm, TrainingCheckpointArtifact, TrialJob
 from irisu_rl.r3b_supervisor import (
+    _EvaluationProcessGroup,
+    _capture_evaluation_process_groups,
     _deployment,
     _checkpoint_package,
     _fresh_restored_checkpoint,
     _evaluation_worker_initializer,
+    _signal_evaluation_group,
     _stop_evaluation_executor,
     evaluate_trained_canonical_job,
 )
-from irisu_rl.r3b_lock import evaluator_lease_path
+from irisu_rl.r3b_lock import R3BRunLock, evaluator_lease_path
 from tests.test_r3a_session_resume import PORTABLE, build_session
 
 
@@ -38,6 +41,17 @@ def _sleep_for_test(seconds: float) -> None:
 
 def _fail_for_test() -> None:
     raise RuntimeError("expected evaluator failure")
+
+
+def _spawn_leased_descendant(path: str) -> None:
+    descriptor = int(os.environ["IRISU_R3B_EVALUATOR_LEASE_FD"])
+    child = subprocess.Popen(["sleep", "60"], pass_fds=(descriptor,))
+    Path(path).write_text(f"{os.getpid()} {child.pid}\n", encoding="utf-8")
+    child.wait()
+
+
+def _write_gate_result(path: str) -> None:
+    Path(path).write_text("released\n", encoding="utf-8")
 
 
 class R3BSupervisorTests(unittest.TestCase):
@@ -97,6 +111,104 @@ time.sleep(60)
             owner.stdout.close()
 
     @unittest.skipUnless(sys.platform == "linux", "evaluator isolation is Linux-only")
+    def test_evaluation_work_waits_for_pinned_group_capture(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "released"
+            context = multiprocessing.get_context("spawn")
+            ready_gate = context.Event()
+            executor = ProcessPoolExecutor(
+                max_workers=2,
+                mp_context=context,
+                initializer=_evaluation_worker_initializer,
+                initargs=(
+                    os.getpid(),
+                    str(evaluator_lease_path(directory)),
+                    ready_gate,
+                ),
+            )
+            setattr(executor, "_irisu_ready_gate", ready_gate)
+            setattr(
+                executor,
+                "_irisu_evaluator_lease_path",
+                str(evaluator_lease_path(directory)),
+            )
+            try:
+                futures = tuple(
+                    executor.submit(_write_gate_result, str(path)) for _ in range(2)
+                )
+                time.sleep(0.1)
+                self.assertFalse(path.exists())
+                groups = _capture_evaluation_process_groups(executor)
+                self.assertEqual(len(groups), 2)
+                for future in futures:
+                    future.result(timeout=5)
+            finally:
+                started = time.monotonic()
+                _stop_evaluation_executor(executor)
+                self.assertLess(time.monotonic() - started, 7)
+            with R3BRunLock(Path(directory), global_directory=directory):
+                pass
+
+    @unittest.skipUnless(sys.platform == "linux", "pidfd signaling is Linux-only")
+    def test_group_cleanup_never_signals_a_reused_numeric_pgid(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            lease = Path(directory) / "lease"
+            lease.write_bytes(b"")
+            os.chmod(lease, 0o600)
+            metadata = lease.stat()
+            unrelated = subprocess.Popen(["sleep", "60"], start_new_session=True)
+            former_leader = subprocess.Popen(["sleep", "60"])
+            leader_pidfd = os.pidfd_open(former_leader.pid, 0)
+            former_leader.kill()
+            former_leader.wait()
+            group = _EvaluationProcessGroup(
+                SimpleNamespace(),
+                unrelated.pid,
+                leader_pidfd,
+                metadata.st_dev,
+                metadata.st_ino,
+            )
+            try:
+                _signal_evaluation_group(group, signal.SIGTERM)
+                self.assertIsNone(unrelated.poll())
+            finally:
+                os.close(leader_pidfd)
+                unrelated.kill()
+                unrelated.wait()
+
+    @unittest.skipUnless(sys.platform == "linux", "pidfd signaling is Linux-only")
+    def test_group_cleanup_ignores_foreign_group_holding_same_lease(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            lease = Path(directory) / "lease"
+            lease_descriptor = os.open(lease, os.O_RDWR | os.O_CREAT, 0o600)
+            metadata = lease.stat()
+            former_leader = subprocess.Popen(["sleep", "60"], start_new_session=True)
+            leader_pidfd = os.pidfd_open(former_leader.pid, 0)
+            former_pgid = former_leader.pid
+            former_leader.kill()
+            former_leader.wait()
+            unrelated = subprocess.Popen(
+                ["sleep", "60"],
+                start_new_session=True,
+                pass_fds=(lease_descriptor,),
+            )
+            group = _EvaluationProcessGroup(
+                SimpleNamespace(),
+                former_pgid,
+                leader_pidfd,
+                metadata.st_dev,
+                metadata.st_ino,
+            )
+            try:
+                _signal_evaluation_group(group, signal.SIGTERM)
+                self.assertIsNone(unrelated.poll())
+            finally:
+                os.close(leader_pidfd)
+                os.close(lease_descriptor)
+                unrelated.kill()
+                unrelated.wait()
+
+    @unittest.skipUnless(sys.platform == "linux", "evaluator isolation is Linux-only")
     def test_failed_evaluation_stops_blocked_workers_within_bound(self) -> None:
         executor = ProcessPoolExecutor(
             max_workers=2,
@@ -104,14 +216,79 @@ time.sleep(60)
             initializer=_evaluation_worker_initializer,
             initargs=(os.getpid(), str(evaluator_lease_path())),
         )
+        setattr(
+            executor,
+            "_irisu_evaluator_lease_path",
+            str(evaluator_lease_path()),
+        )
         blocked = executor.submit(_sleep_for_test, 60.0)
         failed = executor.submit(_fail_for_test)
+        _capture_evaluation_process_groups(executor)
         with self.assertRaisesRegex(RuntimeError, "expected evaluator failure"):
             failed.result(timeout=10)
         started = time.monotonic()
         _stop_evaluation_executor(executor, timeout_seconds=2.0)
         self.assertLess(time.monotonic() - started, 5.0)
         self.assertTrue(blocked.done())
+
+    @unittest.skipUnless(sys.platform == "linux", "evaluator isolation is Linux-only")
+    def test_cleanup_reaps_orphans_after_evaluator_sigkill(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "run"
+            root.mkdir()
+            path = Path(directory) / "pids"
+            executor = ProcessPoolExecutor(
+                max_workers=1,
+                mp_context=multiprocessing.get_context("spawn"),
+                initializer=_evaluation_worker_initializer,
+                initargs=(os.getpid(), str(evaluator_lease_path(directory))),
+            )
+            setattr(
+                executor,
+                "_irisu_evaluator_lease_path",
+                str(evaluator_lease_path(directory)),
+            )
+            pids: tuple[int, ...] = ()
+            cleanup_attempted = False
+            try:
+                executor.submit(_spawn_leased_descendant, str(path))
+                groups = _capture_evaluation_process_groups(executor)
+                deadline = time.monotonic() + 10
+                while not path.is_file() and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                self.assertTrue(path.is_file())
+                evaluator_pid, descendant_pid = (
+                    int(value) for value in path.read_text().split()
+                )
+                pids = (evaluator_pid, descendant_pid)
+                self.assertEqual(groups[0].pgid, evaluator_pid)
+                os.kill(evaluator_pid, signal.SIGKILL)
+                groups[0].process.join(2)
+                with self.assertRaisesRegex(RuntimeError, "another process"):
+                    with R3BRunLock(root, global_directory=directory):
+                        pass
+                cleanup_attempted = True
+                _stop_evaluation_executor(executor, timeout_seconds=2.0)
+                deadline = time.monotonic() + 2
+                proc = Path(f"/proc/{descendant_pid}/stat")
+                while (
+                    proc.exists()
+                    and proc.read_text().split()[2] != "Z"
+                    and time.monotonic() < deadline
+                ):
+                    time.sleep(0.01)
+                if proc.exists():
+                    self.assertEqual(proc.read_text().split()[2], "Z")
+                with R3BRunLock(root, global_directory=directory):
+                    pass
+            finally:
+                if not cleanup_attempted:
+                    _stop_evaluation_executor(executor, timeout_seconds=2.0)
+                for pid in pids:
+                    try:
+                        os.kill(pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
 
     def test_rejects_phase_without_opening_a_run(self) -> None:
         with self.assertRaisesRegex(ValueError, "phase"):
