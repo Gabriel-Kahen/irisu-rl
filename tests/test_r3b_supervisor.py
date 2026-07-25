@@ -17,19 +17,23 @@ from unittest.mock import patch
 from irisu_env import ExactWorkerClient, ExactWorkerNotFoundError, find_exact_worker
 from irisu_rl.r3b_artifacts import ArtifactStore
 from irisu_rl.r3b_experiments import CandidateArm, TrainingCheckpointArtifact, TrialJob
+from irisu_rl.r3b_local_runner import _write_claim
+from irisu_rl.r3b_lock import R3BRunLock, evaluator_lease_path
+from irisu_rl.r3b_operational import JobClaim
 from irisu_rl.r3b_supervisor import (
-    _EvaluationProcessGroup,
+    _active_claim,
     _capture_evaluation_process_groups,
-    _deployment,
     _checkpoint_package,
+    _deployment,
     _evaluation_lease_holders,
-    _fresh_restored_checkpoint,
     _evaluation_worker_initializer,
+    _EvaluationProcessGroup,
+    _fresh_restored_checkpoint,
     _signal_evaluation_group,
     _stop_evaluation_executor,
     evaluate_trained_canonical_job,
 )
-from irisu_rl.r3b_lock import R3BRunLock, evaluator_lease_path
+
 from tests.test_r3a_session_resume import PORTABLE, build_session
 
 
@@ -74,6 +78,28 @@ except ExactWorkerNotFoundError:
 
 
 class R3BSupervisorTests(unittest.TestCase):
+    def test_evaluation_selects_one_job_among_parallel_claims(self) -> None:
+        first = JobClaim(_hash("a"), "calibration", _hash("1"), "batch-1", 0, None)
+        second = JobClaim(_hash("b"), "calibration", _hash("2"), "batch-2", 0, None)
+        workflow = SimpleNamespace(
+            job_record=lambda _job: {"status": "trained"},
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for claim in (first, second):
+                _write_claim(root / "secrets" / f"{claim.job_sha256}.claim.json", claim)
+            with self.assertRaisesRegex(RuntimeError, "exactly one active"):
+                _active_claim(root, workflow, "calibration")
+            self.assertEqual(
+                _active_claim(
+                    root,
+                    workflow,
+                    "calibration",
+                    job_sha256=second.job_sha256,
+                )[1],
+                second,
+            )
+
     @unittest.skipUnless(
         sys.platform == "linux", "parent-death isolation is Linux-only"
     )

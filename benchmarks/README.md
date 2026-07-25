@@ -439,5 +439,11 @@ uv run --extra training python benchmarks/rl_r3a.py \
   --lanes 16 --updates 4 --decisions 32
 ```
 
+Use `--optimizer-torch-threads N` to profile PPO intra-op scaling separately
+while retaining `--torch-threads` for collection inference. The result records
+both counts and optimizer-only wall samples. This is a diagnostic control:
+more Torch threads can be slower for the small recurrent batches, so production
+CPU budgeting must not infer throughput from logical CPU count alone.
+
 This is a systems smoke, not a learning or transfer benchmark. Its output is
 always labeled privileged, non-deployable, and pre-readiness.

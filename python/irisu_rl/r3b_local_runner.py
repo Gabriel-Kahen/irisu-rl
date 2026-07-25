@@ -505,6 +505,8 @@ def _run_local_training_updates(
     phase: str,
     authorization: ValidationRunAuthorization | SealedTestJobLease | None,
     sealed_test_ledger: SealedTestLedger | None,
+    allow_parallel_claims: bool = False,
+    expected_job_sha256: str | None = None,
 ) -> LocalTrainingResult:
     """Run one bounded exact-backend segment and publish a durable resume point."""
 
@@ -571,16 +573,38 @@ def _run_local_training_updates(
         raise ValueError("exact worker path must be an absolute regular file")
 
     secret_root = ensure_private_directory(root / "secrets")
-    active: tuple[Path, JobClaim] | None = None
+    active_claims: list[tuple[Path, JobClaim]] = []
     for path in sorted(secret_root.glob("*.claim.json")):
         candidate = _load_claim(path)
         record = workflow.job_record(candidate.job_sha256)
         if record["status"] in {"claimed", "running", "trained"}:
-            if active is not None:
-                raise RuntimeError("multiple active local claim secrets exist")
-            active = (path, candidate)
+            active_claims.append((path, candidate))
+    if allow_parallel_claims:
+        matching = [
+            value
+            for value in active_claims
+            if value[1].phase == phase
+            and value[1].owner == owner
+            and (
+                expected_job_sha256 is None
+                or value[1].job_sha256 == expected_job_sha256
+            )
+        ]
+        if len(matching) > 1:
+            raise RuntimeError("multiple active claims belong to this training worker")
+        active = matching[0] if matching else None
+    else:
+        if len(active_claims) > 1:
+            raise RuntimeError("multiple active local claim secrets exist")
+        active = active_claims[0] if active_claims else None
+    if active is None and expected_job_sha256 is not None:
+        raise RuntimeError("prepared parallel training claim is missing")
     if active is None:
-        intent_path = secret_root / f"{phase}.intent.json"
+        intent_path = secret_root / (
+            f"{phase}.{owner}.intent.json"
+            if allow_parallel_claims
+            else f"{phase}.intent.json"
+        )
         if intent_path.exists():
             intent_phase, token, intent_owner = _load_claim_intent(intent_path)
             if intent_phase != phase or intent_owner != owner:
@@ -869,6 +893,8 @@ def run_local_canonical_updates(
     phase: str = "calibration",
     authorization: ValidationRunAuthorization | SealedTestJobLease | None = None,
     sealed_test_ledger: SealedTestLedger | None = None,
+    allow_parallel_claims: bool = False,
+    expected_job_sha256: str | None = None,
 ) -> LocalTrainingResult:
     """Run a bounded, restartable segment of an installed canonical job."""
 
@@ -881,4 +907,6 @@ def run_local_canonical_updates(
         phase=phase,
         authorization=authorization,
         sealed_test_ledger=sealed_test_ledger,
+        allow_parallel_claims=allow_parallel_claims,
+        expected_job_sha256=expected_job_sha256,
     )

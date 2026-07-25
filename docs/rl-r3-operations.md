@@ -36,12 +36,35 @@ without introducing a post-hoc elimination rule.
 
 The operator command `canonical-run-job` owns one job from claim through
 training, exact-resume audit, exact/portable evaluation, artifact publication,
-and workflow completion. A host-wide no-follow process lock admits only one
-local R3 operator, while a per-run lock protects the selected workflow.
+and workflow completion. For calibration and validation,
+`canonical-run-batch` resolves an affinity/cgroup-aware CPU budget, durably
+claims a bounded wave, trains those independent jobs in isolated processes,
+fully reaps that pool, and evaluates the trained jobs sequentially. It leaves
+the frozen per-job lane, worker, Torch, RNG, checkpoint, and runner identities
+unchanged. A host-wide no-follow process lock admits only one local R3
+operator, while a per-run lock protects the selected workflow.
 Evaluator children retain a shared host lease, so recovery is rejected until
 children from an interrupted operator have exited. Canonical training may only
 stop on the frozen 50-update grid; sealed test jobs must train and evaluate in
 one uninterrupted command.
+
+The batch defaults to 80% of the process-visible logical CPU capacity, rounded
+to an integer slot count after the tightest finite cgroup-v2 quota and an
+explicit one-CPU reserve. Training children and their exact workers inherit
+that CPU set, so the training wave has a hard scheduling ceiling; evaluation
+runs only after those children exit and retains its frozen topology. The
+resolved plan, owner, and job IDs are stored for the active phase wave and must
+match on resume; the binding is cleared only after every wave job completes.
+`--target-cpu-percent`, `--reserve-cpus`, and
+`--max-parallel-jobs` are resource controls, not scientific overrides.
+Workload stalls mean the ceiling cannot guarantee an exact utilization.
+On the profiled 8-core/16-thread host, the checked
+[exact scaling artifact](../benchmarks/results/exact-padded-scaling-ceiling-2026-07-21.json)
+measured one frozen 16-lane job at 6.55 average cores (40.94%). The default plan
+resolves 13 CPU slots and two concurrent training jobs, so its expected steady
+training utilization is approximately 81.9% before stalls and phase tails.
+This is a scheduling estimate, not a replacement for a concurrent-job
+measurement on each production host.
 
 Read-only workflow verification retains the preregistered operational
 identities of the prior serial runner and first accelerated runner as well as
@@ -261,8 +284,8 @@ A smoke run may stop after a bounded number of updates and is structurally
 ineligible for selection or confirmation. Canonical mode accepts no grid,
 seed, budget, suite, or reward overrides.
 
-Initialize a canonical run with both verified bundles, then run one complete
-calibration job per command until `status` shows the phase complete:
+Initialize a canonical run with both verified bundles, then run CPU-budgeted
+calibration waves until `status` shows the phase complete:
 
 ```bash
 uv run irisu-r3 experiment init \
@@ -272,7 +295,7 @@ uv run irisu-r3 experiment init \
   --portable-snapshots /absolute/path/to/portable-v2 \
   --output /absolute/path/to/r3b-canonical-001
 
-uv run irisu-r3 experiment canonical-run-job \
+uv run irisu-r3 experiment canonical-run-batch \
   --run /absolute/path/to/r3b-canonical-001 \
   --phase calibration \
   --worker /absolute/path/to/irisu-exact-worker \
@@ -288,7 +311,7 @@ uv run irisu-r3 experiment prepare-validation \
   --worker /absolute/path/to/irisu-exact-worker \
   --library /absolute/path/to/libirisu_clone.so
 
-uv run irisu-r3 experiment canonical-run-job \
+uv run irisu-r3 experiment canonical-run-batch \
   --run /absolute/path/to/r3b-canonical-001 \
   --phase validation \
   --authorization VALIDATION_AUTHORIZATION_ARTIFACT \

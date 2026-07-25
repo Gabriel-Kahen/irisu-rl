@@ -14,6 +14,7 @@ from pathlib import Path
 
 from irisu_env import IrisuEnv
 
+from .cpu_parallelism import resolve_training_cpu_plan
 from .curriculum import SnapshotBlobStore, SnapshotLibrary
 from .r3b_artifacts import ArtifactStore, ArtifactTypeError
 from .r3b_baselines import run_sealed_baselines
@@ -55,6 +56,7 @@ from .r3b_snapshots import (
     pair_snapshot_bundles,
 )
 from .r3b_supervisor import evaluate_trained_canonical_job
+from .r3b_training_batch import run_canonical_training_batch
 
 
 def _canonical_bytes(value: object) -> bytes:
@@ -586,6 +588,41 @@ def _command_experiment_canonical_run_job(
     }
 
 
+def _command_experiment_canonical_run_batch(
+    args: argparse.Namespace,
+) -> dict[str, object]:
+    """Train a CPU-budgeted job wave, then evaluate each job sequentially."""
+
+    inputs = _canonical_inputs(args.run, args.worker, args.library)
+    authorization = None
+    if args.phase == "validation":
+        if args.authorization is None:
+            raise ValueError("validation requires --authorization")
+        authorization = load_validation_authorization(
+            inputs,
+            ArtifactStore(inputs.root / "artifacts"),
+            args.authorization,
+        )
+    elif args.authorization is not None:
+        raise ValueError("calibration does not accept --authorization")
+    cpu_plan = resolve_training_cpu_plan(
+        workers_per_job=inputs.config.workers,
+        torch_threads_per_job=inputs.config.torch_threads,
+        target_percent=args.target_cpu_percent,
+        reserved_cpus=args.reserve_cpus,
+        max_parallel_jobs=args.max_parallel_jobs,
+    )
+    return run_canonical_training_batch(
+        args.run,
+        exact_worker_path=args.worker,
+        portable_library_path=args.library,
+        phase=args.phase,
+        owner=args.owner,
+        cpu_plan=cpu_plan,
+        authorization=authorization,
+    ).manifest()
+
+
 def _command_experiment_run_baselines(
     args: argparse.Namespace,
 ) -> dict[str, object]:
@@ -813,6 +850,24 @@ def _parser() -> argparse.ArgumentParser:
     canonical_run.add_argument("--authorization")
     canonical_run.add_argument("--owner", default="canonical-runner")
     canonical_run.set_defaults(handler=_command_experiment_canonical_run_job)
+    canonical_batch = experiment_commands.add_parser(
+        "canonical-run-batch",
+        help="train a host-budgeted wave, then evaluate jobs sequentially",
+    )
+    canonical_batch.add_argument("--run", required=True)
+    canonical_batch.add_argument("--worker", required=True)
+    canonical_batch.add_argument("--library", required=True)
+    canonical_batch.add_argument(
+        "--phase",
+        choices=("calibration", "validation"),
+        required=True,
+    )
+    canonical_batch.add_argument("--authorization")
+    canonical_batch.add_argument("--owner", default="canonical-batch")
+    canonical_batch.add_argument("--target-cpu-percent", type=int, default=80)
+    canonical_batch.add_argument("--reserve-cpus", type=int, default=1)
+    canonical_batch.add_argument("--max-parallel-jobs", type=int, default=4)
+    canonical_batch.set_defaults(handler=_command_experiment_canonical_run_batch)
     baselines = experiment_commands.add_parser(
         "run-baselines",
         help="execute the one-shot sealed scripted-baseline batch",
@@ -846,6 +901,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             "prepare-validation",
             "prepare-test",
             "canonical-run-job",
+            "canonical-run-batch",
             "run-baselines",
             "finalize-test",
         }

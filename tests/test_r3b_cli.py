@@ -147,6 +147,10 @@ class R3BCLITests(unittest.TestCase):
                 "irisu_rl.r3b_cli._command_experiment_canonical_run_job",
                 ("--phase", "test", "--authorization", "a" * 64),
             ),
+            "canonical-run-batch": (
+                "irisu_rl.r3b_cli._command_experiment_canonical_run_batch",
+                ("--phase", "calibration"),
+            ),
             "run-baselines": (
                 "irisu_rl.r3b_cli._command_experiment_run_baselines",
                 ("--authorization", "a" * 64),
@@ -179,7 +183,11 @@ class R3BCLITests(unittest.TestCase):
                 lock.assert_called_once_with("/tmp/r3-cli-test")
 
     def test_split_process_commands_do_not_advertise_test_phase(self) -> None:
-        for command in ("canonical-update", "canonical-evaluate"):
+        for command in (
+            "canonical-update",
+            "canonical-evaluate",
+            "canonical-run-batch",
+        ):
             with self.subTest(command=command):
                 error = io.StringIO()
                 with (

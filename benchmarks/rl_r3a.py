@@ -11,7 +11,6 @@ import tomllib
 from pathlib import Path
 
 import torch
-
 from irisu_env import PaddedVectorEnv
 from irisu_rl.collector import (
     CollectorConfig,
@@ -23,7 +22,6 @@ from irisu_rl.encoding import TeacherStateEncoder
 from irisu_rl.models import RecurrentActorCritic, RecurrentModelConfig
 from irisu_rl.ppo import PPOConfig, PPOTrainer
 from irisu_rl.vector_adapter import MacroVectorAdapter
-
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CONFIG = ROOT / "configs/rl/experiments/r3a-multistep-v1.toml"
@@ -40,6 +38,7 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--target-ticks", type=int)
     result.add_argument("--no-tick-target", action="store_true")
     result.add_argument("--torch-threads", type=int)
+    result.add_argument("--optimizer-torch-threads", type=int)
     result.add_argument("--seed", type=int)
     result.add_argument("--output", type=Path)
     return result
@@ -68,8 +67,19 @@ def main() -> int:
     torch_threads = (
         smoke["torch_threads"] if args.torch_threads is None else args.torch_threads
     )
+    optimizer_torch_threads = (
+        torch_threads
+        if args.optimizer_torch_threads is None
+        else args.optimizer_torch_threads
+    )
     seed = smoke["seed"] if args.seed is None else args.seed
-    if lanes <= 0 or updates <= 0 or decisions <= 0 or torch_threads <= 0:
+    if (
+        lanes <= 0
+        or updates <= 0
+        or decisions <= 0
+        or torch_threads <= 0
+        or optimizer_torch_threads <= 0
+    ):
         raise SystemExit("lanes, updates, and decisions must be positive")
     if updates > ppo_config["total_updates"]:
         raise SystemExit("smoke updates exceed the checked PPO update budget")
@@ -119,6 +129,19 @@ def main() -> int:
             total_updates=ppo_config["total_updates"],
             sampler_seed=seed ^ 0x5A5A,
         )
+        optimizer_seconds: list[float] = []
+        update = trainer.update
+
+        def timed_update(batch):
+            torch.set_num_threads(optimizer_torch_threads)
+            before = time.perf_counter()
+            try:
+                return update(batch)
+            finally:
+                optimizer_seconds.append(time.perf_counter() - before)
+                torch.set_num_threads(torch_threads)
+
+        trainer.update = timed_update
         session = R3ATrainingSession(
             collector,
             trainer,
@@ -172,6 +195,8 @@ def main() -> int:
         "max_decisions": decisions,
         "target_simulated_ticks": target_ticks,
         "torch_threads": torch_threads,
+        "optimizer_torch_threads": optimizer_torch_threads,
+        "optimizer_seconds": optimizer_seconds,
         "seed": seed,
         "wall_seconds": elapsed,
         "transitions_per_second": transitions / elapsed,
