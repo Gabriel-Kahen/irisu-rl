@@ -1,0 +1,268 @@
+{
+  "schema": "training-runtime-optimizations-v1",
+  "recorded_at": "2026-07-25",
+  "host": {
+    "cpu": "AMD Ryzen 7 3700X 8-Core Processor",
+    "logical_cpu_affinity": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15
+    ],
+    "platform": "Linux-7.1.2-3-cachyos-x86_64-with-glibc2.43",
+    "python": "3.14.6",
+    "torch": "2.13.0+cpu",
+    "numpy": "2.5.1"
+  },
+  "source": {
+    "baseline_commit": "54914917f86fdd0e02d95a5b691a965fd4e43079",
+    "baseline_materialization": "git archive origin/main into a temporary directory",
+    "optimized_branch": "codex/training-runtime-optimizations",
+    "optimized_state": "pre-commit working tree bound by per-file hashes",
+    "optimized_files_sha256": {
+      "python/irisu_rl/encoding.py": "3d7406ee0f6b71117e16c36dbde2b4b8a8131b62966a50ff8357beee2641cfff",
+      "python/irisu_rl/models.py": "c8064bce367f6e4dabe434ab984e2c7a1380944621465415f2f7beb4cb48e5d5",
+      "python/irisu_rl/ppo.py": "255a5c586238326758e100728195cfeec8687343679996657687016f49446cf7",
+      "python/irisu_rl/recurrent_buffer.py": "93dcd28b34dcf27cea50602c78a6a9a54c81b40c68e14e24d02a8e1ce32807b0",
+      "python/irisu_rl/torch_distribution.py": "dc56ea9baae471048f4e0332adcb306bff9067e784be7ee71b55ca85737eeb1f",
+      "python/irisu_rl/vector_adapter.py": "9f5ca3d31ed11328a2f3dedc870624b952e8abba3f79ca0eb8f8742ea5f1d095"
+    },
+    "benchmark_inputs_sha256": {
+      "benchmarks/rl_r1.py": "08ee74689308ccaee54e6cd4be5c3cf88bb88c9aa4f6dd7399866514d2ce62ae",
+      "benchmarks/rl_r3a.py": "0174728824d0af93df6be65f5767129f3a8b88fcd8934dd80f3e81fea260ae59",
+      "configs/rl/experiments/r3a-multistep-v1.toml": "707d776ea60206f0fd4c84adb474960615e5897bdd84ddb9d2beb04b76c89273"
+    },
+    "uv_lock_sha256": "7ce69dab92473b73969a9eea706cbb95beccd40bf7a74c543518b3a883d8936d"
+  },
+  "runtime": {
+    "backend": "portable",
+    "library_sha256": "4f6928f18c83159b0db1cb895891007ac805d2542954b41d767619eedf3f7c79",
+    "build_command": "cmake -S . -B build-opt -G Ninja -DCMAKE_BUILD_TYPE=Release && cmake --build build-opt -j 8",
+    "compiler": "GCC 16.1.1 20260625",
+    "release_flags": "-O3 -DNDEBUG"
+  },
+  "measurement_protocol": {
+    "cpu_pinning": false,
+    "run_order": "alternating baseline/optimized within pairs",
+    "collection_warmup": "one discarded 16-lane, 50-iteration run per implementation",
+    "end_to_end_warmup": "one discarded 16-lane, 128-decision update per implementation",
+    "environment": "same interpreter, dependency lock, Release library, fixed seeds, affinity, and canonical topology",
+    "timing_note": "wall rates naturally remain load-sensitive; medians are across warmed alternating pairs"
+  },
+  "collection_benchmark": {
+    "command": "PYTHONPATH=SOURCE/python .venv/bin/python SOURCE/benchmarks/rl_r1.py --backend portable --library build-opt/libirisu_clone.so --lanes 16 --iterations 300",
+    "parameters": {
+      "pairs": 5,
+      "lanes": 16,
+      "iterations": 300,
+      "semantic_decisions": 4800,
+      "seed": 20260722
+    },
+    "trajectory_audit": {
+      "identical_across_all_10_runs": true,
+      "normalized_sha256": "4cdbbac17b8b2c98c0bb2477c0f22ff1899c3e0b928233fb3233bca93d58a93c",
+      "actor_schema_sha256": "de5673d34707e11116e2211880c0be25abe639edaa496aac0c6527b49b7b9ac9",
+      "teacher_schema_sha256": "7cba243c6517a195347ea5bb5c999cdd7eef165e8a91a32e1a2200630c5dc8fa",
+      "config_hashes": [
+        396835323231703618
+      ],
+      "native_ticks": 33324,
+      "primitive_actions": 6217,
+      "stored_transitions": 4800,
+      "seed_cursor": 35,
+      "invalid_actions": 0
+    },
+    "baseline": {
+      "elapsed_seconds": [
+        2.7337177970039193,
+        2.8021292829944286,
+        2.8446741650113836,
+        2.790514066000469,
+        2.875028465001378
+      ],
+      "semantic_decisions_per_second": [
+        1755.8505875261412,
+        1712.9830622485035,
+        1687.3637265872212,
+        1720.1131714342675,
+        1669.5486874067171
+      ],
+      "raw_output_sha256": [
+        "78a85f6ab0073e8c993c12b2ba23b477b690cd14e03029bd2107ddb83edff460",
+        "c48289721bc60a3ef6e37ab32c06e21acbc4059437eaf4dd6990e602a5db674b",
+        "eb25c8c632bd760903bc8f3410e01dd2acc3917958ac41772192dcbdb9a09739",
+        "67ed3a7c2b42a1e544a6d15b82800130096df8f633504c19c1564a39c6c5f199",
+        "7be47190ff6682ad292bdf53694b8ef6bd3a92a2071ad5a0be4ef9cf36261fdb"
+      ],
+      "median_semantic_decisions_per_second": 1712.9830622485035
+    },
+    "optimized": {
+      "elapsed_seconds": [
+        2.0657828630064614,
+        2.0771068100002594,
+        2.084380925982259,
+        2.1870404279907234,
+        2.0271708339860197
+      ],
+      "semantic_decisions_per_second": [
+        2323.5743145890287,
+        2310.906678891203,
+        2302.8420286172077,
+        2194.746808777492,
+        2367.8320147107556
+      ],
+      "raw_output_sha256": [
+        "acda2cc9002f36a13d5912240c8bbcba1b18eb43ed06ff517f56f0655a29dc07",
+        "e77da2153ab0b00debd225d0408e8c045909cef4e179e465c7d169728e19a028",
+        "63e3b35dbf2e7b8ea06b21233e3d533f8c3002b8b4560c9fd46ed5f2b5f2b3d0",
+        "575dd5ff76741622044d6c0ec45ab690fb988b524ae3594fd02c4b46805be035",
+        "ace62d41c9c1b7e6e5b336792d910ad80dbe11329eda566ceae73893b610fe33"
+      ],
+      "median_semantic_decisions_per_second": 2310.906678891203
+    },
+    "median_speedup": 1.3490540156642588
+  },
+  "end_to_end_benchmark": {
+    "command": "PYTHONPATH=SOURCE/python .venv/bin/python SOURCE/benchmarks/rl_r3a.py --backend portable --runtime build-opt/libirisu_clone.so --lanes 16 --updates 3 --decisions 128 --torch-threads 4 --no-tick-target",
+    "parameters": {
+      "pairs": 3,
+      "lanes": 16,
+      "updates": 3,
+      "decisions_per_update": 128,
+      "torch_threads": 4,
+      "seed": 20260722
+    },
+    "baseline": {
+      "wall_seconds": [
+        14.371146475023124,
+        14.602900472003967,
+        15.882919096009573
+      ],
+      "transitions_per_second": [
+        427.52330238079446,
+        420.73833289345527,
+        386.8306551749432
+      ],
+      "median_update_seconds_per_run": [
+        4.5645168129995,
+        4.5868901499779895,
+        5.076694465009496
+      ],
+      "raw_output_sha256": [
+        "c3fea745b944bccb55f6bd5541067c1d148b81922a11fdf0c822e3e8f7efc9f5",
+        "731d232beda60c390c13fb6ebb8a63178ed393e6eda50d195456daa2dc554ae8",
+        "46fc5eee6e89666bd2ef215a45f021aea641bbc8f890ca5b9c2637556dc04115"
+      ],
+      "median_transitions_per_second": 420.73833289345527
+    },
+    "optimized": {
+      "wall_seconds": [
+        12.056585454993183,
+        12.912761953019071,
+        13.564152025996009
+      ],
+      "transitions_per_second": [
+        509.5970184042024,
+        475.80835318996185,
+        452.9586507306084
+      ],
+      "median_update_seconds_per_run": [
+        3.768562855984783,
+        4.1040425619867165,
+        4.34142069099471
+      ],
+      "raw_output_sha256": [
+        "dd9d5768eb2535e4f54ee4143047b8740cac2576ed79caf32af2cc3984958be6",
+        "481f67a4fceebfe00f844beab29d0dc629f5b15a5d6168341bfd907f43797a99",
+        "e3779b2855b980ee96a1185147eabd14b5a0c0dc8e04d001fbe23496b9b20fe2"
+      ],
+      "median_transitions_per_second": 475.80835318996185
+    },
+    "median_speedup": 1.1308890015268755,
+    "trajectory_audit": {
+      "raw_rewards_per_update": [
+        1528,
+        1817,
+        1724
+      ],
+      "simulated_ticks_per_update": [
+        37646,
+        38613,
+        36700
+      ],
+      "same_for_every_baseline_and_optimized_run": true,
+      "zero_invalid_actions": true,
+      "zero_skipped_updates": true
+    }
+  },
+  "profile_diagnostics": {
+    "command": "PYTHONPATH=python uv run --extra training python -m cProfile -o PROFILE benchmarks/rl_r3a.py --backend portable --runtime build-opt/libirisu_clone.so --lanes 16 --updates 3 --decisions 128 --torch-threads 4 --no-tick-target",
+    "interpretation": "non-paired call-count and hotspot evidence; use paired wall benchmarks for speedup claims",
+    "baseline": {
+      "profile_sha256": "4f61fef83ee552c11533ac661f7feab33687392bff806cd0be288be0eebf99f8",
+      "output_sha256": "05feee471e98056392b6305cd37c533b07740dc16a1b3b673e0636db6c65470a",
+      "calls": {
+        "typed_body_encoding": 10264,
+        "gru": 3843
+      }
+    },
+    "optimized": {
+      "profile_sha256": "e6df5e1fbe8edb531a958e3b54223aba9fcf6ee02d7777287ada16505967e4b4",
+      "output_sha256": "3506ed30e5341b8582f465f1299431cb4ebd5b783e7ea15c2d9c0585f497e624",
+      "calls": {
+        "typed_body_encoding": 6241,
+        "gru": 788
+      }
+    }
+  },
+  "microbenchmarks": {
+    "typed_ctypes_extraction_10000_calls_seconds": {
+      "numpy_ctypeslib_as_array": 0.6659633210219909,
+      "cached_dtype_frombuffer": 0.00442403499619104,
+      "speedup": 150.53307497867742
+    },
+    "reset_segmented_gru": {
+      "shape": "128x8x192 with eight reset rows",
+      "per_timestep_median_seconds": 0.017947,
+      "segmented_median_seconds": 0.008064,
+      "speedup": 2.2250744047619047
+    },
+    "buffer_transaction_fill": {
+      "lanes": 16,
+      "scalar_median_seconds_per_row": 0.00059649,
+      "batched_median_seconds_per_row": 0.00007643,
+      "speedup": 7.804919534214313
+    }
+  },
+  "measured_non_targets": {
+    "checkpoint": {
+      "construction": "representative synthetic canonical model plus populated Adam state and sixteen 28104-byte durable snapshots",
+      "serialized_bytes": 4388384,
+      "median_seconds": 0.024784,
+      "frequency_updates": 50,
+      "caveat": "action-log snapshots grow with lane history, so this does not bound production checkpoint latency"
+    },
+    "model_transport_median_seconds": 0.002094,
+    "evaluation_batching": "rejected because it changes actions in the cell-independence adversarial fixture",
+    "exact_ipc": "already uses packed observations and lazy events; no protocol change selected"
+  },
+  "numerical_caveats": {
+    "mixed_reset_regression_max_abs_forward_difference": 1.2665987014770508e-07,
+    "mixed_reset_mean_loss_max_abs_gradient_difference": 1.1920928955078125e-07,
+    "production_shape_ppo_max_abs_gradient_difference": 2.91e-10,
+    "resume_statement": "optimized runs resume bit-exactly within the optimized implementation; baseline and optimized optimizer parameters are not claimed bit-identical",
+    "reset_density": "a reset in some lane on every time row removes recurrent batching benefit"
+  }
+}

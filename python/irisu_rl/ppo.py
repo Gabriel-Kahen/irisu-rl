@@ -539,8 +539,10 @@ class PPOTrainer:
                 )
                 new_components = distribution.log_prob_components(actions)
                 new_log_prob = new_components.total
-                entropy_values = distribution.entropy()
                 entropy_components = distribution.entropy_components()
+                entropy_values = distribution.entropy_from_components(
+                    entropy_components
+                )
                 old_log_prob = batch.old_log_prob[:, lanes]
                 log_ratio = torch.where(train_mask, new_log_prob - old_log_prob, 0.0)
                 ratio = torch.exp(log_ratio)

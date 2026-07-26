@@ -447,3 +447,35 @@ CPU budgeting must not infer throughput from logical CPU count alone.
 
 This is a systems smoke, not a learning or transfer benchmark. Its output is
 always labeled privileged, non-deployable, and pre-readiness.
+
+## Training runtime optimization evidence
+
+[`results/training-runtime-optimizations-2026-07-25.json`](results/training-runtime-optimizations-2026-07-25.json)
+records the clean-main/optimized A/B for the Python training hot path. It uses
+the existing R1 collection benchmark and R3a collect/update smoke with fixed
+seeds, one Release portable runtime, and the canonical 16-lane topology.
+
+After discarded warmups, five alternating baseline/optimized R1 pairs sustained
+medians of 1,712.983 and 2,310.907 semantic decisions/s respectively (1.349x).
+Three alternating full collect/update pairs sustained 420.738 and 475.808
+transitions/s (1.131x). Every run retained the same reward/tick audit with zero
+invalid actions or skipped updates. Profile call counts independently fell from
+10,264 to 6,241 typed-body encodes and from 3,843 to 788 GRU calls.
+
+The changes cache ctypes layouts, encode each completed semantic macro with
+opted-in lane-independent encoders without retaining borrowed views across
+backend calls, batch rollout-buffer row writes, group reset-free recurrent
+spans, and reuse computed entropy components.
+Multi-step GRU execution changes floating-point accumulation order: a mixed
+reset regression observed maximum forward and gradient differences of
+`1.27e-7` and `1.19e-7`. Resume determinism within the optimized implementation
+remains exact and tested, but baseline/optimized optimizer parameters are not
+claimed bit-identical. A reset in some lane on every time row also removes the
+recurrent batching benefit.
+
+Profiling rejected several riskier targets. A representative synthetic 4.39 MB
+checkpoint (canonical model/Adam state plus sixteen 28,104-byte durable
+snapshots) took 24.784 ms median and is written every 50 updates; real
+action-log snapshots grow with lane history. Model transport was about 2 ms per
+checkpoint. Exact IPC was already packed/lazy, while batching canonical
+evaluation inference would violate its explicit cell-independence guarantee.

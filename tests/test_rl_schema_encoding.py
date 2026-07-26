@@ -4,9 +4,11 @@ import json
 import math
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 from irisu_env.native import PaddedObservation
+from irisu_env.padded import ExactPaddedObservation
 from irisu_rl.encoding import ActorTrackEncoder, EncodedBatch, TeacherStateEncoder
 from irisu_rl.schema import ACTOR_VISION_V1, PROHIBITED_ACTOR_FIELDS, TEACHER_V1
 
@@ -81,7 +83,12 @@ class SchemaEncodingTests(unittest.TestCase):
     def test_teacher_dict_and_padded_parity_and_owned_tail(self) -> None:
         observation = padded_fixture()
         encoder = TeacherStateEncoder()
-        typed = encoder.encode([observation])
+        with patch.object(
+            np.ctypeslib,
+            "as_array",
+            side_effect=AssertionError("typed encoding reparsed the ctypes layout"),
+        ):
+            typed = encoder.encode([observation])
         dictionary = encoder.encode([observation.to_dict()])
         np.testing.assert_array_equal(typed.global_features, dictionary.global_features)
         np.testing.assert_array_equal(typed.body_features, dictionary.body_features)
@@ -91,6 +98,30 @@ class SchemaEncodingTests(unittest.TestCase):
         observation.bodies[2].x = float("nan")
         np.testing.assert_array_equal(typed.body_features, saved)
         self.assertEqual(int(typed.body_mask.sum()), 2)
+
+    def test_packed_exact_body_layout_matches_aligned_portable_layout(self) -> None:
+        portable = padded_fixture()
+        packed = ExactPaddedObservation()
+        for name, _ in ExactPaddedObservation._fields_[:-1]:
+            setattr(packed, name, getattr(portable, name))
+        for index in range(portable.body_count):
+            for name, _ in type(packed.bodies[index])._fields_:
+                setattr(
+                    packed.bodies[index],
+                    name,
+                    getattr(portable.bodies[index], name),
+                )
+        encoder = TeacherStateEncoder()
+        with patch.object(
+            np.ctypeslib,
+            "as_array",
+            side_effect=AssertionError("typed encoding reparsed the ctypes layout"),
+        ):
+            aligned = encoder.encode([portable])
+            exact = encoder.encode([packed])
+        np.testing.assert_array_equal(exact.global_features, aligned.global_features)
+        np.testing.assert_array_equal(exact.body_features, aligned.body_features)
+        np.testing.assert_array_equal(exact.body_mask, aligned.body_mask)
 
     def test_adversarial_teacher_sort_and_unknown_shape_parity(self) -> None:
         encoder = TeacherStateEncoder()

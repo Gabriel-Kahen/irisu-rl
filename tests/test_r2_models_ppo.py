@@ -208,6 +208,114 @@ class RecurrentModelTests(unittest.TestCase):
             value_shift.unsqueeze(-1).expand_as(one.value_quantiles),
         )
 
+    def test_mixed_lane_resets_use_maximal_reset_free_gru_spans(self) -> None:
+        global_features, bodies, mask = self.observations(time=6)
+        initial = self.model.initial_state(2)
+        reset = torch.zeros((6, 2), dtype=torch.bool)
+        reset[0, 0] = True
+        reset[2, 1] = True
+        reset[5, 0] = True
+        hidden = initial
+        repeated = []
+        for index in range(6):
+            step = self.model(
+                global_features[index : index + 1],
+                bodies[index : index + 1],
+                mask[index : index + 1],
+                hidden,
+                reset_before=reset[index : index + 1],
+            )
+            repeated.append(step)
+            hidden = step.recurrent_state
+        calls = 0
+
+        def count_forward(*_: object) -> None:
+            nonlocal calls
+            calls += 1
+
+        handle = self.model.recurrent.register_forward_hook(count_forward)
+        try:
+            segmented = self.model(
+                global_features,
+                bodies,
+                mask,
+                initial,
+                reset_before=reset,
+            )
+        finally:
+            handle.remove()
+        self.assertEqual(calls, 3)
+        for name in (
+            "kind_logits",
+            "wait_logits",
+            "coordinate_alpha",
+            "coordinate_beta",
+            "values",
+        ):
+            torch.testing.assert_close(
+                getattr(segmented, name),
+                torch.cat([getattr(step, name) for step in repeated]),
+                rtol=0,
+                atol=2e-7,
+                msg=name,
+            )
+        torch.testing.assert_close(
+            segmented.recurrent_state, hidden, rtol=0, atol=2e-7
+        )
+
+    def test_segmented_gru_gradient_difference_is_bounded(self) -> None:
+        global_features, bodies, mask = self.observations(time=6)
+        reset = torch.zeros((6, 2), dtype=torch.bool)
+        reset[0, 0] = True
+        reset[2, 1] = True
+        reset[5, 0] = True
+        segmented_model = copy.deepcopy(self.model)
+        repeated_model = copy.deepcopy(self.model)
+
+        segmented = segmented_model(
+            global_features,
+            bodies,
+            mask,
+            segmented_model.initial_state(2),
+            reset_before=reset,
+        )
+        output_names = (
+            "kind_logits",
+            "wait_logits",
+            "coordinate_alpha",
+            "coordinate_beta",
+            "values",
+        )
+        segmented_loss = sum(
+            getattr(segmented, name).mean()
+            for name in output_names
+        )
+        segmented_loss.backward()
+
+        hidden = repeated_model.initial_state(2)
+        repeated_loss = torch.zeros(())
+        for index in range(6):
+            step = repeated_model(
+                global_features[index : index + 1],
+                bodies[index : index + 1],
+                mask[index : index + 1],
+                hidden,
+                reset_before=reset[index : index + 1],
+            )
+            hidden = step.recurrent_state
+            repeated_loss = repeated_loss + sum(
+                getattr(step, name).mean() / 6
+                for name in output_names
+            )
+        repeated_loss.backward()
+        maximum_difference = max(
+            float((left.grad - right.grad).abs().max())
+            for left, right in zip(
+                segmented_model.parameters(), repeated_model.parameters()
+            )
+        )
+        self.assertLessEqual(maximum_difference, 2e-7)
+
 
 class PPOTrainerTests(unittest.TestCase):
     def assert_nested_equal(self, left, right, path="state"):
