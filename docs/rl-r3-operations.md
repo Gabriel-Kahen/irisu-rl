@@ -185,11 +185,13 @@ still content- and semantics-verified. This avoids repeatedly scanning a
 growing artifact store at every checkpoint.
 
 Learning-curve AUC uses a preregistered 32-snapshot exact subset at every
-50-update checkpoint. That subset therefore supplies LR selection, validation
-AUC nomination, and the sealed relative-AUC gate. Final mean, p10, retention,
-and portable diagnostics use the complete phase suite: 64 calibration cells
-and 512 validation/test cells. Curve and final suite identities are stored
-separately and cannot be substituted.
+50-update checkpoint on the optimizer-only simulated-tick clock. Drain and
+other skipped rollouts do not advance that curve clock; their ticks remain
+separately audited alongside total simulator work. That subset therefore
+supplies LR selection, validation AUC nomination, and the sealed relative-AUC
+gate. Final mean, p10, retention, and portable diagnostics use the complete
+phase suite: 64 calibration cells and 512 validation/test cells. Curve and
+final suite identities are stored separately and cannot be substituted.
 
 Exploratory exact-worker probes established the nine-process topology and
 checked identical episode content across replicas. The benchmark command now

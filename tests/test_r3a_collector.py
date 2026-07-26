@@ -525,10 +525,45 @@ class R3ACollectorTests(unittest.TestCase):
         self.assertIn("no trainable", result.skipped_reason or "")
         self.assertEqual(collector.completed_updates, 0)
         self.assertEqual(trainer.schedule.completed_updates, 0)
+        self.assertEqual(session.optimizer_simulated_ticks, 0)
+        self.assertEqual(
+            session.skipped_simulated_ticks, result.collection.simulated_ticks
+        )
+        self.assertEqual(session.drain_simulated_ticks, 0)
         self.assertFalse(session.poisoned)
-        self.assertIsNone(session.run_update().optimizer)
+        second = session.run_update()
+        self.assertIsNone(second.optimizer)
+        self.assertEqual(session.optimizer_simulated_ticks, 0)
+        self.assertEqual(
+            session.skipped_simulated_ticks,
+            result.collection.simulated_ticks + second.collection.simulated_ticks,
+        )
         with self.assertRaisesRegex(RuntimeError, "safety limit"):
             session.run_update()
+
+    def test_session_without_tail_rejects_forged_drain_ticks(self) -> None:
+        model = small_model()
+        collector = RecurrentCollector(
+            model,
+            MacroVectorAdapter(
+                AllHeldTruncatingVector(), encoder=TeacherStateEncoder()
+            ),
+            WeakOnlyTask(4),
+            config=CollectorConfig(max_decisions=1),
+            policy_sampler_seed=2,
+        )
+        trainer = PPOTrainer(
+            model,
+            config=PPOConfig(epochs=1, lane_minibatch_size=4, target_kl=1.0),
+            total_updates=1,
+            sampler_seed=3,
+        )
+        session = R3ATrainingSession(collector, trainer, numpy_seed=4)
+        collector.simulated_ticks = 1
+        session.skipped_simulated_ticks = 1
+        session.drain_simulated_ticks = 1
+        with self.assertRaisesRegex(ValueError, "without a tail"):
+            session._validate_update_clocks()
 
     def test_skipped_rollout_boundary_resumes_exactly(self) -> None:
         def build(seed):
@@ -567,6 +602,12 @@ class R3ACollectorTests(unittest.TestCase):
             self.assertEqual(restored.attempted_rollouts, 2)
             self.assertEqual(restored.skipped_rollouts, 2)
             self.assertEqual(restored.consecutive_skips, 2)
+            self.assertEqual(restored.optimizer_simulated_ticks, 0)
+            self.assertEqual(
+                restored.skipped_simulated_ticks,
+                source.skipped_simulated_ticks,
+            )
+            self.assertEqual(restored.drain_simulated_ticks, 0)
 
     def test_bootstrap_matrix_covers_terminal_and_completed_shot_cut(self) -> None:
         collector = make_collector(

@@ -339,7 +339,7 @@ class R3BExperimentPlan:
     test_sealed: bool
     test_reuse_after_rejection: bool
     auc_definition: str
-    maximum_cumulative_tick_overshoot_fraction: float
+    maximum_cumulative_optimizer_tick_overshoot_fraction: float
     bootstrap_unit: str
     bootstrap_samples: int
     bootstrap_seed: int
@@ -500,10 +500,10 @@ class R3BExperimentPlan:
             )
         if (
             self.calibration_elimination_metric
-            != "final_rung_paired_tick_aligned_raw_score_auc_no_early_elimination"
+            != "final_rung_paired_optimizer_tick_aligned_raw_score_auc_no_early_elimination"
             or self.auc_definition
-            != "linear_interpolation_to_target_tick_grid_normalized_by_horizon"
-            or self.maximum_cumulative_tick_overshoot_fraction != 0.01
+            != "linear_interpolation_to_target_optimizer_tick_grid_normalized_by_horizon"
+            or self.maximum_cumulative_optimizer_tick_overshoot_fraction != 0.01
             or self.bootstrap_unit != "paired_learner_seed"
             or self.validation_selection_data != "fresh_unsealed_validation"
             or not isinstance(self.test_sealed, bool)
@@ -529,7 +529,7 @@ class R3BExperimentPlan:
             "confidence_level": self.confidence_level,
             "final_learning_rate_fraction": self.final_learning_rate_fraction,
             "relative_score_denominator_floor": self.relative_score_denominator_floor,
-            "maximum_cumulative_tick_overshoot_fraction": self.maximum_cumulative_tick_overshoot_fraction,
+            "maximum_cumulative_optimizer_tick_overshoot_fraction": self.maximum_cumulative_optimizer_tick_overshoot_fraction,
             "minimum_relative_auc_gain": self.minimum_relative_auc_gain,
             "minimum_final_mean_retention": self.minimum_final_mean_retention,
             "minimum_p10_retention": self.minimum_p10_retention,
@@ -597,7 +597,7 @@ class R3BExperimentPlan:
             for rate in self.learning_rates
         )
 
-    def tick_grid(self, updates: int) -> tuple[int, ...]:
+    def optimizer_tick_grid(self, updates: int) -> tuple[int, ...]:
         _positive_int(updates, name="updates")
         if updates % self.checkpoint_interval_updates:
             raise ValueError("updates must end on a checkpoint boundary")
@@ -757,7 +757,7 @@ class R3BExperimentPlan:
             },
             "statistics": {
                 "auc": self.auc_definition,
-                "maximum_cumulative_tick_overshoot_fraction": self.maximum_cumulative_tick_overshoot_fraction,
+                "maximum_cumulative_optimizer_tick_overshoot_fraction": self.maximum_cumulative_optimizer_tick_overshoot_fraction,
                 "bootstrap_unit": self.bootstrap_unit,
                 "bootstrap_samples": self.bootstrap_samples,
                 "bootstrap_seed": self.bootstrap_seed,
@@ -882,7 +882,7 @@ class R3BExperimentPlan:
             root["statistics"],
             {
                 "auc",
-                "maximum_cumulative_tick_overshoot_fraction",
+                "maximum_cumulative_optimizer_tick_overshoot_fraction",
                 "bootstrap_unit",
                 "bootstrap_samples",
                 "bootstrap_seed",
@@ -1023,9 +1023,11 @@ class R3BExperimentPlan:
             auc_definition=_nonempty_string(
                 statistics_table["auc"], name="AUC definition"
             ),
-            maximum_cumulative_tick_overshoot_fraction=_finite_float(
-                statistics_table["maximum_cumulative_tick_overshoot_fraction"],
-                name="maximum cumulative tick overshoot fraction",
+            maximum_cumulative_optimizer_tick_overshoot_fraction=_finite_float(
+                statistics_table[
+                    "maximum_cumulative_optimizer_tick_overshoot_fraction"
+                ],
+                name="maximum cumulative optimizer tick overshoot fraction",
             ),
             bootstrap_unit=_nonempty_string(
                 statistics_table["bootstrap_unit"], name="bootstrap unit"
@@ -1334,14 +1336,14 @@ class TestSuiteCommitment:
 
 @dataclass(frozen=True, slots=True)
 class CurvePoint:
-    simulated_ticks: int
+    optimizer_simulated_ticks: int
     mean_raw_score: float
 
     def __post_init__(self) -> None:
         if (
-            isinstance(self.simulated_ticks, bool)
-            or not isinstance(self.simulated_ticks, int)
-            or self.simulated_ticks < 0
+            isinstance(self.optimizer_simulated_ticks, bool)
+            or not isinstance(self.optimizer_simulated_ticks, int)
+            or self.optimizer_simulated_ticks < 0
             or isinstance(self.mean_raw_score, bool)
             or not isinstance(self.mean_raw_score, (int, float))
             or not math.isfinite(float(self.mean_raw_score))
@@ -1351,10 +1353,10 @@ class CurvePoint:
         object.__setattr__(self, "mean_raw_score", float(self.mean_raw_score))
 
 
-def tick_aligned_raw_score_auc(
+def optimizer_tick_aligned_raw_score_auc(
     points: Sequence[CurvePoint], expected_ticks: Sequence[int]
 ) -> float:
-    """Interpolate observed checkpoints to the target tick grid and normalize."""
+    """Interpolate observed checkpoints to the target optimizer-tick grid."""
 
     ticks = tuple(expected_ticks)
     if (
@@ -1365,12 +1367,14 @@ def tick_aligned_raw_score_auc(
             for tick in ticks
         )
     ):
-        raise ValueError("expected tick grid must start at zero and have a horizon")
+        raise ValueError(
+            "expected optimizer-tick grid must start at zero and have a horizon"
+        )
     if any(right <= left for left, right in zip(ticks, ticks[1:])):
-        raise ValueError("expected tick grid must be strictly increasing")
+        raise ValueError("expected optimizer-tick grid must be strictly increasing")
     if len(points) != len(ticks):
         raise ValueError("raw-score curve must match the target-grid cardinality")
-    observed_ticks = tuple(point.simulated_ticks for point in points)
+    observed_ticks = tuple(point.optimizer_simulated_ticks for point in points)
     if (
         observed_ticks[0] != 0
         or any(right <= left for left, right in zip(observed_ticks, observed_ticks[1:]))
@@ -1380,14 +1384,14 @@ def tick_aligned_raw_score_auc(
         )
     ):
         raise ValueError(
-            "each target tick must be bracketed by adjacent observed checkpoints"
+            "each target optimizer tick must be bracketed by adjacent checkpoints"
         )
     aligned = [points[0]]
     for index, target in enumerate(ticks[1:], start=1):
         left = points[index - 1]
         right = points[index]
-        fraction = (target - left.simulated_ticks) / (
-            right.simulated_ticks - left.simulated_ticks
+        fraction = (target - left.optimizer_simulated_ticks) / (
+            right.optimizer_simulated_ticks - left.optimizer_simulated_ticks
         )
         aligned.append(
             CurvePoint(
@@ -1397,7 +1401,7 @@ def tick_aligned_raw_score_auc(
             )
         )
     area = sum(
-        (right.simulated_ticks - left.simulated_ticks)
+        (right.optimizer_simulated_ticks - left.optimizer_simulated_ticks)
         * (left.mean_raw_score + right.mean_raw_score)
         / 2.0
         for left, right in zip(aligned, aligned[1:])
@@ -1411,8 +1415,11 @@ class TrainingCheckpointArtifact:
 
     learner_seed: int
     completed_updates: int
-    simulated_ticks: int
-    target_simulated_ticks: int
+    optimizer_simulated_ticks: int
+    target_optimizer_simulated_ticks: int
+    total_simulated_ticks: int
+    skipped_simulated_ticks: int
+    drain_simulated_ticks: int
     plan_sha256: str
     job_sha256: str
     trial_manifest_sha256: str
@@ -1420,24 +1427,34 @@ class TrainingCheckpointArtifact:
     checkpoint_manifest_sha256: str
     model_sha256: str
     deployment_policy_sha256: str
-    version: str = "r3b-training-checkpoint-artifact-v2"
+    version: str = "r3b-training-checkpoint-artifact-v3"
 
     def __post_init__(self) -> None:
         if (
-            self.version != "r3b-training-checkpoint-artifact-v2"
+            self.version != "r3b-training-checkpoint-artifact-v3"
             or isinstance(self.learner_seed, bool)
             or not isinstance(self.learner_seed, int)
             or not 0 <= self.learner_seed < 2**64
             or isinstance(self.completed_updates, bool)
             or not isinstance(self.completed_updates, int)
             or self.completed_updates < 0
-            or isinstance(self.simulated_ticks, bool)
-            or not isinstance(self.simulated_ticks, int)
-            or self.simulated_ticks < 0
-            or isinstance(self.target_simulated_ticks, bool)
-            or not isinstance(self.target_simulated_ticks, int)
-            or self.target_simulated_ticks < 0
-            or self.simulated_ticks < self.target_simulated_ticks
+            or any(
+                isinstance(value, bool)
+                or not isinstance(value, int)
+                or value < 0
+                for value in (
+                    self.optimizer_simulated_ticks,
+                    self.target_optimizer_simulated_ticks,
+                    self.total_simulated_ticks,
+                    self.skipped_simulated_ticks,
+                    self.drain_simulated_ticks,
+                )
+            )
+            or self.optimizer_simulated_ticks
+            < self.target_optimizer_simulated_ticks
+            or self.optimizer_simulated_ticks + self.skipped_simulated_ticks
+            != self.total_simulated_ticks
+            or self.drain_simulated_ticks > self.skipped_simulated_ticks
             or any(
                 not _is_nonzero_sha256(value)
                 for value in (
@@ -1461,8 +1478,11 @@ class TrainingCheckpointArtifact:
         expected = {
             "learner_seed",
             "completed_updates",
-            "simulated_ticks",
-            "target_simulated_ticks",
+            "optimizer_simulated_ticks",
+            "target_optimizer_simulated_ticks",
+            "total_simulated_ticks",
+            "skipped_simulated_ticks",
+            "drain_simulated_ticks",
             "plan_sha256",
             "job_sha256",
             "trial_manifest_sha256",
@@ -1480,8 +1500,11 @@ class TrainingCheckpointArtifact:
             for name in (
                 "learner_seed",
                 "completed_updates",
-                "simulated_ticks",
-                "target_simulated_ticks",
+                "optimizer_simulated_ticks",
+                "target_optimizer_simulated_ticks",
+                "total_simulated_ticks",
+                "skipped_simulated_ticks",
+                "drain_simulated_ticks",
             )
         ) or any(
             type(manifest[name]) is not str
@@ -1489,8 +1512,11 @@ class TrainingCheckpointArtifact:
             - {
                 "learner_seed",
                 "completed_updates",
-                "simulated_ticks",
-                "target_simulated_ticks",
+                "optimizer_simulated_ticks",
+                "target_optimizer_simulated_ticks",
+                "total_simulated_ticks",
+                "skipped_simulated_ticks",
+                "drain_simulated_ticks",
             }
         ):
             raise ValueError("training checkpoint artifact field types are malformed")
@@ -1514,13 +1540,13 @@ class CheckpointEvaluation:
 
     checkpoint: TrainingCheckpointArtifact
     report: object
-    version: str = "r3b-checkpoint-evaluation-v2"
+    version: str = "r3b-checkpoint-evaluation-v3"
 
     def __post_init__(self) -> None:
         from .r3b_evaluation import EvaluationReport
 
         if (
-            self.version != "r3b-checkpoint-evaluation-v2"
+            self.version != "r3b-checkpoint-evaluation-v3"
             or not isinstance(self.checkpoint, TrainingCheckpointArtifact)
             or not isinstance(self.report, EvaluationReport)
             or self.report.policy_sha256 != self.checkpoint.deployment_policy_sha256
@@ -1532,12 +1558,24 @@ class CheckpointEvaluation:
         return self.checkpoint.completed_updates
 
     @property
-    def simulated_ticks(self) -> int:
-        return self.checkpoint.simulated_ticks
+    def optimizer_simulated_ticks(self) -> int:
+        return self.checkpoint.optimizer_simulated_ticks
 
     @property
-    def target_simulated_ticks(self) -> int:
-        return self.checkpoint.target_simulated_ticks
+    def target_optimizer_simulated_ticks(self) -> int:
+        return self.checkpoint.target_optimizer_simulated_ticks
+
+    @property
+    def total_simulated_ticks(self) -> int:
+        return self.checkpoint.total_simulated_ticks
+
+    @property
+    def skipped_simulated_ticks(self) -> int:
+        return self.checkpoint.skipped_simulated_ticks
+
+    @property
+    def drain_simulated_ticks(self) -> int:
+        return self.checkpoint.drain_simulated_ticks
 
     @property
     def checkpoint_artifact_sha256(self) -> str:
@@ -1597,13 +1635,13 @@ class RawScoreMetricsArtifact:
     final_suite: object
     checkpoints: tuple[CheckpointEvaluation, ...]
     final_report: object
-    version: str = "r3b-raw-score-metrics-v3"
+    version: str = "r3b-raw-score-metrics-v4"
 
     def __post_init__(self) -> None:
         from .r3b_evaluation import EvaluationReport, EvaluationSuite
 
         if (
-            self.version != "r3b-raw-score-metrics-v3"
+            self.version != "r3b-raw-score-metrics-v4"
             or isinstance(self.learner_seed, bool)
             or not isinstance(self.learner_seed, int)
             or not 0 <= self.learner_seed < 2**64
@@ -1634,6 +1672,9 @@ class RawScoreMetricsArtifact:
             raise ValueError("curve and final evaluation suites disagree")
         ticks: list[int] = []
         target_ticks: list[int] = []
+        total_ticks: list[int] = []
+        skipped_ticks: list[int] = []
+        drain_ticks: list[int] = []
         reports: list[EvaluationReport] = []
         expected_cells = {
             (snapshot_id, repetition)
@@ -1647,7 +1688,7 @@ class RawScoreMetricsArtifact:
                 or checkpoint.checkpoint.learner_seed != self.learner_seed
             ):
                 raise ValueError("checkpoint report entry is malformed")
-            tick = checkpoint.simulated_ticks
+            tick = checkpoint.optimizer_simulated_ticks
             report = checkpoint.report
             cells = {
                 (episode.snapshot_id, episode.repetition) for episode in report.episodes
@@ -1672,7 +1713,10 @@ class RawScoreMetricsArtifact:
                 raise ValueError("checkpoint report cells do not match the suite")
             updates.append(checkpoint.completed_updates)
             ticks.append(tick)
-            target_ticks.append(checkpoint.target_simulated_ticks)
+            target_ticks.append(checkpoint.target_optimizer_simulated_ticks)
+            total_ticks.append(checkpoint.total_simulated_ticks)
+            skipped_ticks.append(checkpoint.skipped_simulated_ticks)
+            drain_ticks.append(checkpoint.drain_simulated_ticks)
             reports.append(report)
         final_cells = {
             (episode.snapshot_id, episode.repetition)
@@ -1705,9 +1749,26 @@ class RawScoreMetricsArtifact:
             updates[0] != 0
             or ticks[0] != 0
             or target_ticks[0] != 0
+            or total_ticks[0] != 0
+            or skipped_ticks[0] != 0
+            or drain_ticks[0] != 0
             or any(right <= left for left, right in zip(updates, updates[1:]))
             or any(right <= left for left, right in zip(ticks, ticks[1:]))
             or any(right <= left for left, right in zip(target_ticks, target_ticks[1:]))
+            or any(right <= left for left, right in zip(total_ticks, total_ticks[1:]))
+            or any(
+                right < left for left, right in zip(skipped_ticks, skipped_ticks[1:])
+            )
+            or any(right < left for left, right in zip(drain_ticks, drain_ticks[1:]))
+            or any(
+                right_skipped - right_drain < left_skipped - left_drain
+                for left_skipped, right_skipped, left_drain, right_drain in zip(
+                    skipped_ticks,
+                    skipped_ticks[1:],
+                    drain_ticks,
+                    drain_ticks[1:],
+                )
+            )
             or any(
                 ticks[index - 1] >= target_ticks[index]
                 or target_ticks[index] > ticks[index]
@@ -1715,7 +1776,7 @@ class RawScoreMetricsArtifact:
             )
         ):
             raise ValueError(
-                "checkpoint reports must bracket an increasing target tick grid"
+                "checkpoint reports must bracket an increasing optimizer-tick grid"
             )
         if (
             len({report.evaluator_sha256 for report in reports}) != 1
@@ -1733,12 +1794,12 @@ class RawScoreMetricsArtifact:
             )
 
     @property
-    def tick_reports(self) -> tuple[tuple[int, str, object], ...]:
-        """Compatibility view; authoritative metadata lives in ``checkpoints``."""
+    def optimizer_tick_reports(self) -> tuple[tuple[int, str, object], ...]:
+        """Optimizer-clock view; authoritative metadata lives in checkpoints."""
 
         return tuple(
             (
-                checkpoint.simulated_ticks,
+                checkpoint.optimizer_simulated_ticks,
                 checkpoint.checkpoint_artifact_sha256,
                 checkpoint.report,
             )
@@ -1753,7 +1814,9 @@ class RawScoreMetricsArtifact:
                 statistics.fmean(episode.raw_score for episode in report.episodes),
             )
             for checkpoint in self.checkpoints
-            for tick, report in ((checkpoint.simulated_ticks, checkpoint.report),)
+            for tick, report in (
+                (checkpoint.optimizer_simulated_ticks, checkpoint.report),
+            )
         )
 
     @property
@@ -1765,9 +1828,12 @@ class RawScoreMetricsArtifact:
     @property
     def raw_score_auc(self) -> float:
         points = self.points
-        return tick_aligned_raw_score_auc(
+        return optimizer_tick_aligned_raw_score_auc(
             points,
-            tuple(checkpoint.target_simulated_ticks for checkpoint in self.checkpoints),
+            tuple(
+                checkpoint.target_optimizer_simulated_ticks
+                for checkpoint in self.checkpoints
+            ),
         )
 
     @property
@@ -2504,7 +2570,7 @@ def _require_metric_artifacts(
     for result in results:
         if result.status != "complete":
             continue
-        expected_ticks = plan.tick_grid(result.budget_updates)
+        expected_ticks = plan.optimizer_tick_grid(result.budget_updates)
         expected_updates = tuple(
             range(
                 0,
@@ -2516,10 +2582,12 @@ def _require_metric_artifacts(
             artifact = outcome.metrics_artifact
             evidence = outcome.engineering_evidence
             observed_ticks = tuple(
-                checkpoint.simulated_ticks for checkpoint in artifact.checkpoints
+                checkpoint.optimizer_simulated_ticks
+                for checkpoint in artifact.checkpoints
             )
             target_ticks = tuple(
-                checkpoint.target_simulated_ticks for checkpoint in artifact.checkpoints
+                checkpoint.target_optimizer_simulated_ticks
+                for checkpoint in artifact.checkpoints
             )
             if (
                 evidence is None
@@ -2531,7 +2599,11 @@ def _require_metric_artifacts(
                 or target_ticks != expected_ticks
                 or any(
                     observed
-                    > target * (1.0 + plan.maximum_cumulative_tick_overshoot_fraction)
+                    > target
+                    * (
+                        1.0
+                        + plan.maximum_cumulative_optimizer_tick_overshoot_fraction
+                    )
                     for observed, target in zip(observed_ticks[1:], target_ticks[1:])
                 )
                 or any(

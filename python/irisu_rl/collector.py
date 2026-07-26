@@ -1078,7 +1078,7 @@ class RecurrentCollector:
 class R3ATrainingSession:
     """One clean-boundary collect/update/checkpoint state machine."""
 
-    version = "r3a-training-session-v3"
+    version = "r3a-training-session-v4"
 
     def __init__(
         self,
@@ -1130,6 +1130,9 @@ class R3ATrainingSession:
         self.attempted_rollouts = 0
         self.skipped_rollouts = 0
         self.consecutive_skips = 0
+        self.optimizer_simulated_ticks = 0
+        self.skipped_simulated_ticks = 0
+        self.drain_simulated_ticks = 0
         self._busy = False
         self._poisoned = False
         self._clean_collection_counters: tuple[int, int, int] | None = None
@@ -1192,7 +1195,9 @@ class R3ATrainingSession:
                     completed_updates=self.trainer.schedule.completed_updates,
                 )
                 return self._finish_skipped_rollout(
-                    rollout, "score-only tail episode drain"
+                    rollout,
+                    "score-only tail episode drain",
+                    tail_drain=True,
                 )
             if activating:
                 return self._finish_skipped_rollout(
@@ -1219,6 +1224,7 @@ class R3ATrainingSession:
                     rollout.audit,
                     completed_updates=self.trainer.schedule.completed_updates,
                 )
+            self.optimizer_simulated_ticks += rollout.audit.simulated_ticks
             self.consecutive_skips = 0
             self._mark_clean_collection_boundary()
             return TrainingUpdate(rollout.audit, stats)
@@ -1229,9 +1235,16 @@ class R3ATrainingSession:
             self._busy = False
 
     def _finish_skipped_rollout(
-        self, rollout: CollectedRollout, reason: str
+        self,
+        rollout: CollectedRollout,
+        reason: str,
+        *,
+        tail_drain: bool = False,
     ) -> TrainingUpdate:
         self.skipped_rollouts += 1
+        self.skipped_simulated_ticks += rollout.audit.simulated_ticks
+        if tail_drain:
+            self.drain_simulated_ticks += rollout.audit.simulated_ticks
         activation_completed = (
             reason == "curriculum stage activation drain"
             and isinstance(self.task, CurriculumTaskContract)
@@ -1266,6 +1279,40 @@ class R3ATrainingSession:
             self.skipped_rollouts + self.collector.completed_updates
         ):
             raise ValueError("session rollout and update counters disagree")
+        tick_counters = (
+            self.optimizer_simulated_ticks,
+            self.skipped_simulated_ticks,
+            self.drain_simulated_ticks,
+        )
+        if any(
+            isinstance(value, bool) or not isinstance(value, int) or value < 0
+            for value in tick_counters
+        ):
+            raise ValueError("session simulated-tick counters are malformed")
+        if (
+            self.optimizer_simulated_ticks + self.skipped_simulated_ticks
+            != self.collector.simulated_ticks
+            or self.drain_simulated_ticks > self.skipped_simulated_ticks
+        ):
+            raise ValueError("session and collector simulated-tick clocks disagree")
+        if self.tail_controller is None:
+            if self.drain_simulated_ticks != 0:
+                raise ValueError("session without a tail cannot contain drain ticks")
+        elif (
+            self.tail_controller.drain_collections > self.skipped_rollouts
+            or self.drain_simulated_ticks
+            < self.tail_controller.drain_collections
+            or (self.drain_simulated_ticks == 0)
+            != (self.tail_controller.drain_collections == 0)
+        ):
+            raise ValueError("tail drain collections and simulated ticks disagree")
+        target = self.collector.config.target_simulated_ticks
+        if (
+            target is not None
+            and self.optimizer_simulated_ticks
+            < self.collector.completed_updates * target
+        ):
+            raise ValueError("optimizer simulated-tick clock is below its target")
 
     def _validate_pending_policy(self) -> None:
         if isinstance(self.task, CurriculumTaskContract):
@@ -1371,6 +1418,9 @@ class R3ATrainingSession:
                 "attempted_rollouts": self.attempted_rollouts,
                 "skipped_rollouts": self.skipped_rollouts,
                 "consecutive_skips": self.consecutive_skips,
+                "optimizer_simulated_ticks": self.optimizer_simulated_ticks,
+                "skipped_simulated_ticks": self.skipped_simulated_ticks,
+                "drain_simulated_ticks": self.drain_simulated_ticks,
                 "tail": (
                     None
                     if self.tail_controller is None
@@ -1425,6 +1475,9 @@ class R3ATrainingSession:
             "attempted_rollouts",
             "skipped_rollouts",
             "consecutive_skips",
+            "optimizer_simulated_ticks",
+            "skipped_simulated_ticks",
+            "drain_simulated_ticks",
             "tail",
         }:
             raise ValueError("training-session skip state is malformed")
@@ -1436,6 +1489,9 @@ class R3ATrainingSession:
                 "attempted_rollouts",
                 "skipped_rollouts",
                 "consecutive_skips",
+                "optimizer_simulated_ticks",
+                "skipped_simulated_ticks",
+                "drain_simulated_ticks",
             )
         )
         if (
@@ -1448,6 +1504,8 @@ class R3ATrainingSession:
             or session_state["attempted_rollouts"] < session_state["skipped_rollouts"]
             or session_state["consecutive_skips"] > session_state["skipped_rollouts"]
             or session_state["consecutive_skips"] > self.max_consecutive_skips
+            or session_state["drain_simulated_ticks"]
+            > session_state["skipped_simulated_ticks"]
         ):
             raise ValueError("training-session skip state is malformed")
         try:
@@ -1466,6 +1524,13 @@ class R3ATrainingSession:
             self.attempted_rollouts = int(session_state["attempted_rollouts"])
             self.skipped_rollouts = int(session_state["skipped_rollouts"])
             self.consecutive_skips = int(session_state["consecutive_skips"])
+            self.optimizer_simulated_ticks = int(
+                session_state["optimizer_simulated_ticks"]
+            )
+            self.skipped_simulated_ticks = int(
+                session_state["skipped_simulated_ticks"]
+            )
+            self.drain_simulated_ticks = int(session_state["drain_simulated_ticks"])
             tail_state = session_state["tail"]
             if self.tail_controller is None:
                 if tail_state is not None:

@@ -60,7 +60,7 @@ from .r3b_parallel_evaluation import (
 )
 
 _CHECKPOINT_KIND = "irisu.r3b.training-checkpoint"
-_CHECKPOINT_VERSION = "r3b-training-checkpoint-package-v2"
+_CHECKPOINT_VERSION = "r3b-training-checkpoint-package-v3"
 _EVALUATION_SHUTDOWN_SECONDS = 5.0
 _EVALUATION_STARTUP_SECONDS = 30.0
 _PR_SET_PDEATHSIG = 1
@@ -494,7 +494,10 @@ def _checkpoint_package(
         "trial_manifest_sha256",
         "runner_spec_sha256",
         "completed_updates",
-        "simulated_ticks",
+        "optimizer_simulated_ticks",
+        "total_simulated_ticks",
+        "skipped_simulated_ticks",
+        "drain_simulated_ticks",
         "model_sha256",
         "deployment_policy_sha256",
         "checkpoint_artifact",
@@ -523,7 +526,12 @@ def _checkpoint_package(
         or checkpoint.runner_spec_sha256 != built.manifest.runner_spec_sha256
         or checkpoint.checkpoint_manifest_sha256
         != payload["checkpoint_manifest_sha256"]
-        or checkpoint.simulated_ticks != payload["simulated_ticks"]
+        or checkpoint.optimizer_simulated_ticks
+        != payload["optimizer_simulated_ticks"]
+        or checkpoint.total_simulated_ticks != payload["total_simulated_ticks"]
+        or checkpoint.skipped_simulated_ticks
+        != payload["skipped_simulated_ticks"]
+        or checkpoint.drain_simulated_ticks != payload["drain_simulated_ticks"]
         or checkpoint.model_sha256 != payload["model_sha256"]
         or checkpoint.deployment_policy_sha256 != payload["deployment_policy_sha256"]
     ):
@@ -571,7 +579,13 @@ def _restore(
     del encoder, kind_mask, wait_mask
     if (
         built.session.trainer.schedule.completed_updates != checkpoint.completed_updates
-        or built.session.collector.simulated_ticks != checkpoint.simulated_ticks
+        or built.session.optimizer_simulated_ticks
+        != checkpoint.optimizer_simulated_ticks
+        or built.session.collector.simulated_ticks
+        != checkpoint.total_simulated_ticks
+        or built.session.skipped_simulated_ticks
+        != checkpoint.skipped_simulated_ticks
+        or built.session.drain_simulated_ticks != checkpoint.drain_simulated_ticks
         or built.session.policy_sha256 != checkpoint.model_sha256
         or deployment.sha256 != checkpoint.deployment_policy_sha256
     ):

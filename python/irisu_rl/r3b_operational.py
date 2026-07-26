@@ -25,7 +25,7 @@ from .r3b_experiments import (
 _SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 _SHA256_ZERO = "0" * 64
 CANONICAL_PLAN_SHA256 = (
-    "68860ef26686c954960c176afe67a44da34e2ffab03dd02ba5aa7c1fc193baf8"
+    "cc4b5ff12f77fe126d526b3ab9ddfa88944552b98e90f52996b05196540256f7"
 )
 CANONICAL_OPERATIONAL_CONFIG_SHA256 = (
     "002a3f0deb1119b47aa55114f733c17322ec9aeaa1a5e13847ab834895a5577e"

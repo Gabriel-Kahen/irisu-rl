@@ -46,7 +46,7 @@ from irisu_rl.r3b_experiments import (
     load_plan,
     select_calibrated_learning_rates,
     select_validation_candidate,
-    tick_aligned_raw_score_auc,
+    optimizer_tick_aligned_raw_score_auc,
     _verified_exact_resume_artifact,
 )
 
@@ -284,7 +284,7 @@ def outcomes(
             "validation": VALIDATION_EVALUATION_SUITE,
             "test": TEST_EVALUATION_SUITE,
         }[phase]
-        ticks = TEST_PLAN.tick_grid(budget)
+        ticks = TEST_PLAN.optimizer_tick_grid(budget)
         final_count = len(suite.snapshot_ids) * suite.repetitions
         lower_count = max(1, (final_count + 9) // 10)
         upper = round(
@@ -333,6 +333,9 @@ def outcomes(
                 tick_index * TEST_PLAN.checkpoint_interval_updates,
                 tick,
                 tick,
+                tick,
+                0,
+                0,
                 PLAN_SHA256,
                 identity(seed, f"job:{arm_id}"),
                 identity(seed, "trial-manifest"),
@@ -685,7 +688,7 @@ class R3BExperimentPlanTests(unittest.TestCase):
         self.assertEqual(len(phase_seeds), len(set(phase_seeds)))
         self.assertEqual(self.plan.sha256, load_plan(PLAN_PATH).sha256)
         self.assertEqual(
-            self.plan.tick_grid(100),
+            self.plan.optimizer_tick_grid(100),
             (0, 102_400, 204_800),
         )
 
@@ -708,11 +711,98 @@ class R3BExperimentPlanTests(unittest.TestCase):
 
     def test_auc_interpolates_observed_overshoot_to_target_grid(self) -> None:
         points = (CurvePoint(0, 0), CurvePoint(10, 10), CurvePoint(20, 30))
-        self.assertEqual(tick_aligned_raw_score_auc(points, (0, 10, 20)), 12.5)
+        self.assertEqual(
+            optimizer_tick_aligned_raw_score_auc(points, (0, 10, 20)), 12.5
+        )
         overshot = (CurvePoint(0, 0), CurvePoint(12, 12), CurvePoint(24, 36))
-        self.assertEqual(tick_aligned_raw_score_auc(overshot, (0, 10, 20)), 12.0)
+        self.assertEqual(
+            optimizer_tick_aligned_raw_score_auc(overshot, (0, 10, 20)), 12.0
+        )
         with self.assertRaisesRegex(ValueError, "bracketed"):
-            tick_aligned_raw_score_auc(points, (0, 10, 30))
+            optimizer_tick_aligned_raw_score_auc(points, (0, 10, 30))
+
+    def test_metrics_ignore_a_multi_interval_drain_on_optimizer_clock(self) -> None:
+        original = outcomes(
+            (self.plan.validation_learner_seeds[0],),
+            auc=100,
+            final=100,
+            phase="validation",
+            budget=self.plan.validation_updates,
+            authorization_sha256="a" * 64,
+        )[0].metrics_artifact
+        checkpoints = tuple(
+            replace(
+                entry,
+                checkpoint=replace(
+                    entry.checkpoint,
+                    total_simulated_ticks=(
+                        entry.checkpoint.optimizer_simulated_ticks
+                        + (110_000 if entry.completed_updates > 600 else 0)
+                    ),
+                    skipped_simulated_ticks=(
+                        110_000 if entry.completed_updates > 600 else 0
+                    ),
+                    drain_simulated_ticks=(
+                        110_000 if entry.completed_updates > 600 else 0
+                    ),
+                ),
+            )
+            for entry in original.checkpoints
+        )
+        drained = RawScoreMetricsArtifact(
+            original.learner_seed,
+            original.curve_suite,
+            original.final_suite,
+            checkpoints,
+            original.final_report,
+        )
+        self.assertEqual(drained.raw_score_auc, original.raw_score_auc)
+        self.assertGreater(
+            drained.checkpoints[13].total_simulated_ticks,
+            drained.checkpoints[14].target_optimizer_simulated_ticks,
+        )
+
+    def test_metrics_reject_decreasing_non_drain_skipped_ticks(self) -> None:
+        original = outcomes(
+            (self.plan.validation_learner_seeds[1],),
+            auc=100,
+            final=100,
+            phase="validation",
+            budget=self.plan.validation_updates,
+            authorization_sha256="a" * 64,
+        )[0].metrics_artifact
+        checkpoints = tuple(
+            replace(
+                entry,
+                checkpoint=replace(
+                    entry.checkpoint,
+                    total_simulated_ticks=(
+                        entry.checkpoint.optimizer_simulated_ticks
+                        + (0 if entry.completed_updates == 0 else 100)
+                        + (10 if entry.completed_updates > 600 else 0)
+                    ),
+                    skipped_simulated_ticks=(
+                        0
+                        if entry.completed_updates == 0
+                        else 110
+                        if entry.completed_updates > 600
+                        else 100
+                    ),
+                    drain_simulated_ticks=(
+                        100 if entry.completed_updates > 600 else 0
+                    ),
+                ),
+            )
+            for entry in original.checkpoints
+        )
+        with self.assertRaisesRegex(ValueError, "tick grid"):
+            RawScoreMetricsArtifact(
+                original.learner_seed,
+                original.curve_suite,
+                original.final_suite,
+                checkpoints,
+                original.final_report,
+            )
 
     def test_outcome_aggregates_are_derived_from_typed_reports(self) -> None:
         value = outcomes(

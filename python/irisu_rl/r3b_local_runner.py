@@ -335,8 +335,11 @@ def _checkpoint(
     artifact = TrainingCheckpointArtifact(
         learner_seed=built.manifest.learner_seed,
         completed_updates=completed,
-        simulated_ticks=session.collector.simulated_ticks,
-        target_simulated_ticks=completed * plan.ticks_per_update,
+        optimizer_simulated_ticks=session.optimizer_simulated_ticks,
+        target_optimizer_simulated_ticks=completed * plan.ticks_per_update,
+        total_simulated_ticks=session.collector.simulated_ticks,
+        skipped_simulated_ticks=session.skipped_simulated_ticks,
+        drain_simulated_ticks=session.drain_simulated_ticks,
         plan_sha256=plan.sha256,
         job_sha256=claim.job_sha256,
         trial_manifest_sha256=built.manifest.sha256,
@@ -347,13 +350,16 @@ def _checkpoint(
     )
     envelope = ArtifactStore(run_root / "artifacts").publish(
         kind="irisu.r3b.training-checkpoint",
-        version="r3b-training-checkpoint-package-v2",
+        version="r3b-training-checkpoint-package-v3",
         payload={
             "job_sha256": claim.job_sha256,
             "trial_manifest_sha256": built.manifest.sha256,
             "runner_spec_sha256": built.manifest.runner_spec_sha256,
             "completed_updates": completed,
-            "simulated_ticks": session.collector.simulated_ticks,
+            "optimizer_simulated_ticks": session.optimizer_simulated_ticks,
+            "total_simulated_ticks": session.collector.simulated_ticks,
+            "skipped_simulated_ticks": session.skipped_simulated_ticks,
+            "drain_simulated_ticks": session.drain_simulated_ticks,
             "model_sha256": session.policy_sha256,
             "deployment_policy_sha256": deployment.sha256,
             "checkpoint_artifact": artifact.manifest(),
@@ -412,10 +418,13 @@ class LocalTrainingResult:
     job_sha256: str
     completed_updates: int
     budget_updates: int
-    simulated_ticks: int
+    optimizer_simulated_ticks: int
+    total_simulated_ticks: int
+    skipped_simulated_ticks: int
+    drain_simulated_ticks: int
     checkpoint_artifact_sha256: str
     training_complete: bool
-    version: str = "r3b-local-training-result-v1"
+    version: str = "r3b-local-training-result-v2"
 
     def manifest(self) -> dict[str, object]:
         return {
@@ -423,7 +432,10 @@ class LocalTrainingResult:
             "job_sha256": self.job_sha256,
             "completed_updates": self.completed_updates,
             "budget_updates": self.budget_updates,
-            "simulated_ticks": self.simulated_ticks,
+            "optimizer_simulated_ticks": self.optimizer_simulated_ticks,
+            "total_simulated_ticks": self.total_simulated_ticks,
+            "skipped_simulated_ticks": self.skipped_simulated_ticks,
+            "drain_simulated_ticks": self.drain_simulated_ticks,
             "checkpoint_artifact_sha256": self.checkpoint_artifact_sha256,
             "training_complete": self.training_complete,
             "acceptance_eligible": False,
@@ -475,21 +487,75 @@ def _load_completed_training_result(
     envelope = ArtifactStore(root / "artifacts").load(
         latest["artifact_sha256"],
         expected_kind="irisu.r3b.training-checkpoint",
-        expected_version="r3b-training-checkpoint-package-v2",
+        expected_version="r3b-training-checkpoint-package-v3",
     )
     payload = envelope.payload
+    expected = {
+        "job_sha256",
+        "trial_manifest_sha256",
+        "runner_spec_sha256",
+        "completed_updates",
+        "optimizer_simulated_ticks",
+        "total_simulated_ticks",
+        "skipped_simulated_ticks",
+        "drain_simulated_ticks",
+        "model_sha256",
+        "deployment_policy_sha256",
+        "checkpoint_artifact",
+        "generation",
+        "checkpoint_manifest_sha256",
+        "checkpoint_files",
+    }
     if (
         not isinstance(payload, dict)
+        or set(payload) != expected
         or payload.get("job_sha256") != job.sha256
         or payload.get("completed_updates") != job.budget_updates
-        or not isinstance(payload.get("simulated_ticks"), int)
+        or any(
+            type(payload.get(name)) is not int
+            for name in (
+                "completed_updates",
+                "optimizer_simulated_ticks",
+                "total_simulated_ticks",
+                "skipped_simulated_ticks",
+                "drain_simulated_ticks",
+            )
+        )
+        or not isinstance(payload.get("generation"), str)
+        or not payload["generation"]
+        or not isinstance(payload.get("checkpoint_files"), dict)
+    ):
+        raise ValueError("trained job final checkpoint package differs")
+    checkpoint = TrainingCheckpointArtifact.from_manifest(
+        payload["checkpoint_artifact"]
+    )
+    if (
+        checkpoint.learner_seed != job.learner_seed
+        or checkpoint.completed_updates != job.budget_updates
+        or checkpoint.plan_sha256 != job.plan_sha256
+        or checkpoint.job_sha256 != job.sha256
+        or checkpoint.trial_manifest_sha256 != payload["trial_manifest_sha256"]
+        or checkpoint.runner_spec_sha256 != payload["runner_spec_sha256"]
+        or checkpoint.optimizer_simulated_ticks
+        != payload["optimizer_simulated_ticks"]
+        or checkpoint.total_simulated_ticks != payload["total_simulated_ticks"]
+        or checkpoint.skipped_simulated_ticks != payload["skipped_simulated_ticks"]
+        or checkpoint.drain_simulated_ticks != payload["drain_simulated_ticks"]
+        or checkpoint.model_sha256 != payload["model_sha256"]
+        or checkpoint.deployment_policy_sha256
+        != payload["deployment_policy_sha256"]
+        or checkpoint.checkpoint_manifest_sha256
+        != payload["checkpoint_manifest_sha256"]
     ):
         raise ValueError("trained job final checkpoint package differs")
     return LocalTrainingResult(
         job.sha256,
         job.budget_updates,
         job.budget_updates,
-        payload["simulated_ticks"],
+        payload["optimizer_simulated_ticks"],
+        payload["total_simulated_ticks"],
+        payload["skipped_simulated_ticks"],
+        payload["drain_simulated_ticks"],
         envelope.artifact_id,
         True,
     )
@@ -708,7 +774,7 @@ def _run_local_training_updates(
             envelope = ArtifactStore(root / "artifacts").load(
                 str(latest["artifact_sha256"]),
                 expected_kind="irisu.r3b.training-checkpoint",
-                expected_version="r3b-training-checkpoint-package-v2",
+                expected_version="r3b-training-checkpoint-package-v3",
             )
             payload = envelope.payload
             if (
@@ -719,7 +785,10 @@ def _run_local_training_updates(
                     "trial_manifest_sha256",
                     "runner_spec_sha256",
                     "completed_updates",
-                    "simulated_ticks",
+                    "optimizer_simulated_ticks",
+                    "total_simulated_ticks",
+                    "skipped_simulated_ticks",
+                    "drain_simulated_ticks",
                     "model_sha256",
                     "deployment_policy_sha256",
                     "checkpoint_artifact",
@@ -745,7 +814,14 @@ def _run_local_training_updates(
                 or checkpoint_artifact.trial_manifest_sha256 != built.manifest.sha256
                 or checkpoint_artifact.runner_spec_sha256
                 != built.manifest.runner_spec_sha256
-                or checkpoint_artifact.simulated_ticks != payload["simulated_ticks"]
+                or checkpoint_artifact.optimizer_simulated_ticks
+                != payload["optimizer_simulated_ticks"]
+                or checkpoint_artifact.total_simulated_ticks
+                != payload["total_simulated_ticks"]
+                or checkpoint_artifact.skipped_simulated_ticks
+                != payload["skipped_simulated_ticks"]
+                or checkpoint_artifact.drain_simulated_ticks
+                != payload["drain_simulated_ticks"]
                 or checkpoint_artifact.model_sha256 != payload["model_sha256"]
                 or checkpoint_artifact.deployment_policy_sha256
                 != payload["deployment_policy_sha256"]
@@ -779,8 +855,14 @@ def _run_local_training_updates(
             )
             if (
                 built.session.trainer.schedule.completed_updates != update
+                or built.session.optimizer_simulated_ticks
+                != payload.get("optimizer_simulated_ticks")
                 or built.session.collector.simulated_ticks
-                != payload.get("simulated_ticks")
+                != payload.get("total_simulated_ticks")
+                or built.session.skipped_simulated_ticks
+                != payload.get("skipped_simulated_ticks")
+                or built.session.drain_simulated_ticks
+                != payload.get("drain_simulated_ticks")
                 or built.session.policy_sha256 != payload.get("model_sha256")
             ):
                 raise ValueError("restored checkpoint state differs from its receipt")
@@ -837,7 +919,10 @@ def _run_local_training_updates(
             claim.job_sha256,
             built.session.trainer.schedule.completed_updates,
             job.budget_updates,
+            built.session.optimizer_simulated_ticks,
             built.session.collector.simulated_ticks,
+            built.session.skipped_simulated_ticks,
+            built.session.drain_simulated_ticks,
             checkpoint_sha,
             complete,
         )

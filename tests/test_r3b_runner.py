@@ -514,8 +514,11 @@ class R3BRunBuilderTests(unittest.TestCase):
                 checkpoint = TrainingCheckpointArtifact(
                     job.learner_seed,
                     primary.session.trainer.schedule.completed_updates,
+                    primary.session.optimizer_simulated_ticks,
+                    primary.session.optimizer_simulated_ticks,
                     primary.session.collector.simulated_ticks,
-                    primary.session.collector.simulated_ticks,
+                    primary.session.skipped_simulated_ticks,
+                    primary.session.drain_simulated_ticks,
                     plan.sha256,
                     job.sha256,
                     primary.manifest.sha256,
