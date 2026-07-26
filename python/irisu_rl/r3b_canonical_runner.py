@@ -708,7 +708,8 @@ def audit_penultimate_checkpoint(
         job.plan_sha256 != plan.sha256
         or job.budget_updates % plan.checkpoint_interval_updates
         or checkpoint.completed_updates != expected_update
-        or checkpoint.target_simulated_ticks != expected_update * plan.ticks_per_update
+        or checkpoint.target_optimizer_simulated_ticks
+        != expected_update * plan.ticks_per_update
         or checkpoint.job_sha256 != job.sha256
     ):
         raise ValueError("resume audit is not at the penultimate checkpoint")
@@ -1068,10 +1069,12 @@ def assemble_and_publish_outcome(
         update * plan.ticks_per_update for update in expected_grid
     )
     actual_target_ticks = tuple(
-        value.target_simulated_ticks for value in checkpoint_evaluations
+        value.target_optimizer_simulated_ticks for value in checkpoint_evaluations
     )
     if actual_target_ticks != expected_target_ticks:
-        raise ValueError("checkpoint evaluations do not cover the nominal tick grid")
+        raise ValueError(
+            "checkpoint evaluations do not cover the nominal optimizer-tick grid"
+        )
     if job.phase == "test":
         if (
             not isinstance(sealed_job_lease, SealedTestJobLease)

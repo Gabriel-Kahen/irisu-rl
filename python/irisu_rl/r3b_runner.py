@@ -262,6 +262,9 @@ def _session_continuation_state(session: R3ATrainingSession) -> dict[str, object
         "attempted_rollouts": session.attempted_rollouts,
         "skipped_rollouts": session.skipped_rollouts,
         "consecutive_skips": session.consecutive_skips,
+        "optimizer_simulated_ticks": session.optimizer_simulated_ticks,
+        "skipped_simulated_ticks": session.skipped_simulated_ticks,
+        "drain_simulated_ticks": session.drain_simulated_ticks,
         "max_consecutive_skips": session.max_consecutive_skips,
         "optimizer_update_limit": session.optimizer_update_limit,
         "rng": capture_rng_state(session.numpy_generator),
@@ -287,7 +290,10 @@ def verify_exact_resume_continuation(
         or checkpoint_identity.get("trial_manifest_sha256") != trial_manifest_sha256
         or source.policy_sha256 != checkpoint.model_sha256
         or source.trainer.schedule.completed_updates != checkpoint.completed_updates
-        or source.collector.simulated_ticks != checkpoint.simulated_ticks
+        or source.optimizer_simulated_ticks != checkpoint.optimizer_simulated_ticks
+        or source.collector.simulated_ticks != checkpoint.total_simulated_ticks
+        or source.skipped_simulated_ticks != checkpoint.skipped_simulated_ticks
+        or source.drain_simulated_ticks != checkpoint.drain_simulated_ticks
     ):
         raise ValueError("exact-resume source disagrees with the typed checkpoint")
     manifest_path = Path(checkpoint_directory) / generation / "manifest.json"
@@ -524,8 +530,14 @@ class BuiltTrial:
             or final_checkpoint is None
             or resume_checkpoint is None
             or final_checkpoint.completed_updates != completed
-            or final_checkpoint.simulated_ticks
+            or final_checkpoint.optimizer_simulated_ticks
+            != self.session.optimizer_simulated_ticks
+            or final_checkpoint.total_simulated_ticks
             != self.session.collector.simulated_ticks
+            or final_checkpoint.skipped_simulated_ticks
+            != self.session.skipped_simulated_ticks
+            or final_checkpoint.drain_simulated_ticks
+            != self.session.drain_simulated_ticks
             or final_checkpoint.plan_sha256 != self.manifest.plan_sha256
             or final_checkpoint.job_sha256 != self.manifest.job_sha256
             or final_checkpoint.trial_manifest_sha256 != self.manifest.sha256

@@ -164,7 +164,8 @@ rules are rejected.
 
 Calibration runs all 12 alpha/LR arms on three paired learner seeds at bounded
 100- and 300-update rungs. It selects one learning rate per alpha by median
-tick-aligned raw-score AUC, then final raw score, then the lower learning rate.
+optimizer-tick-aligned raw-score AUC, then final raw score, then the lower
+learning rate.
 Every arm retains a record; missing arms reject the phase and failures remain
 explicit but ineligible.
 
@@ -176,13 +177,15 @@ it does not confirm. Validation jobs require a typed authorization that carries
 the complete retained calibration results and recomputes the one-LR-per-alpha
 selection; a standalone selection hash cannot authorize work.
 
-Tick-aligned learning-curve AUC is evaluated on the frozen first 32 logical
-snapshots at each 50-update checkpoint. LR selection, validation AUC nomination,
-and the sealed relative-AUC gate all use that preregistered curve subset. Final
-mean, p10, retention, and cross-backend diagnostics use the complete 512-cell
-validation/test suite (64 cells for calibration). Curve and final reports carry
-different typed suite identities; a curve report cannot satisfy a full-suite
-final-score gate.
+Optimizer-tick-aligned learning-curve AUC is evaluated on the frozen first 32
+logical snapshots at each 50-update checkpoint. Only rollouts that produce an
+optimizer update advance this clock. Total simulator, skipped-rollout, and
+score-only-drain ticks remain separately checkpointed audit counters. LR
+selection, validation AUC nomination, and the sealed relative-AUC gate all use
+that preregistered curve subset. Final mean, p10, retention, and cross-backend
+diagnostics use the complete 512-cell validation/test suite (64 cells for
+calibration). Curve and final reports carry different typed suite identities; a
+curve report cannot satisfy a full-suite final-score gate.
 
 The test suite is committed before validation in a durable SQLite ledger. The
 validation authorization carries that commitment. After validation fixes one
@@ -282,10 +285,11 @@ mismatches, incomplete baselines, malformed tail audits, or checkpoint drift
 cannot be ignored.
 
 Raw-score AUC, final mean, and p10 are recomputed from typed fixed-cell reports
-at the exact checkpoint update/tick grid. Each point binds completed updates,
-simulated ticks, checkpoint artifact, evaluated policy, and report; reused
-reports or checkpoints and relabeled policy reports are rejected. Scalar
-aggregates cannot be edited independently. No result is an R3b
+at the exact checkpoint update/optimizer-tick grid. Each point binds completed
+updates, optimizer, total, skipped, and drain simulated ticks, checkpoint
+artifact, evaluated policy, and report; reused reports or checkpoints and
+relabeled policy reports are rejected. Scalar aggregates cannot be edited
+independently. No result is an R3b
 acceptance result until the complete calibration, validation, sealed test,
 exact-resume, snapshot replay, raw-score, and baseline artifacts exist and the
 canonical confirmation function returns `accepted`.

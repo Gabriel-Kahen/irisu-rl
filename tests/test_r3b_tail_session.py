@@ -104,8 +104,11 @@ class TailSessionIntegrationTests(unittest.TestCase):
                 checkpoint = TrainingCheckpointArtifact(
                     11,
                     source.trainer.schedule.completed_updates,
+                    source.optimizer_simulated_ticks,
+                    source.optimizer_simulated_ticks,
                     source.collector.simulated_ticks,
-                    source.collector.simulated_ticks,
+                    source.skipped_simulated_ticks,
+                    source.drain_simulated_ticks,
                     "b" * 64,
                     "c" * 64,
                     "a" * 64,
@@ -206,6 +209,10 @@ class TailSessionIntegrationTests(unittest.TestCase):
         shaped = session.run_update()
         self.assertIsNotNone(shaped.optimizer)
         self.assertEqual(trainer.schedule.completed_updates, 1)
+        shaped_ticks = shaped.collection.simulated_ticks
+        self.assertEqual(session.optimizer_simulated_ticks, shaped_ticks)
+        self.assertEqual(session.skipped_simulated_ticks, 0)
+        self.assertEqual(session.drain_simulated_ticks, 0)
 
         drain = session.run_update()
         self.assertIsNone(drain.optimizer)
@@ -213,6 +220,14 @@ class TailSessionIntegrationTests(unittest.TestCase):
         self.assertEqual(trainer.schedule.completed_updates, 1)
         self.assertEqual(tail.drain_collections, 1)
         self.assertEqual(coordinator.shaping_weights_ppm().tolist(), [0, 0, 0, 0])
+        drain_ticks = drain.collection.simulated_ticks
+        self.assertEqual(session.optimizer_simulated_ticks, shaped_ticks)
+        self.assertEqual(session.skipped_simulated_ticks, drain_ticks)
+        self.assertEqual(session.drain_simulated_ticks, drain_ticks)
+        self.assertEqual(
+            session.collector.simulated_ticks,
+            session.optimizer_simulated_ticks + session.skipped_simulated_ticks,
+        )
 
         self.assertEqual(session.consecutive_skips, session.max_consecutive_skips)
         score_only = session.run_update()
@@ -220,6 +235,12 @@ class TailSessionIntegrationTests(unittest.TestCase):
         self.assertEqual(session.consecutive_skips, 0)
         self.assertEqual(trainer.schedule.completed_updates, 2)
         self.assertEqual(tail.score_only_updates, 1)
+        self.assertEqual(
+            session.optimizer_simulated_ticks,
+            shaped_ticks + score_only.collection.simulated_ticks,
+        )
+        self.assertEqual(session.skipped_simulated_ticks, drain_ticks)
+        self.assertEqual(session.drain_simulated_ticks, drain_ticks)
         self.assertTrue(
             all(
                 weight == 0

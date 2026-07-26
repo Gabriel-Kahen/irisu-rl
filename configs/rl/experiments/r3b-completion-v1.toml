@@ -30,7 +30,7 @@ test_evaluation = 71
 
 [calibration]
 budgets_updates = [100, 300]
-elimination_metric = "final_rung_paired_tick_aligned_raw_score_auc_no_early_elimination"
+elimination_metric = "final_rung_paired_optimizer_tick_aligned_raw_score_auc_no_early_elimination"
 
 [validation]
 updates = 1000
@@ -44,8 +44,8 @@ sealed_until_one_candidate_is_selected = true
 reuse_after_rejection = false
 
 [statistics]
-auc = "linear_interpolation_to_target_tick_grid_normalized_by_horizon"
-maximum_cumulative_tick_overshoot_fraction = 0.01
+auc = "linear_interpolation_to_target_optimizer_tick_grid_normalized_by_horizon"
+maximum_cumulative_optimizer_tick_overshoot_fraction = 0.01
 bootstrap_unit = "paired_learner_seed"
 bootstrap_samples = 4096
 bootstrap_seed = 2026072203

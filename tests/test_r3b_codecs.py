@@ -95,6 +95,9 @@ def _checkpoint(
         completed_updates,
         simulated_ticks,
         simulated_ticks,
+        simulated_ticks,
+        0,
+        0,
         _hash("a"),
         _hash("b"),
         _hash("c"),
@@ -323,7 +326,7 @@ class R3BCodecTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "report reference mismatch"):
             CheckpointEvaluation.from_manifest(
                 {
-                    "version": "r3b-checkpoint-evaluation-v2",
+                    "version": "r3b-checkpoint-evaluation-v3",
                     "checkpoint": _checkpoint(
                         learner_seed=1,
                         completed_updates=0,
@@ -334,6 +337,27 @@ class R3BCodecTests(unittest.TestCase):
                     "report_sha256": _hash("c"),
                 },
                 report=report,
+            )
+        checkpoint_manifest = _checkpoint(
+            learner_seed=1,
+            completed_updates=1,
+            simulated_ticks=100,
+            policy_sha256=report.policy_sha256,
+            suffix="1",
+        ).manifest()
+        with self.assertRaisesRegex(ValueError, "malformed"):
+            TrainingCheckpointArtifact.from_manifest(
+                {
+                    **checkpoint_manifest,
+                    "total_simulated_ticks": 101,
+                }
+            )
+        with self.assertRaisesRegex(ValueError, "malformed"):
+            TrainingCheckpointArtifact.from_manifest(
+                {
+                    **checkpoint_manifest,
+                    "version": "r3b-training-checkpoint-artifact-v2",
+                }
             )
 
         logical = LogicalEvaluationCell(

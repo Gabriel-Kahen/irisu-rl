@@ -9,7 +9,11 @@ from types import SimpleNamespace
 from unittest import mock
 
 from irisu_rl.r3b_artifacts import ArtifactStore
-from irisu_rl.r3b_experiments import CandidateArm, TrialJob
+from irisu_rl.r3b_experiments import (
+    CandidateArm,
+    TrainingCheckpointArtifact,
+    TrialJob,
+)
 from irisu_rl.r3b_local_runner import (
     _checkpoint_due_after_update,
     _load_claim,
@@ -195,13 +199,40 @@ class R3BLocalRunnerTests(unittest.TestCase):
         )
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
+            checkpoint = TrainingCheckpointArtifact(
+                job.learner_seed,
+                job.budget_updates,
+                614_400,
+                614_400,
+                620_000,
+                5_600,
+                0,
+                job.plan_sha256,
+                job.sha256,
+                "3" * 64,
+                "4" * 64,
+                "5" * 64,
+                "6" * 64,
+                "7" * 64,
+            )
             artifact = ArtifactStore(root / "artifacts").publish(
                 kind="irisu.r3b.training-checkpoint",
-                version="r3b-training-checkpoint-package-v2",
+                version="r3b-training-checkpoint-package-v3",
                 payload={
                     "job_sha256": job.sha256,
+                    "trial_manifest_sha256": "3" * 64,
+                    "runner_spec_sha256": "4" * 64,
                     "completed_updates": job.budget_updates,
-                    "simulated_ticks": 614_400,
+                    "optimizer_simulated_ticks": 614_400,
+                    "total_simulated_ticks": 620_000,
+                    "skipped_simulated_ticks": 5_600,
+                    "drain_simulated_ticks": 0,
+                    "model_sha256": "6" * 64,
+                    "deployment_policy_sha256": "7" * 64,
+                    "checkpoint_artifact": checkpoint.manifest(),
+                    "generation": "update-0300",
+                    "checkpoint_manifest_sha256": "5" * 64,
+                    "checkpoint_files": {},
                 },
             )
             result = _load_completed_training_result(
@@ -216,7 +247,10 @@ class R3BLocalRunnerTests(unittest.TestCase):
             )
         self.assertTrue(result.training_complete)
         self.assertEqual(result.completed_updates, job.budget_updates)
-        self.assertEqual(result.simulated_ticks, 614_400)
+        self.assertEqual(result.optimizer_simulated_ticks, 614_400)
+        self.assertEqual(result.total_simulated_ticks, 620_000)
+        self.assertEqual(result.skipped_simulated_ticks, 5_600)
+        self.assertEqual(result.drain_simulated_ticks, 0)
         self.assertEqual(result.checkpoint_artifact_sha256, artifact.artifact_id)
 
 
