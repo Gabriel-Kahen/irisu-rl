@@ -61,11 +61,22 @@ unproven.
 
 ## Build and test
 
+The recommended full validation command builds and runs the native, Python,
+and web suites with a quota- and affinity-aware CPU budget:
+
+```bash
+uv run --all-extras python tools/validate.py
+```
+
+See [`docs/validation.md`](docs/validation.md) for concurrency controls and
+output behavior. The equivalent suites can also be run manually:
+
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j
 ctest --test-dir build --output-on-failure
 PYTHONPATH=python python3 -m unittest discover -s tests -p 'test_*.py' -v
+find apps/web/tests -type f -name '*.test.mjs' -exec node --test {} +
 ```
 
 The supported fidelity-reference profile is an optimized GNU C++ build on

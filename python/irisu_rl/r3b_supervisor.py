@@ -35,7 +35,12 @@ from .r3b_canonical_runner import (
 )
 from .r3b_evaluation import (
     DeploymentPolicyIdentity,
+    EvaluationSuite,
     deployment_policy_identity_for_threads,
+)
+from .r3b_evaluation_shards import (
+    merge_evaluation_shards,
+    plan_evaluation_shards,
 )
 from .r3b_experiments import (
     CheckpointEvaluation,
@@ -53,9 +58,11 @@ from .r3b_local_runner import (
 from .r3b_lock import evaluator_lease_path, hold_evaluator_lease
 from .r3b_operational import JobClaim, R3BWorkflow
 from .r3b_parallel_evaluation import (
+    CanonicalEvaluationShardTask,
+    CanonicalEvaluationShardTaskResult,
     CanonicalEvaluationTask,
     CanonicalEvaluationTaskResult,
-    evaluate_canonical_task,
+    evaluate_canonical_shard_task,
     serialize_evaluation_model,
 )
 
@@ -733,6 +740,104 @@ def _collect_evaluation_results(
     return results
 
 
+def _ordered_shard_tasks(
+    parent_suites: tuple[tuple[CanonicalEvaluationTask, EvaluationSuite], ...],
+) -> tuple[CanonicalEvaluationShardTask, ...]:
+    """Flatten the grid and put the longest immutable shards on CPU first."""
+
+    tasks: list[tuple[int, str, int, CanonicalEvaluationShardTask]] = []
+    for parent, suite in parent_suites:
+        if suite.sha256 != parent.suite_sha256:
+            raise ValueError("canonical evaluation parent suite identity differs")
+        for shard in plan_evaluation_shards(suite, parent.evaluation_shards):
+            task = CanonicalEvaluationShardTask(parent, shard.manifest())
+            work = len(shard.cells) * suite.max_simulated_ticks
+            tasks.append((-work, parent.sha256, shard.shard_index, task))
+    tasks.sort(key=lambda value: value[:3])
+    result = tuple(value[3] for value in tasks)
+    if len({task.sha256 for task in result}) != len(result):
+        raise RuntimeError("canonical evaluation shard task grid contains duplicates")
+    return result
+
+
+def _collect_evaluation_shard_results(
+    futures: dict[
+        Future[CanonicalEvaluationShardTaskResult],
+        CanonicalEvaluationShardTask,
+    ],
+    parent_suites: tuple[tuple[CanonicalEvaluationTask, EvaluationSuite], ...],
+) -> dict[str, CanonicalEvaluationTaskResult]:
+    """Collect every unique shard, merge complete parents, and fail closed."""
+
+    shard_results: dict[str, CanonicalEvaluationShardTaskResult] = {}
+    for future in as_completed(futures):
+        task = futures[future]
+        try:
+            result = future.result()
+        except BaseException as exc:
+            parent = task.parent
+            raise RuntimeError(
+                "isolated canonical evaluation shard "
+                f"{task.sha256} ({parent.purpose}/{parent.backend}, "
+                f"update {parent.completed_updates}, "
+                f"shard {task.shard.shard_index}) failed: "
+                f"{type(exc).__name__}: {exc}"
+            ) from exc
+        if isinstance(result, CanonicalEvaluationShardTaskResult):
+            result.__post_init__()
+        if (
+            not isinstance(result, CanonicalEvaluationShardTaskResult)
+            or result.shard_task_sha256 != task.sha256
+            or result.shard_task_sha256 in shard_results
+        ):
+            raise ValueError("isolated canonical evaluation shard identity differs")
+        shard_results[result.shard_task_sha256] = result
+    expected = {task.sha256 for task in futures.values()}
+    if set(shard_results) != expected:
+        raise RuntimeError("isolated canonical evaluation shards are incomplete")
+
+    tasks_by_parent: dict[str, list[CanonicalEvaluationShardTask]] = {}
+    for task in futures.values():
+        tasks_by_parent.setdefault(task.parent.sha256, []).append(task)
+    results: dict[str, CanonicalEvaluationTaskResult] = {}
+    for parent, suite in parent_suites:
+        shard_tasks = tasks_by_parent.get(parent.sha256, [])
+        expected_plans = plan_evaluation_shards(suite, parent.evaluation_shards)
+        indexed = {task.shard.shard_index: task for task in shard_tasks}
+        if (
+            len(indexed) != len(shard_tasks)
+            or set(indexed) != set(range(len(expected_plans)))
+            or any(
+                indexed[index].shard != plan
+                for index, plan in enumerate(expected_plans)
+            )
+        ):
+            raise RuntimeError(
+                "isolated canonical evaluation parent shards are incomplete"
+            )
+        shard_reports = tuple(
+            shard_results[indexed[index].sha256].shard_report_for(
+                indexed[index],
+                suite,
+            )
+            for index in range(len(expected_plans))
+        )
+        report = merge_evaluation_shards(suite, shard_reports)
+        result = CanonicalEvaluationTaskResult(
+            parent.sha256,
+            parent.suite_sha256,
+            parent.deployment_policy_sha256,
+            report.manifest(),
+        )
+        result.report_for(parent, suite)
+        if parent.sha256 in results:
+            raise ValueError("canonical evaluation parent task is duplicated")
+        results[parent.sha256] = result
+    if set(results) != {parent.sha256 for parent, _suite in parent_suites}:
+        raise RuntimeError("isolated canonical evaluation results are incomplete")
+    return results
+
+
 @dataclass(frozen=True, slots=True)
 class CanonicalEvaluationResult:
     job_sha256: str
@@ -951,12 +1056,18 @@ def evaluate_trained_canonical_job(
         )
         if len({task.sha256 for task in evaluation_tasks}) != len(evaluation_tasks):
             raise RuntimeError("canonical evaluation task grid contains duplicates")
+        parent_suites = (
+            *((curve_tasks[update], curve_suites.exact) for update in expected_updates),
+            (exact_final_task, final_suites.exact),
+            (portable_final_task, final_suites.portable),
+        )
+        shard_tasks = _ordered_shard_tasks(parent_suites)
         ArtifactLookupIndex(root / "evaluation-index.sqlite3")
         process_context = multiprocessing.get_context("spawn")
         ready_gate = process_context.Event()
         lease_path = str(evaluator_lease_path())
         executor = ProcessPoolExecutor(
-            max_workers=min(config.evaluation_processes, len(evaluation_tasks)),
+            max_workers=min(config.evaluation_processes, len(shard_tasks)),
             mp_context=process_context,
             initializer=_evaluation_worker_initializer,
             initargs=(os.getpid(), lease_path, ready_gate),
@@ -964,11 +1075,12 @@ def evaluate_trained_canonical_job(
         setattr(executor, "_irisu_ready_gate", ready_gate)
         setattr(executor, "_irisu_evaluator_lease_path", lease_path)
         futures: dict[
-            Future[CanonicalEvaluationTaskResult], CanonicalEvaluationTask
+            Future[CanonicalEvaluationShardTaskResult],
+            CanonicalEvaluationShardTask,
         ] = {}
         try:
-            for task in evaluation_tasks:
-                futures[executor.submit(evaluate_canonical_task, task)] = task
+            for task in shard_tasks:
+                futures[executor.submit(evaluate_canonical_shard_task, task)] = task
             _capture_evaluation_process_groups(executor)
             resume_update = job.budget_updates - plan.checkpoint_interval_updates
             resume_checkpoint, resume_generation = packages[resume_update]
@@ -1015,7 +1127,7 @@ def evaluate_trained_canonical_job(
             )
             resume_built.close()
             resume_built = None
-            results = _collect_evaluation_results(futures)
+            results = _collect_evaluation_shard_results(futures, parent_suites)
         except BaseException as primary_error:
             for future in futures:
                 future.cancel()

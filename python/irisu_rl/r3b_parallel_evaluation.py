@@ -21,7 +21,10 @@ from .r3b_canonical_runner import (
     CanonicalRunInputs,
     PairedEvaluationSuites,
     canonical_evaluation_identities,
+    canonical_shard_execution_identity,
+    evaluate_recurrent_policy_shard_persisted,
     evaluate_recurrent_policy_sharded,
+    load_persisted_recurrent_policy_shard,
     verify_canonical_evaluation_report,
 )
 from .r3b_evaluation import (
@@ -30,6 +33,11 @@ from .r3b_evaluation import (
     deployment_policy_identity_for_threads,
 )
 from .r3b_experiments import TrialJob
+from .r3b_evaluation_shards import (
+    EvaluationShardPlan,
+    EvaluationShardReport,
+    plan_evaluation_shards,
+)
 from .runtime_identity import attest_simulator_runtime
 from .schema import TEACHER_V1
 
@@ -209,6 +217,119 @@ class CanonicalEvaluationTaskResult:
         return report
 
 
+@dataclass(frozen=True, slots=True)
+class CanonicalEvaluationShardTask:
+    """One canonical parent evaluation narrowed to one immutable shard."""
+
+    parent: CanonicalEvaluationTask
+    shard_plan_manifest: dict[str, object]
+    version: str = "r3b-canonical-evaluation-shard-task-v1"
+
+    def __post_init__(self) -> None:
+        if (
+            self.version != "r3b-canonical-evaluation-shard-task-v1"
+            or not isinstance(self.parent, CanonicalEvaluationTask)
+            or not isinstance(self.shard_plan_manifest, dict)
+        ):
+            raise ValueError("canonical evaluation shard task is malformed")
+        self.parent.__post_init__()
+        shard = EvaluationShardPlan.from_manifest(self.shard_plan_manifest)
+        if (
+            shard.suite_sha256 != self.parent.suite_sha256
+            or shard.shard_count != self.parent.evaluation_shards
+        ):
+            raise ValueError("canonical evaluation shard task identity differs")
+
+    @property
+    def shard(self) -> EvaluationShardPlan:
+        return EvaluationShardPlan.from_manifest(self.shard_plan_manifest)
+
+    def manifest(self) -> dict[str, object]:
+        return {
+            "version": self.version,
+            "parent_task_sha256": self.parent.sha256,
+            "shard_plan_sha256": self.shard.sha256,
+        }
+
+    @property
+    def sha256(self) -> str:
+        return _canonical_sha256(self.manifest())
+
+
+@dataclass(frozen=True, slots=True)
+class CanonicalEvaluationShardTaskResult:
+    """Identity-bound persisted shard returned by an isolated evaluator."""
+
+    shard_task_sha256: str
+    parent_task_sha256: str
+    suite_sha256: str
+    policy_sha256: str
+    shard_plan_manifest: dict[str, object]
+    report_manifest: dict[str, object]
+    shard_report_manifest: dict[str, object]
+    version: str = "r3b-canonical-evaluation-shard-task-result-v1"
+
+    def __post_init__(self) -> None:
+        if (
+            self.version != "r3b-canonical-evaluation-shard-task-result-v1"
+            or any(
+                not _is_nonzero_sha256(value)
+                for value in (
+                    self.shard_task_sha256,
+                    self.parent_task_sha256,
+                    self.suite_sha256,
+                    self.policy_sha256,
+                )
+            )
+            or not isinstance(self.shard_plan_manifest, dict)
+            or not isinstance(self.report_manifest, dict)
+            or not isinstance(self.shard_report_manifest, dict)
+        ):
+            raise ValueError("canonical evaluation shard result is malformed")
+        EvaluationShardPlan.from_manifest(self.shard_plan_manifest)
+
+    def shard_report_for(
+        self,
+        task: CanonicalEvaluationShardTask,
+        suite: EvaluationSuite,
+    ) -> EvaluationShardReport:
+        if (
+            not isinstance(task, CanonicalEvaluationShardTask)
+            or self.shard_task_sha256 != task.sha256
+            or self.parent_task_sha256 != task.parent.sha256
+            or self.suite_sha256 != task.parent.suite_sha256
+            or self.policy_sha256 != task.parent.deployment_policy_sha256
+            or self.shard_plan_manifest != task.shard_plan_manifest
+        ):
+            raise ValueError(
+                "canonical evaluation shard result belongs to another task"
+            )
+        shard = task.shard
+        report = EvaluationReport.from_manifest(self.report_manifest, suite=suite)
+        shard_report = EvaluationShardReport.from_manifest(
+            self.shard_report_manifest,
+            shard=shard,
+            report=report,
+        )
+        expected_execution = canonical_shard_execution_identity(
+            suite=suite,
+            shard=shard,
+            evaluator_sha256=task.parent.evaluator_sha256,
+            policy_sha256=task.parent.deployment_policy_sha256,
+            worker_identity_sha256=task.parent.worker_identity_sha256,
+        )
+        if (
+            suite.sha256 != task.parent.suite_sha256
+            or report.suite_sha256 != task.parent.suite_sha256
+            or report.policy_sha256 != task.parent.deployment_policy_sha256
+            or report.evaluator_sha256 != task.parent.evaluator_sha256
+            or report.backend_identity_sha256 != suite.runtime_identity_sha256
+            or report.execution_identity_sha256 != expected_execution
+        ):
+            raise ValueError("canonical evaluation shard report identity differs")
+        return shard_report
+
+
 def serialize_evaluation_model(model: RecurrentActorCritic) -> bytes:
     """Copy a learned model into a bounded, process-safe transport payload."""
 
@@ -328,11 +449,9 @@ def _load_inputs(task: CanonicalEvaluationTask) -> CanonicalRunInputs:
     return inputs
 
 
-def evaluate_canonical_task(
+def _validated_task_context(
     task: CanonicalEvaluationTask,
-) -> CanonicalEvaluationTaskResult:
-    """Execute one task in its own spawned process without mutating workflow state."""
-
+) -> tuple[CanonicalRunInputs, EvaluationSuite]:
     if not isinstance(task, CanonicalEvaluationTask):
         raise TypeError("canonical evaluator requires a typed task")
     task.__post_init__()
@@ -370,18 +489,33 @@ def evaluate_canonical_task(
         or inputs.config.evaluation_shards != task.evaluation_shards
     ):
         raise ValueError("canonical evaluation task evaluator identity differs")
-    torch.set_num_threads(inputs.config.evaluation_torch_threads)
-    model, encoder, kind_mask, wait_mask = _model_from_task(task, inputs)
-    vector_arguments: dict[str, object] = {
+    return inputs, suite
+
+
+def _vector_arguments(
+    task: CanonicalEvaluationTask,
+    inputs: CanonicalRunInputs,
+) -> tuple[dict[str, object], object]:
+    arguments: dict[str, object] = {
         "workers": inputs.config.evaluation_workers,
         "physics_backend": task.backend,
     }
     if task.backend == "exact":
-        vector_arguments["worker_path"] = task.exact_worker_path
-        snapshot_store = inputs.exact_bundle.store
-    else:
-        vector_arguments["library_path"] = task.portable_library_path
-        snapshot_store = inputs.portable_bundle.store
+        arguments["worker_path"] = task.exact_worker_path
+        return arguments, inputs.exact_bundle.store
+    arguments["library_path"] = task.portable_library_path
+    return arguments, inputs.portable_bundle.store
+
+
+def evaluate_canonical_task(
+    task: CanonicalEvaluationTask,
+) -> CanonicalEvaluationTaskResult:
+    """Execute one parent task serially for compatibility with existing callers."""
+
+    inputs, suite = _validated_task_context(task)
+    torch.set_num_threads(inputs.config.evaluation_torch_threads)
+    model, encoder, kind_mask, wait_mask = _model_from_task(task, inputs)
+    vector_arguments, snapshot_store = _vector_arguments(task, inputs)
     with PaddedVectorEnv(
         inputs.config.evaluation_lanes,
         **vector_arguments,
@@ -420,3 +554,78 @@ def evaluate_canonical_task(
         task.deployment_policy_sha256,
         report.manifest(),
     )
+
+
+def evaluate_canonical_shard_task(
+    task: CanonicalEvaluationShardTask,
+) -> CanonicalEvaluationShardTaskResult:
+    """Execute one persisted shard without mutating canonical workflow state."""
+
+    if not isinstance(task, CanonicalEvaluationShardTask):
+        raise TypeError("canonical shard evaluator requires a typed task")
+    task.__post_init__()
+    parent = task.parent
+    inputs, suite = _validated_task_context(parent)
+    shard = task.shard
+    expected = plan_evaluation_shards(suite, parent.evaluation_shards)
+    if (
+        shard.shard_index >= len(expected)
+        or expected[shard.shard_index] != shard
+    ):
+        raise ValueError("canonical evaluation shard differs from its suite")
+    torch.set_num_threads(inputs.config.evaluation_torch_threads)
+    model, encoder, kind_mask, wait_mask = _model_from_task(parent, inputs)
+    artifact_store = ArtifactStore(inputs.root / "artifacts")
+    shard_report = load_persisted_recurrent_policy_shard(
+        inputs=inputs,
+        suite=suite,
+        shard=shard,
+        policy_sha256=parent.deployment_policy_sha256,
+        artifact_store=artifact_store,
+    )
+    if shard_report is not None:
+        return _canonical_shard_task_result(task, suite, shard_report)
+    vector_arguments, snapshot_store = _vector_arguments(parent, inputs)
+    with PaddedVectorEnv(
+        inputs.config.evaluation_lanes,
+        **vector_arguments,
+    ) as simulator:
+        runtime = attest_simulator_runtime(simulator.envs[0])
+        if runtime.sha256 != suite.runtime_identity_sha256:
+            raise ValueError("canonical evaluation runtime identity differs")
+        shard_report = evaluate_recurrent_policy_shard_persisted(
+            inputs=inputs,
+            simulator=simulator,
+            store=snapshot_store,
+            suite=suite,
+            model=model,
+            encoder=encoder,
+            kind_mask=kind_mask,
+            wait_mask=wait_mask,
+            shard=shard,
+            policy_sha256=parent.deployment_policy_sha256,
+            artifact_store=artifact_store,
+        )
+    return _canonical_shard_task_result(task, suite, shard_report)
+
+
+def _canonical_shard_task_result(
+    task: CanonicalEvaluationShardTask,
+    suite: EvaluationSuite,
+    shard_report: EvaluationShardReport,
+) -> CanonicalEvaluationShardTaskResult:
+    """Build and verify the process-safe result for one persisted shard."""
+
+    parent = task.parent
+    shard = task.shard
+    result = CanonicalEvaluationShardTaskResult(
+        task.sha256,
+        parent.sha256,
+        parent.suite_sha256,
+        parent.deployment_policy_sha256,
+        shard.manifest(),
+        shard_report.report.manifest(),
+        shard_report.manifest(),
+    )
+    result.shard_report_for(task, suite)
+    return result

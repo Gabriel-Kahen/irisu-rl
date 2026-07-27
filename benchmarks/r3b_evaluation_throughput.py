@@ -14,6 +14,7 @@ import resource
 import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import asdict
 from pathlib import Path
 from time import perf_counter, process_time
 
@@ -66,9 +67,19 @@ def main() -> int:
     parser.add_argument("--lanes", type=int, required=True)
     parser.add_argument("--workers", type=int, required=True)
     parser.add_argument("--cells", type=int, default=64)
+    parser.add_argument(
+        "--split",
+        choices=("calibration", "validation", "test"),
+        default="calibration",
+    )
     parser.add_argument("--max-ticks", type=int, default=8192)
     parser.add_argument("--torch-threads", type=int, default=4)
     parser.add_argument("--replicas", type=int, default=1)
+    parser.add_argument(
+        "--partition-replicas",
+        action="store_true",
+        help="partition cells across replicas instead of replaying the full suite",
+    )
     parser.add_argument(
         "--model-state",
         type=Path,
@@ -100,15 +111,21 @@ def main() -> int:
     with IrisuEnv(physics_backend="exact", worker_path=worker) as loader:
         bundle = load_snapshot_bundle(args.bundle, loader)
     recipes = tuple(
-        recipe for recipe in bundle.library.recipes if recipe.split == "calibration"
+        recipe for recipe in bundle.library.recipes if recipe.split == args.split
     )[: args.cells]
     if len(recipes) != args.cells:
-        parser.error("bundle cannot supply the requested calibration cells")
+        parser.error("bundle cannot supply the requested split cells")
 
-    assignment_sha256 = _sha256({"purpose": "r3b-evaluation-throughput-v1"})
+    assignment_sha256 = _sha256(
+        {
+            "purpose": "r3b-evaluation-throughput-v2",
+            "split": args.split,
+            "cells": args.cells,
+        }
+    )
     suite = EvaluationSuite(
-        suite_id="r3b-evaluation-throughput-v1",
-        split="calibration",
+        suite_id="r3b-evaluation-throughput-v2",
+        split=args.split,
         snapshot_ids=tuple(recipe.snapshot_id for recipe in recipes),
         repetitions=1,
         policy_seed=51,
@@ -158,6 +175,7 @@ def main() -> int:
         wait_mask = torch.ones(
             (1, len(model.action_spec.wait_choices)), dtype=torch.bool
         )
+    model.eval()
     deployment = deployment_policy_identity_for_threads(
         model,
         TeacherStateEncoder(),
@@ -169,6 +187,16 @@ def main() -> int:
 
     def evaluate_replica(replica: int):
         local_model = copy.deepcopy(model)
+        local_cells = None
+        if args.partition_replicas:
+            local_cells = tuple(
+                (snapshot_id, repetition)
+                for cell_index, snapshot_id in enumerate(suite.snapshot_ids)
+                if cell_index % args.replicas == replica
+                for repetition in range(suite.repetitions)
+            )
+            if not local_cells:
+                raise ValueError("partitioned replica has no evaluation cells")
         execution_sha256 = _sha256(
             {
                 "execution": "throughput-v1",
@@ -195,6 +223,7 @@ def main() -> int:
                 evaluator_sha256=evaluator_sha256,
                 expected_assignment_sha256=assignment_sha256,
                 execution_identity_sha256=execution_sha256,
+                cells=local_cells,
             )
             return perf_counter() - started, report
 
@@ -218,13 +247,44 @@ def main() -> int:
     simulated_ticks = sum(
         episode.elapsed_ticks for _, report in results for episode in report.episodes
     )
-    content_hashes = {report.episode_content_sha256 for _, report in results}
-    if len(content_hashes) != 1:
-        raise RuntimeError("replica episode content differs")
+    all_episodes = tuple(
+        episode for _, report in results for episode in report.episodes
+    )
+    if args.partition_replicas:
+        position = {
+            (snapshot_id, repetition): index
+            for index, (snapshot_id, repetition) in enumerate(
+                (snapshot_id, repetition)
+                for snapshot_id in suite.snapshot_ids
+                for repetition in range(suite.repetitions)
+            )
+        }
+        if len(all_episodes) != len(position):
+            raise RuntimeError("partitioned replicas did not cover the suite")
+        ordered_episodes = tuple(
+            sorted(
+                all_episodes,
+                key=lambda episode: position[
+                    (episode.snapshot_id, episode.repetition)
+                ],
+            )
+        )
+        if len(
+            {(episode.snapshot_id, episode.repetition) for episode in ordered_episodes}
+        ) != len(position):
+            raise RuntimeError("partitioned replicas produced duplicate cells")
+        content_sha256 = _sha256([asdict(episode) for episode in ordered_episodes])
+    else:
+        content_hashes = {
+            report.episode_content_sha256 for _, report in results
+        }
+        if len(content_hashes) != 1:
+            raise RuntimeError("replica episode content differs")
+        content_sha256 = content_hashes.pop()
     print(
         json.dumps(
             {
-                "version": "r3b-evaluation-throughput-result-v2",
+                "version": "r3b-evaluation-throughput-result-v3",
                 "invocation": sys.argv,
                 "source_revision": _git_output(repository, "rev-parse", "HEAD"),
                 "source_dirty": bool(
@@ -271,8 +331,11 @@ def main() -> int:
                 "execution_identity_sha256s": [
                     report.execution_identity_sha256 for _, report in results
                 ],
-                "cells_per_replica": len(results[0][1].episodes),
+                "cells_per_replica": [
+                    len(report.episodes) for _, report in results
+                ],
                 "replicas": args.replicas,
+                "partition_replicas": args.partition_replicas,
                 "replica_concurrency": "threads",
                 "lanes": args.lanes,
                 "workers": args.workers,
@@ -287,7 +350,7 @@ def main() -> int:
                 "average_cpu_cores": (process_cpu + child_cpu) / elapsed,
                 "simulated_ticks": simulated_ticks,
                 "simulated_ticks_per_second": simulated_ticks / elapsed,
-                "episode_content_sha256": content_hashes.pop(),
+                "episode_content_sha256": content_sha256,
             },
             sort_keys=True,
             indent=2,

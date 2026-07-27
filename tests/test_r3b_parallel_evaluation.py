@@ -12,15 +12,18 @@ import unittest
 from concurrent.futures import Future, ProcessPoolExecutor
 from dataclasses import replace
 from pathlib import Path
+from unittest.mock import patch
 
 import torch
 from irisu_rl.collector import model_state_sha256
 from irisu_rl.encoding import TeacherStateEncoder
 from irisu_rl.models import RecurrentActorCritic, RecurrentModelConfig
+from irisu_rl.r3b_artifacts import ArtifactStore
 from irisu_rl.r3b_canonical_runner import (
     PairedEvaluationSuites,
     canonical_evaluation_identities,
     canonical_shard_execution_identity,
+    evaluate_recurrent_policy_shard_persisted,
 )
 from irisu_rl.r3b_evaluation import (
     EpisodeMetrics,
@@ -28,9 +31,12 @@ from irisu_rl.r3b_evaluation import (
     deployment_policy_identity_for_threads,
 )
 from irisu_rl.r3b_parallel_evaluation import (
+    CanonicalEvaluationShardTask,
+    CanonicalEvaluationShardTaskResult,
     CanonicalEvaluationTask,
     CanonicalEvaluationTaskResult,
     _model_from_task,
+    evaluate_canonical_shard_task,
     serialize_evaluation_model,
 )
 from irisu_rl.r3b_evaluation_shards import (
@@ -39,8 +45,10 @@ from irisu_rl.r3b_evaluation_shards import (
     plan_evaluation_shards,
 )
 from irisu_rl.r3b_supervisor import (
+    _collect_evaluation_shard_results,
     _collect_evaluation_results,
     _evaluation_worker_initializer,
+    _ordered_shard_tasks,
     _stop_evaluation_executor,
 )
 from irisu_rl.r3b_lock import R3BRunLock, evaluator_lease_path
@@ -260,6 +268,213 @@ class R3BParallelEvaluationTests(unittest.TestCase):
         duplicate.set_result(result)
         with self.assertRaisesRegex(ValueError, "identity differs"):
             _collect_evaluation_results({completed: task, duplicate: task})
+
+    def test_shard_tasks_are_longest_first_and_merge_to_parent_result(self) -> None:
+        original, _original_suite, _model = _task_fixture()
+        inputs = _inputs(count=3)
+        suite = PairedEvaluationSuites.build(
+            inputs,
+            phase="validation",
+            learner_seed=inputs.plan.validation_learner_seeds[0],
+            assignment_sha256=original.assignment_sha256,
+            purpose="final",
+        ).exact
+        evaluator, worker = canonical_evaluation_identities(inputs, suite)
+        parent = replace(
+            original,
+            suite_sha256=suite.sha256,
+            evaluator_sha256=evaluator,
+            worker_identity_sha256=worker,
+            purpose="final",
+            phase="validation",
+            learner_seed=inputs.plan.validation_learner_seeds[0],
+            authorization_sha256=_hash("9"),
+        )
+        shard_tasks = _ordered_shard_tasks(((parent, suite),))
+        self.assertEqual(
+            [task.shard.shard_index for task in shard_tasks],
+            [0, 1],
+        )
+        self.assertEqual([len(task.shard.cells) for task in shard_tasks], [2, 1])
+        self.assertEqual(shard_tasks[0].manifest()["parent_task_sha256"], parent.sha256)
+
+        futures: dict[Future[CanonicalEvaluationShardTaskResult], object] = {}
+        for task in reversed(shard_tasks):
+            shard = task.shard
+            episodes = tuple(
+                EpisodeMetrics(
+                    snapshot_id,
+                    repetition,
+                    suite.episode_seed(snapshot_id, repetition),
+                    0,
+                    1,
+                    1,
+                    1,
+                    1,
+                    True,
+                    False,
+                    0,
+                    100,
+                    100,
+                )
+                for snapshot_id, repetition in shard.cells
+            )
+            report = EvaluationReport(
+                suite.sha256,
+                parent.deployment_policy_sha256,
+                parent.evaluator_sha256,
+                suite.runtime_identity_sha256,
+                canonical_shard_execution_identity(
+                    suite=suite,
+                    shard=shard,
+                    evaluator_sha256=parent.evaluator_sha256,
+                    policy_sha256=parent.deployment_policy_sha256,
+                    worker_identity_sha256=parent.worker_identity_sha256,
+                ),
+                episodes,
+            )
+            shard_report = EvaluationShardReport(shard, report)
+            result = CanonicalEvaluationShardTaskResult(
+                task.sha256,
+                parent.sha256,
+                suite.sha256,
+                parent.deployment_policy_sha256,
+                shard.manifest(),
+                report.manifest(),
+                shard_report.manifest(),
+            )
+            future: Future[CanonicalEvaluationShardTaskResult] = Future()
+            future.set_result(result)
+            futures[future] = task
+        merged = _collect_evaluation_shard_results(
+            futures,  # type: ignore[arg-type]
+            ((parent, suite),),
+        )[parent.sha256]
+        self.assertEqual(
+            tuple(
+                episode.snapshot_id
+                for episode in merged.report_for(parent, suite).episodes
+            ),
+            suite.snapshot_ids,
+        )
+
+    def test_persisted_shard_avoids_vector_simulator_construction(self) -> None:
+        parent, suite, model = _task_fixture()
+        shard = plan_evaluation_shards(suite, parent.evaluation_shards)[0]
+        task = CanonicalEvaluationShardTask(parent, shard.manifest())
+        report = EvaluationReport(
+            suite.sha256,
+            parent.deployment_policy_sha256,
+            parent.evaluator_sha256,
+            suite.runtime_identity_sha256,
+            canonical_shard_execution_identity(
+                suite=suite,
+                shard=shard,
+                evaluator_sha256=parent.evaluator_sha256,
+                policy_sha256=parent.deployment_policy_sha256,
+                worker_identity_sha256=parent.worker_identity_sha256,
+            ),
+            tuple(
+                EpisodeMetrics(
+                    snapshot_id,
+                    repetition,
+                    suite.episode_seed(snapshot_id, repetition),
+                    0,
+                    1,
+                    1,
+                    1,
+                    1,
+                    True,
+                    False,
+                    0,
+                    100,
+                    100,
+                )
+                for snapshot_id, repetition in shard.cells
+            ),
+        )
+        shard_report = EvaluationShardReport(shard, report)
+
+        def evaluator(*_args, **_kwargs):
+            return shard_report
+
+        with tempfile.TemporaryDirectory() as directory:
+            inputs = replace(_inputs(), root=Path(directory))
+            artifacts = ArtifactStore(inputs.root / "artifacts")
+            encoder = TeacherStateEncoder()
+            kind_mask = torch.ones((1, 3), dtype=torch.bool)
+            wait_mask = torch.ones(
+                (1, len(model.action_spec.wait_choices)), dtype=torch.bool
+            )
+            with patch(
+                "irisu_rl.r3b_canonical_runner."
+                "DeploymentPolicyIdentity.from_components",
+                return_value=type(
+                    "Identity",
+                    (),
+                    {"sha256": parent.deployment_policy_sha256},
+                )(),
+            ):
+                evaluate_recurrent_policy_shard_persisted(
+                    inputs=inputs,
+                    simulator=object(),
+                    store=object(),
+                    suite=suite,
+                    model=model,
+                    encoder=encoder,
+                    kind_mask=kind_mask,
+                    wait_mask=wait_mask,
+                    shard=shard,
+                    policy_sha256=parent.deployment_policy_sha256,
+                    artifact_store=artifacts,
+                    shard_evaluator=evaluator,
+                )
+            with (
+                patch(
+                    "irisu_rl.r3b_parallel_evaluation._validated_task_context",
+                    return_value=(inputs, suite),
+                ),
+                patch(
+                    "irisu_rl.r3b_parallel_evaluation.PaddedVectorEnv"
+                ) as vector_simulator,
+            ):
+                result = evaluate_canonical_shard_task(task)
+            vector_simulator.assert_not_called()
+            self.assertEqual(result.shard_report_for(task, suite), shard_report)
+
+            with (
+                patch(
+                    "irisu_rl.r3b_parallel_evaluation._validated_task_context",
+                    return_value=(inputs, suite),
+                ),
+                patch(
+                    "irisu_rl.r3b_parallel_evaluation."
+                    "load_persisted_recurrent_policy_shard",
+                    return_value=None,
+                ),
+                patch(
+                    "irisu_rl.r3b_parallel_evaluation.PaddedVectorEnv"
+                ) as vector_simulator,
+                patch(
+                    "irisu_rl.r3b_parallel_evaluation.attest_simulator_runtime",
+                    return_value=type(
+                        "Runtime",
+                        (),
+                        {"sha256": suite.runtime_identity_sha256},
+                    )(),
+                ) as attest,
+                patch(
+                    "irisu_rl.r3b_parallel_evaluation."
+                    "evaluate_recurrent_policy_shard_persisted",
+                    return_value=shard_report,
+                ),
+            ):
+                simulator = vector_simulator.return_value.__enter__.return_value
+                simulator.envs = [object()]
+                result = evaluate_canonical_shard_task(task)
+            vector_simulator.assert_called_once()
+            attest.assert_called_once_with(simulator.envs[0])
+            self.assertEqual(result.shard_report_for(task, suite), shard_report)
 
     @unittest.skipUnless(os.name == "posix", "process-group cleanup is POSIX-only")
     def test_failed_executor_bounds_descendant_cleanup(self) -> None:

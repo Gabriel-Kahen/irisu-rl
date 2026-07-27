@@ -18,7 +18,7 @@ import stat
 import statistics
 import tomllib
 from contextlib import closing
-from dataclasses import InitVar, asdict, dataclass
+from dataclasses import InitVar, asdict, dataclass, field
 from pathlib import Path
 from typing import Callable, Mapping, Sequence
 
@@ -2037,6 +2037,7 @@ class EngineeringEvidence:
     tail_phase: str | None = None
     score_only_updates: int = 0
     version: str = "r3b-engineering-evidence-v2"
+    _sha256: str = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if (
@@ -2148,16 +2149,40 @@ class EngineeringEvidence:
             raise ValueError(
                 "full-budget evidence requires a completed score-only tail"
             )
+        object.__setattr__(self, "_sha256", _canonical_sha256(self.manifest()))
 
     def manifest(self) -> dict[str, object]:
-        value = asdict(self)
-        value["final_checkpoint_artifact"] = self.final_checkpoint_artifact.manifest()
-        value["resume_checkpoint_artifact"] = self.resume_checkpoint_artifact.manifest()
-        value["checkpoint_resume_artifact"] = self.checkpoint_resume_artifact.manifest()
-        value["exact_backend_parity_artifact"] = (
-            self.exact_backend_parity_artifact.manifest()
-        )
-        return value
+        # ``asdict(self)`` recursively copied the complete typed dependencies
+        # before these four entries were replaced by their compact manifests.
+        # The parity artifact contains full reports and snapshot libraries, so
+        # that discarded copy dominated sealed-run validation time.
+        return {
+            "phase": self.phase,
+            "completed_updates": self.completed_updates,
+            "plan_sha256": self.plan_sha256,
+            "job_sha256": self.job_sha256,
+            "arm_id": self.arm_id,
+            "learner_seed": self.learner_seed,
+            "authorization_sha256": self.authorization_sha256,
+            "sealed_job_lease_sha256": self.sealed_job_lease_sha256,
+            "policy_sha256": self.policy_sha256,
+            "trial_manifest_sha256": self.trial_manifest_sha256,
+            "runner_spec_sha256": self.runner_spec_sha256,
+            "pairing_sha256": self.pairing_sha256,
+            "metrics_sha256": self.metrics_sha256,
+            "evaluation_suite_sha256": self.evaluation_suite_sha256,
+            "evaluation_report_sha256": self.evaluation_report_sha256,
+            "final_checkpoint_artifact": self.final_checkpoint_artifact.manifest(),
+            "resume_checkpoint_artifact": self.resume_checkpoint_artifact.manifest(),
+            "checkpoint_resume_artifact": self.checkpoint_resume_artifact.manifest(),
+            "exact_backend_parity_artifact": (
+                self.exact_backend_parity_artifact.manifest()
+            ),
+            "tail_state_sha256": self.tail_state_sha256,
+            "tail_phase": self.tail_phase,
+            "score_only_updates": self.score_only_updates,
+            "version": self.version,
+        }
 
     @classmethod
     def from_manifest(
@@ -2224,7 +2249,7 @@ class EngineeringEvidence:
 
     @property
     def sha256(self) -> str:
-        return _canonical_sha256(self.manifest())
+        return self._sha256
 
 
 @dataclass(frozen=True, slots=True)
@@ -2238,6 +2263,7 @@ class LearnerOutcome:
     seed_plan_sha256: str
     metrics_artifact: RawScoreMetricsArtifact
     engineering_evidence: EngineeringEvidence | None
+    _sha256: str = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if (
@@ -2316,6 +2342,7 @@ class LearnerOutcome:
                 or any(character not in "0123456789abcdef" for character in value)
             ):
                 raise ValueError(f"{name} must be a nonzero lowercase SHA-256")
+        object.__setattr__(self, "_sha256", _canonical_sha256(self.manifest()))
 
     def manifest(self) -> dict[str, object]:
         return {
@@ -2381,7 +2408,7 @@ class LearnerOutcome:
 
     @property
     def sha256(self) -> str:
-        return _canonical_sha256(self.manifest())
+        return self._sha256
 
 
 @dataclass(frozen=True, slots=True)
@@ -2392,6 +2419,7 @@ class ArmPhaseResult:
     budget_updates: int
     outcomes: tuple[LearnerOutcome, ...] = ()
     failure_reason: str | None = None
+    _sha256: str = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if not isinstance(self.arm_id, str) or not self.arm_id:
@@ -2424,6 +2452,7 @@ class ArmPhaseResult:
                 raise ValueError("engineering evidence disagrees with its phase result")
         elif not isinstance(self.failure_reason, str) or not self.failure_reason:
             raise ValueError("non-complete results must retain a failure reason")
+        object.__setattr__(self, "_sha256", _canonical_sha256(self.manifest()))
 
     def manifest(self) -> dict[str, object]:
         return {
@@ -2470,7 +2499,7 @@ class ArmPhaseResult:
 
     @property
     def sha256(self) -> str:
-        return _canonical_sha256(self.manifest())
+        return self._sha256
 
 
 def _index_exact_results(

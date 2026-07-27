@@ -1,4 +1,4 @@
-"""CPU-budgeted concurrent training with sequential canonical evaluation."""
+"""CPU-budgeted training with shard-parallel canonical evaluation."""
 
 from __future__ import annotations
 
@@ -455,7 +455,7 @@ def run_canonical_training_batch(
     cpu_plan: TrainingCpuPlan,
     authorization: ValidationRunAuthorization | None = None,
 ) -> CanonicalBatchResult:
-    """Train a bounded wave concurrently, then evaluate without oversubscription."""
+    """Train a bounded wave concurrently, then evaluate with a bounded shard pool."""
 
     if phase not in {"calibration", "validation"}:
         raise ValueError("parallel training is limited to nonsealed phases")

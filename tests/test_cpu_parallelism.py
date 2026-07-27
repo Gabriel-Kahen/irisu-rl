@@ -197,8 +197,8 @@ class CpuParallelismTests(unittest.TestCase):
             torch_threads_per_job=4,
             affinity_cpus=64,
         )
-        self.assertEqual(plan.target_cpu_slots, 51)
-        self.assertEqual(plan.parallel_jobs, 7)
+        self.assertEqual(plan.target_cpu_slots, 64)
+        self.assertEqual(plan.parallel_jobs, 8)
         self.assertTrue(plan.manifest()["estimated_target_satisfied"])
 
     def test_cpu_policy_is_stable_across_host_allocations(self) -> None:

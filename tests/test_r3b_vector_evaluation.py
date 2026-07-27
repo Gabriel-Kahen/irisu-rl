@@ -34,6 +34,7 @@ class FakePaddedVectorSimulator:
         self.initialized = [False] * lanes
         self.reset_many_calls: list[tuple[int, ...]] = []
         self.restore_many_calls: list[tuple[int, ...]] = []
+        self.step_calls = 0
         self.step_many_calls: list[tuple[int, ...]] = []
 
     def restore_many(self, indices, snapshots):
@@ -59,12 +60,10 @@ class FakePaddedVectorSimulator:
             self.initialized[lane] = True
         return [self.envs[lane]._observation() for lane in lanes]
 
-    def step_many(self, indices, actions):
-        lanes = tuple(indices)
+    def _step(self, lanes, actions):
         supplied = tuple(actions)
         if len(lanes) != len(supplied) or len(set(lanes)) != len(lanes):
             raise ValueError("invalid step subset")
-        self.step_many_calls.append(lanes)
         results = [
             self.envs[lane].step(action) for lane, action in zip(lanes, supplied)
         ]
@@ -76,6 +75,15 @@ class FakePaddedVectorSimulator:
             list(truncated),
             list(infos),
         )
+
+    def step(self, actions):
+        self.step_calls += 1
+        return self._step(tuple(range(self.num_envs)), actions)
+
+    def step_many(self, indices, actions):
+        lanes = tuple(indices)
+        self.step_many_calls.append(lanes)
+        return self._step(lanes, actions)
 
     def state_hash_many(self, indices):
         return tuple(self.envs[lane].state_hash() for lane in indices)
@@ -322,7 +330,7 @@ class R3BVectorEvaluationTests(unittest.TestCase):
         self.assertTrue(all(value.terminated for value in vector.episodes))
         self.assertTrue(all(value.minimum_gauge == -96 for value in vector.episodes))
         self.assertTrue(all(value.final_gauge == -96 for value in vector.episodes))
-        self.assertIn((0, 1), vector_simulator.step_many_calls)
+        self.assertGreater(vector_simulator.step_calls, 0)
         self.assertIn((0,), vector_simulator.step_many_calls)
 
     def test_horizon_underflow_matches_single_lane(self) -> None:
@@ -451,7 +459,8 @@ class R3BVectorEvaluationTests(unittest.TestCase):
         )
         self.assertEqual(len(report.episodes), 2)
         self.assertEqual(encoder.batch_sizes, [2, 1, 1])
-        self.assertEqual(vector_simulator.step_many_calls, [(0, 1), (0,), (0,)])
+        self.assertEqual(vector_simulator.step_calls, 1)
+        self.assertEqual(vector_simulator.step_many_calls, [(0,), (0,)])
 
     def test_rejects_nonvector_and_identity_mismatch_before_execution(self) -> None:
         model = _model()

@@ -662,6 +662,7 @@ if(IRISU_BUILD_TESTS)
     add_test(NAME irisu-physics-lifecycle-tests
       COMMAND irisu-physics-lifecycle-tests
     )
+    set_tests_properties(irisu-physics-lifecycle-tests PROPERTIES PROCESSORS 8)
     list(APPEND irisu_native_test_targets irisu-physics-lifecycle-tests)
   endif()
 

@@ -30,7 +30,7 @@ max_gradient_norm = 0.5
 target_kl = 0.03
 
 # Each isolated evaluator keeps one live lane per exact worker. Nine processes
-# cover the seven curve reports plus the exact and portable final reports.
+# draw deterministic report shards from one longest-first queue.
 [evaluation]
 curve_snapshots = 32
 shards = 2

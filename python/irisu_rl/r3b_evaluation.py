@@ -9,6 +9,7 @@ import os
 import platform
 import sys
 from collections.abc import Mapping, Sequence
+from copy import deepcopy
 from dataclasses import asdict, dataclass, field
 from functools import lru_cache
 from numbers import Integral
@@ -1107,6 +1108,7 @@ class LearnedPolicyBackendParityArtifact:
         init=False, repr=False, compare=False
     )
     _diagnostics_sha256: str = field(init=False, repr=False, compare=False)
+    _manifest: dict[str, object] = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if (
@@ -1204,6 +1206,25 @@ class LearnedPolicyBackendParityArtifact:
         )
         object.__setattr__(self, "_diagnostics", diagnostics)
         object.__setattr__(self, "_diagnostics_sha256", _canonical_sha256(diagnostics))
+        object.__setattr__(
+            self,
+            "_manifest",
+            {
+                "version": self.version,
+                "policy_sha256": self.policy_sha256,
+                "portable_suite_sha256": self.portable_suite.sha256,
+                "portable_report_sha256": self.portable_report.sha256,
+                "exact_suite_sha256": self.exact_suite.sha256,
+                "exact_report_sha256": self.exact_report.sha256,
+                "logical_manifest_sha256": self.logical_manifest.sha256,
+                "portable_library_sha256": self.portable_library.sha256,
+                "exact_library_sha256": self.exact_library.sha256,
+                "cross_backend_diagnostics": list(deepcopy(diagnostics)),
+                "cross_backend_diagnostics_sha256": (
+                    self.cross_backend_diagnostics_sha256
+                ),
+            },
+        )
 
     @property
     def policy_sha256(self) -> str:
@@ -1211,7 +1232,10 @@ class LearnedPolicyBackendParityArtifact:
 
     @property
     def cross_backend_diagnostics(self) -> tuple[dict[str, object], ...]:
-        return self._diagnostics
+        # Diagnostics contain nested dictionaries. Returning the internal value
+        # would let callers mutate the manifest content of this frozen artifact,
+        # invalidating every cached identity that transitively binds it.
+        return deepcopy(self._diagnostics)
 
     @property
     def cross_backend_diagnostics_sha256(self) -> str:
@@ -1224,19 +1248,7 @@ class LearnedPolicyBackendParityArtifact:
         return self.cross_backend_diagnostics_sha256
 
     def manifest(self) -> dict[str, object]:
-        return {
-            "version": self.version,
-            "policy_sha256": self.policy_sha256,
-            "portable_suite_sha256": self.portable_suite.sha256,
-            "portable_report_sha256": self.portable_report.sha256,
-            "exact_suite_sha256": self.exact_suite.sha256,
-            "exact_report_sha256": self.exact_report.sha256,
-            "logical_manifest_sha256": self.logical_manifest.sha256,
-            "portable_library_sha256": self.portable_library.sha256,
-            "exact_library_sha256": self.exact_library.sha256,
-            "cross_backend_diagnostics": list(self.cross_backend_diagnostics),
-            "cross_backend_diagnostics_sha256": (self.cross_backend_diagnostics_sha256),
-        }
+        return deepcopy(self._manifest)
 
     @classmethod
     def from_manifest(
@@ -1484,6 +1496,12 @@ def _mapping(observation: object) -> Mapping[str, Any]:
     return value
 
 
+def _observation_value(source: object, key: str, default: Any = 0) -> Any:
+    if isinstance(source, Mapping):
+        return source.get(key, default)
+    return getattr(source, key, default)
+
+
 def semantic_from_native(action: Action, spec: ActionSpec) -> SemanticAction:
     kind = ActionKind.parse(action.kind)
     if kind is ActionKind.WAIT:
@@ -1597,7 +1615,8 @@ class RecurrentSemanticPolicy:
         prior_mode = self.model.training
         state = self._state.clone()
         actions: list[SemanticAction] = []
-        self.model.eval()
+        if prior_mode:
+            self.model.eval()
         try:
             with torch.inference_mode():
                 for offset, lane in enumerate(selected):
@@ -1675,7 +1694,8 @@ class RecurrentSemanticPolicy:
                     )
                     state[:, lane : lane + 1] = output.recurrent_state.detach()
         finally:
-            self.model.train(prior_mode)
+            if prior_mode:
+                self.model.train()
         reset_before = self._reset_before.clone()
         reset_before[indices] = False
         self._state = state
@@ -1898,9 +1918,6 @@ def evaluate_recurrent_policy_vectorized(
             raise ValueError("evaluation snapshot runtime identity mismatch")
         recipes[snapshot_id] = recipe
 
-    def materialize(observation: object) -> dict[str, Any]:
-        return dict(_mapping(observation))
-
     # Exact PaddedVectorEnv must own an initialized state before restore_many
     # can capture transactional rollback backups. These states are immediately
     # replaced by declared snapshots and never enter evaluation evidence.
@@ -1916,7 +1933,7 @@ def evaluate_recurrent_policy_vectorized(
     policy = RecurrentSemanticPolicy(model)
     policy.reset(capacity)
     lane_cells: list[tuple[str, int] | None] = [None] * capacity
-    observations: list[dict[str, Any]] = [{} for _ in range(capacity)]
+    observations: list[object] = [None for _ in range(capacity)]
     initial_ticks = [0] * capacity
     initial_scores = [0] * capacity
     minimum_gauges = [0] * capacity
@@ -1944,11 +1961,11 @@ def evaluate_recurrent_policy_vectorized(
         for offset, (lane, cell) in enumerate(zip(lanes, cells_to_assign)):
             snapshot_id, repetition = cell
             recipe = recipes[snapshot_id]
-            observation = materialize(restored[offset])
+            observation = restored[offset]
             config = getattr(envs[lane], "config", None)
             config = config() if callable(config) else config
-            gauge = observation.get("gauge")
-            gauge_max = observation.get("gauge_max")
+            gauge = _observation_value(observation, "gauge", None)
+            gauge_max = _observation_value(observation, "gauge_max", None)
             if int(config_hashes[offset]) != recipe.config_hash:
                 raise ValueError("evaluated simulator config hash mismatch")
             if _canonical_sha256(config) != recipe.config_sha256:
@@ -1956,10 +1973,12 @@ def evaluate_recurrent_policy_vectorized(
             if int(state_hashes[offset]) != recipe.expected_state_hash:
                 raise ValueError("evaluation snapshot state hash mismatch")
             if (
-                int(observation.get("tick", -1)) != recipe.expected_tick
-                or int(observation.get("score", -1)) != recipe.expected_score
-                or bool(observation.get("terminated", False))
-                or bool(observation.get("truncated", False))
+                int(_observation_value(observation, "tick", -1))
+                != recipe.expected_tick
+                or int(_observation_value(observation, "score", -1))
+                != recipe.expected_score
+                or bool(_observation_value(observation, "terminated", False))
+                or bool(_observation_value(observation, "truncated", False))
                 or isinstance(gauge, bool)
                 or not isinstance(gauge, Integral)
                 or isinstance(gauge_max, bool)
@@ -1972,9 +1991,9 @@ def evaluate_recurrent_policy_vectorized(
                 )
             lane_cells[lane] = cell
             observations[lane] = observation
-            initial_ticks[lane] = int(observation["tick"])
-            initial_scores[lane] = int(observation["score"])
-            minimum_gauges[lane] = int(observation["gauge"])
+            initial_ticks[lane] = int(_observation_value(observation, "tick"))
+            initial_scores[lane] = int(_observation_value(observation, "score"))
+            minimum_gauges[lane] = int(_observation_value(observation, "gauge"))
             seeds[lane] = suite.episode_seed(snapshot_id, repetition)
             decisions[lane] = 0
             invalid_actions[lane] = 0
@@ -1988,8 +2007,8 @@ def evaluate_recurrent_policy_vectorized(
             raise RuntimeError("evaluation lane completion state is inconsistent")
         snapshot_id, repetition = cell
         final = observations[lane]
-        final_score = int(final["score"])
-        elapsed = int(final["tick"]) - initial_ticks[lane]
+        final_score = int(_observation_value(final, "score"))
+        elapsed = int(_observation_value(final, "tick")) - initial_ticks[lane]
         if elapsed > suite.max_simulated_ticks:
             raise ValueError("evaluation exceeded its simulated-tick horizon")
         if accumulated_rewards[lane] != final_score - initial_scores[lane]:
@@ -2008,7 +2027,7 @@ def evaluate_recurrent_policy_vectorized(
             truncated[lane] or budget_cut,
             invalid_actions[lane],
             minimum_gauges[lane],
-            int(final["gauge"]),
+            int(_observation_value(final, "gauge")),
         )
         lane_cells[lane] = None
 
@@ -2022,7 +2041,8 @@ def evaluate_recurrent_policy_vectorized(
             and not terminated[lane]
             and not truncated[lane]
             and decisions[lane] < suite.max_decisions
-            and int(observations[lane]["tick"]) - initial_ticks[lane]
+            and int(_observation_value(observations[lane], "tick"))
+            - initial_ticks[lane]
             < suite.max_simulated_ticks
         )
         if active:
@@ -2037,25 +2057,34 @@ def evaluate_recurrent_policy_vectorized(
             semantic_by_lane = dict(zip(active, semantic_actions))
             for lane, semantic in semantic_by_lane.items():
                 semantic = model.action_spec.validate(semantic)
-                elapsed = int(observations[lane]["tick"]) - initial_ticks[lane]
+                elapsed = (
+                    int(_observation_value(observations[lane], "tick"))
+                    - initial_ticks[lane]
+                )
                 remaining = suite.max_simulated_ticks - elapsed
                 first_actions.append(
                     Action.wait(min(semantic.wait_ticks, remaining))
                     if semantic.kind is SemanticActionKind.WAIT
                     else model.action_spec.press(semantic)
                 )
-            transitions = simulator.step_many(active, tuple(first_actions))
+            full_step = getattr(simulator, "step", None)
+            transitions = (
+                full_step(tuple(first_actions))
+                if active == all_lanes and callable(full_step)
+                else simulator.step_many(active, tuple(first_actions))
+            )
             if any(len(values) != len(active) for values in transitions):
                 raise RuntimeError("vector step returned the wrong lane count")
             next_observations, rewards, ended, cut, infos = transitions
             for offset, lane in enumerate(active):
-                observations[lane] = materialize(next_observations[offset])
+                observations[lane] = next_observations[offset]
                 accumulated_rewards[lane] += int(rewards[offset])
                 invalid_actions[lane] += int(
                     bool(infos[offset].get("invalid_action", False))
                 )
                 minimum_gauges[lane] = min(
-                    minimum_gauges[lane], int(observations[lane]["gauge"])
+                    minimum_gauges[lane],
+                    int(_observation_value(observations[lane], "gauge")),
                 )
                 terminated[lane] = bool(ended[offset])
                 truncated[lane] = bool(cut[offset])
@@ -2066,7 +2095,8 @@ def evaluate_recurrent_policy_vectorized(
                 if semantic_by_lane[lane].kind is not SemanticActionKind.WAIT
                 and not terminated[lane]
                 and not truncated[lane]
-                and int(observations[lane]["tick"]) - initial_ticks[lane]
+                and int(_observation_value(observations[lane], "tick"))
+                - initial_ticks[lane]
                 < suite.max_simulated_ticks
             )
             if release_lanes:
@@ -2076,14 +2106,14 @@ def evaluate_recurrent_policy_vectorized(
                     raise RuntimeError("vector release returned the wrong lane count")
                 next_observations, rewards, ended, cut, infos = release_results
                 for offset, lane in enumerate(release_lanes):
-                    observations[lane] = materialize(next_observations[offset])
+                    observations[lane] = next_observations[offset]
                     accumulated_rewards[lane] += int(rewards[offset])
                     invalid_actions[lane] += int(
                         bool(infos[offset].get("invalid_action", False))
                     )
                     minimum_gauges[lane] = min(
                         minimum_gauges[lane],
-                        int(observations[lane]["gauge"]),
+                        int(_observation_value(observations[lane], "gauge")),
                     )
                     terminated[lane] = bool(ended[offset])
                     truncated[lane] = bool(cut[offset])
@@ -2098,7 +2128,8 @@ def evaluate_recurrent_policy_vectorized(
                 terminated[lane]
                 or truncated[lane]
                 or decisions[lane] >= suite.max_decisions
-                or int(observations[lane]["tick"]) - initial_ticks[lane]
+                or int(_observation_value(observations[lane], "tick"))
+                - initial_ticks[lane]
                 >= suite.max_simulated_ticks
             )
         )

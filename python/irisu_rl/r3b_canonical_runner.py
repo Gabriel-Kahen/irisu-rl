@@ -566,8 +566,43 @@ def evaluate_recurrent_policy_sharded(
 ) -> EvaluationReport:
     """Resume, execute, persist, and merge a deterministic shard partition."""
 
+    if not isinstance(inputs, CanonicalRunInputs) or not isinstance(
+        suite, EvaluationSuite
+    ):
+        raise ValueError("canonical evaluation inputs are malformed")
+    plans = plan_evaluation_shards(suite, inputs.config.evaluation_shards)
+    reports = tuple(
+        evaluate_recurrent_policy_shard_persisted(
+            inputs=inputs,
+            simulator=simulator,
+            store=store,
+            suite=suite,
+            model=model,
+            encoder=encoder,
+            kind_mask=kind_mask,
+            wait_mask=wait_mask,
+            shard=shard,
+            policy_sha256=policy_sha256,
+            artifact_store=artifact_store,
+            shard_evaluator=shard_evaluator,
+        )
+        for shard in plans
+    )
+    return merge_evaluation_shards(suite, reports)
+
+
+def _canonical_shard_lookup_context(
+    *,
+    inputs: CanonicalRunInputs,
+    suite: EvaluationSuite,
+    shard: EvaluationShardPlan,
+    policy_sha256: str,
+    artifact_store: ArtifactStore,
+) -> tuple[ArtifactLookupIndex, str, str, str, str]:
     if (
         not isinstance(inputs, CanonicalRunInputs)
+        or not isinstance(suite, EvaluationSuite)
+        or not isinstance(shard, EvaluationShardPlan)
         or not _is_nonzero_sha256(policy_sha256)
         or not isinstance(artifact_store, ArtifactStore)
     ):
@@ -583,108 +618,216 @@ def evaluate_recurrent_policy_sharded(
     evaluator_sha256, worker_identity_sha256 = canonical_evaluation_identities(
         inputs, suite
     )
+    plans = plan_evaluation_shards(suite, inputs.config.evaluation_shards)
+    if (
+        shard.shard_count != len(plans)
+        or shard.shard_index >= len(plans)
+        or plans[shard.shard_index] != shard
+    ):
+        raise ValueError("evaluation shard differs from the canonical partition")
+    index = ArtifactLookupIndex(artifact_store.root.parent / "evaluation-index.sqlite3")
+    execution_identity_sha256 = canonical_shard_execution_identity(
+        suite=suite,
+        shard=shard,
+        evaluator_sha256=evaluator_sha256,
+        policy_sha256=policy_sha256,
+        worker_identity_sha256=worker_identity_sha256,
+    )
+    lookup_key = _sha256(
+        {
+            "version": "r3b-evaluation-shard-lookup-v1",
+            "execution_identity_sha256": execution_identity_sha256,
+        }
+    )
+    return (
+        index,
+        evaluator_sha256,
+        worker_identity_sha256,
+        execution_identity_sha256,
+        lookup_key,
+    )
+
+
+def _evaluation_shard_from_envelope(
+    *,
+    envelope: Any,
+    suite: EvaluationSuite,
+    shard: EvaluationShardPlan,
+    evaluator_sha256: str,
+    worker_identity_sha256: str,
+    execution_identity_sha256: str,
+    policy_sha256: str,
+) -> EvaluationShardReport:
+    payload = envelope.payload
+    if not isinstance(payload, dict) or set(payload) != {
+        "suite",
+        "shard_plan",
+        "report",
+        "shard_report",
+        "worker_identity_sha256",
+        "execution_identity_sha256",
+        "policy_sha256",
+    }:
+        raise ValueError("persisted evaluation shard package schema differs")
+    stored_suite = EvaluationSuite.from_manifest(payload["suite"])
+    stored_shard = EvaluationShardPlan.from_manifest(payload["shard_plan"])
+    if (
+        stored_suite != suite
+        or stored_shard != shard
+        or payload["worker_identity_sha256"] != worker_identity_sha256
+        or payload["execution_identity_sha256"] != execution_identity_sha256
+        or payload["policy_sha256"] != policy_sha256
+    ):
+        raise ValueError("indexed evaluation shard identity differs")
+    stored_report = EvaluationReport.from_manifest(payload["report"], suite=suite)
+    report = EvaluationShardReport.from_manifest(
+        payload["shard_report"],
+        shard=shard,
+        report=stored_report,
+    )
+    if (
+        stored_report.execution_identity_sha256 != execution_identity_sha256
+        or stored_report.policy_sha256 != policy_sha256
+        or stored_report.evaluator_sha256 != evaluator_sha256
+        or stored_report.backend_identity_sha256 != suite.runtime_identity_sha256
+    ):
+        raise ValueError("indexed evaluation report identity differs")
+    return report
+
+
+def load_persisted_recurrent_policy_shard(
+    *,
+    inputs: CanonicalRunInputs,
+    suite: EvaluationSuite,
+    shard: EvaluationShardPlan,
+    policy_sha256: str,
+    artifact_store: ArtifactStore,
+) -> EvaluationShardReport | None:
+    """Load and fully verify one shard without constructing a simulator."""
+
+    (
+        index,
+        evaluator_sha256,
+        worker_identity_sha256,
+        execution_identity_sha256,
+        lookup_key,
+    ) = _canonical_shard_lookup_context(
+        inputs=inputs,
+        suite=suite,
+        shard=shard,
+        policy_sha256=policy_sha256,
+        artifact_store=artifact_store,
+    )
+    envelope = index.lookup(
+        lookup_key,
+        artifact_store,
+        expected_kind=_SHARD_KIND,
+        expected_version=_SHARD_VERSION,
+    )
+    if envelope is None:
+        return None
+    return _evaluation_shard_from_envelope(
+        envelope=envelope,
+        suite=suite,
+        shard=shard,
+        evaluator_sha256=evaluator_sha256,
+        worker_identity_sha256=worker_identity_sha256,
+        execution_identity_sha256=execution_identity_sha256,
+        policy_sha256=policy_sha256,
+    )
+
+
+def evaluate_recurrent_policy_shard_persisted(
+    *,
+    inputs: CanonicalRunInputs,
+    simulator: Any,
+    store: Any,
+    suite: EvaluationSuite,
+    model: RecurrentActorCritic,
+    encoder: Any,
+    kind_mask: Tensor,
+    wait_mask: Tensor,
+    shard: EvaluationShardPlan,
+    policy_sha256: str,
+    artifact_store: ArtifactStore,
+    shard_evaluator: Callable[..., EvaluationShardReport] = (
+        evaluate_recurrent_vector_shard
+    ),
+) -> EvaluationShardReport:
+    """Resume or execute and persist one identity-bound evaluation shard."""
+
     deployment_identity = DeploymentPolicyIdentity.from_components(
         model, encoder, kind_mask, wait_mask
     )
     if deployment_identity.sha256 != policy_sha256:
         raise ValueError("evaluation policy identity differs from the model")
-    plans = plan_evaluation_shards(suite, inputs.config.evaluation_shards)
-    index = ArtifactLookupIndex(artifact_store.root.parent / "evaluation-index.sqlite3")
-    reports: list[EvaluationShardReport] = []
-    for shard in plans:
-        execution_identity_sha256 = canonical_shard_execution_identity(
-            suite=suite,
-            shard=shard,
-            evaluator_sha256=evaluator_sha256,
-            policy_sha256=policy_sha256,
-            worker_identity_sha256=worker_identity_sha256,
-        )
-        lookup_key = _sha256(
-            {
-                "version": "r3b-evaluation-shard-lookup-v1",
-                "execution_identity_sha256": execution_identity_sha256,
-            }
-        )
-        envelope = index.lookup(
-            lookup_key,
-            artifact_store,
-            expected_kind=_SHARD_KIND,
-            expected_version=_SHARD_VERSION,
-        )
-        if envelope is None:
-            report = shard_evaluator(
-                simulator,
-                store,
-                suite,
-                model,
-                encoder,
-                kind_mask,
-                wait_mask,
-                shard,
-                evaluator_sha256=evaluator_sha256,
-                expected_assignment_sha256=suite.assignment_sha256,
-                execution_identity_sha256=execution_identity_sha256,
-            )
-            if (
-                report.shard != shard
-                or report.report.suite_sha256 != suite.sha256
-                or report.report.policy_sha256 != policy_sha256
-                or report.report.evaluator_sha256 != evaluator_sha256
-                or report.report.backend_identity_sha256
-                != suite.runtime_identity_sha256
-                or report.report.execution_identity_sha256 != execution_identity_sha256
-            ):
-                raise ValueError("fresh evaluation shard identities differ")
-            envelope = artifact_store.publish(
-                kind=_SHARD_KIND,
-                version=_SHARD_VERSION,
-                payload={
-                    "suite": suite.manifest(),
-                    "shard_plan": shard.manifest(),
-                    "report": report.report.manifest(),
-                    "shard_report": report.manifest(),
-                    "worker_identity_sha256": worker_identity_sha256,
-                    "execution_identity_sha256": execution_identity_sha256,
-                    "policy_sha256": policy_sha256,
-                },
-            )
-            index.record(lookup_key, envelope)
-        payload = envelope.payload
-        if not isinstance(payload, dict) or set(payload) != {
-            "suite",
-            "shard_plan",
-            "report",
-            "shard_report",
-            "worker_identity_sha256",
-            "execution_identity_sha256",
-            "policy_sha256",
-        }:
-            raise ValueError("persisted evaluation shard package schema differs")
-        stored_suite = EvaluationSuite.from_manifest(payload["suite"])
-        stored_shard = EvaluationShardPlan.from_manifest(payload["shard_plan"])
-        if (
-            stored_suite != suite
-            or stored_shard != shard
-            or payload["worker_identity_sha256"] != worker_identity_sha256
-            or payload["execution_identity_sha256"] != execution_identity_sha256
-            or payload["policy_sha256"] != policy_sha256
-        ):
-            raise ValueError("indexed evaluation shard identity differs")
-        stored_report = EvaluationReport.from_manifest(payload["report"], suite=suite)
-        report = EvaluationShardReport.from_manifest(
-            payload["shard_report"],
-            shard=shard,
-            report=stored_report,
-        )
-        if (
-            stored_report.execution_identity_sha256 != execution_identity_sha256
-            or stored_report.policy_sha256 != policy_sha256
-            or stored_report.evaluator_sha256 != evaluator_sha256
-            or stored_report.backend_identity_sha256 != suite.runtime_identity_sha256
-        ):
-            raise ValueError("indexed evaluation report identity differs")
-        reports.append(report)
-    return merge_evaluation_shards(suite, tuple(reports))
+    persisted = load_persisted_recurrent_policy_shard(
+        inputs=inputs,
+        suite=suite,
+        shard=shard,
+        policy_sha256=policy_sha256,
+        artifact_store=artifact_store,
+    )
+    if persisted is not None:
+        return persisted
+    (
+        index,
+        evaluator_sha256,
+        worker_identity_sha256,
+        execution_identity_sha256,
+        lookup_key,
+    ) = _canonical_shard_lookup_context(
+        inputs=inputs,
+        suite=suite,
+        shard=shard,
+        policy_sha256=policy_sha256,
+        artifact_store=artifact_store,
+    )
+    report = shard_evaluator(
+        simulator,
+        store,
+        suite,
+        model,
+        encoder,
+        kind_mask,
+        wait_mask,
+        shard,
+        evaluator_sha256=evaluator_sha256,
+        expected_assignment_sha256=suite.assignment_sha256,
+        execution_identity_sha256=execution_identity_sha256,
+    )
+    if (
+        report.shard != shard
+        or report.report.suite_sha256 != suite.sha256
+        or report.report.policy_sha256 != policy_sha256
+        or report.report.evaluator_sha256 != evaluator_sha256
+        or report.report.backend_identity_sha256 != suite.runtime_identity_sha256
+        or report.report.execution_identity_sha256 != execution_identity_sha256
+    ):
+        raise ValueError("fresh evaluation shard identities differ")
+    envelope = artifact_store.publish(
+        kind=_SHARD_KIND,
+        version=_SHARD_VERSION,
+        payload={
+            "suite": suite.manifest(),
+            "shard_plan": shard.manifest(),
+            "report": report.report.manifest(),
+            "shard_report": report.manifest(),
+            "worker_identity_sha256": worker_identity_sha256,
+            "execution_identity_sha256": execution_identity_sha256,
+            "policy_sha256": policy_sha256,
+        },
+    )
+    index.record(lookup_key, envelope)
+    return _evaluation_shard_from_envelope(
+        envelope=envelope,
+        suite=suite,
+        shard=shard,
+        evaluator_sha256=evaluator_sha256,
+        worker_identity_sha256=worker_identity_sha256,
+        execution_identity_sha256=execution_identity_sha256,
+        policy_sha256=policy_sha256,
+    )
 
 
 def audit_penultimate_checkpoint(
@@ -1353,7 +1496,9 @@ __all__ = [
     "audit_penultimate_checkpoint",
     "complete_nonsealed_workflow_job",
     "complete_sealed_workflow_job",
+    "evaluate_recurrent_policy_shard_persisted",
     "evaluate_recurrent_policy_sharded",
+    "load_persisted_recurrent_policy_shard",
     "load_published_canonical_outcome",
     "reconcile_sealed_workflow_job",
 ]

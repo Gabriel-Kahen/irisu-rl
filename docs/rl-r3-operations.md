@@ -39,7 +39,9 @@ training, exact-resume audit, exact/portable evaluation, artifact publication,
 and workflow completion. For calibration and validation,
 `canonical-run-batch` resolves an affinity/cgroup-aware CPU budget, durably
 claims a bounded wave, trains those independent jobs in isolated processes,
-fully reaps that pool, and evaluates the trained jobs sequentially. It leaves
+fully reaps that pool, and evaluates the trained jobs one at a time. Within
+each job, all checkpoint and final report shards share one longest-first
+process queue. It leaves
 the frozen per-job lane, worker, Torch, RNG, checkpoint, and runner identities
 unchanged. A host-wide no-follow process lock admits only one local R3
 operator, while a per-run lock protects the selected workflow.
@@ -48,10 +50,10 @@ children from an interrupted operator have exited. Canonical training may only
 stop on the frozen 50-update grid; sealed test jobs must train and evaluate in
 one uninterrupted command.
 
-The batch defaults to 80% of the process-visible logical CPU capacity, rounded
-to an integer slot count after the tightest finite cgroup-v1/v2 quota and an
-explicit one-CPU reserve. It prefers one logical CPU from every physical core
-before SMT siblings. Every existing training thread is restricted and
+The batch defaults to 100% of the process-visible logical CPU capacity, rounded
+to an integer slot count after the tightest finite cgroup-v1/v2 quota. Operators
+can still reserve CPUs explicitly. It prefers one logical CPU from every
+physical core before SMT siblings. Every existing training thread is restricted and
 verified before work starts; later threads and exact workers inherit that CPU
 set, so the training wave has a hard scheduling ceiling. Evaluation runs only
 after those children exit and retains its frozen topology. The stable resource
@@ -72,8 +74,9 @@ claim with its owning command first.
 On the profiled 8-core/16-thread host, the checked
 [exact scaling artifact](../benchmarks/results/exact-padded-scaling-ceiling-2026-07-21.json)
 measured one frozen 16-lane job at 6.55 average cores (40.94%). The default plan
-resolves 13 CPU slots and two concurrent training jobs, so its expected steady
-training utilization is approximately 81.9% before stalls and phase tails.
+resolves all 16 CPU slots and two concurrent training jobs, so its expected
+steady training utilization is approximately 81.9% before stalls and phase tails,
+with the workers free to use otherwise-idle logical CPUs.
 This is a scheduling estimate, not a replacement for a concurrent-job
 measurement on each production host.
 
@@ -137,10 +140,11 @@ Every shard binds the complete suite, policy, evaluator, runtime, and its exact
 cell set. Merge rejects missing, duplicate, overlapping, or foreign cells and
 binds the merged execution identity to all shard report hashes. Shards may be
 resumed from immutable per-shard packages without changing policy seeds or the
-authoritative full-suite result. One report still executes its missing shards
-sequentially. Independent checkpoint/final reports execute concurrently in
-spawn-isolated local processes; concurrent distributed hosts are not part of
-the R3 contract.
+authoritative full-suite result. Missing shards from all checkpoint and final
+reports share one longest-first queue in spawn-isolated local processes. This
+starts the largest final shards early, avoids report-level wave barriers, and
+merges results back into canonical report order. Concurrent distributed hosts
+are not part of the R3 contract.
 
 Operational config v2 keeps the scientifically relevant training topology at
 16 lanes. Each report runs one deep queue over 16 lanes, backed by 16 exact

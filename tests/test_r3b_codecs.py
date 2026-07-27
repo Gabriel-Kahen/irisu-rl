@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from dataclasses import asdict
 
 from irisu_rl.r3b_evaluation import (
     CrossBackendCellPair,
@@ -25,6 +26,7 @@ from irisu_rl.r3b_experiments import (
     TestSuiteCommitment,
     TrainingCheckpointArtifact,
     TrialJob,
+    _canonical_sha256,
 )
 from tests.test_r3b_experiments import TEST_PLAN, outcomes
 
@@ -305,6 +307,81 @@ class R3BCodecTests(unittest.TestCase):
                 metrics_artifact=original.metrics_artifact,
                 engineering_evidence=None,
             )
+
+    def test_engineering_manifest_matches_the_legacy_canonical_content(self) -> None:
+        outcome = outcomes(
+            (TEST_PLAN.calibration_learner_seeds[0],),
+            auc=10,
+            final=11,
+            phase="calibration",
+            budget=TEST_PLAN.calibration_budgets_updates[-1],
+        )[0]
+        evidence = outcome.engineering_evidence
+        assert evidence is not None
+
+        legacy = asdict(evidence)
+        legacy.pop("_sha256")
+        legacy["final_checkpoint_artifact"] = (
+            evidence.final_checkpoint_artifact.manifest()
+        )
+        legacy["resume_checkpoint_artifact"] = (
+            evidence.resume_checkpoint_artifact.manifest()
+        )
+        legacy["checkpoint_resume_artifact"] = (
+            evidence.checkpoint_resume_artifact.manifest()
+        )
+        legacy["exact_backend_parity_artifact"] = (
+            evidence.exact_backend_parity_artifact.manifest()
+        )
+
+        self.assertEqual(evidence.manifest(), legacy)
+
+    def test_public_diagnostic_mutation_cannot_diverge_hashes(self) -> None:
+        outcome = outcomes(
+            (TEST_PLAN.calibration_learner_seeds[0],),
+            auc=10,
+            final=11,
+            phase="calibration",
+            budget=TEST_PLAN.calibration_budgets_updates[-1],
+        )[0]
+        evidence = outcome.engineering_evidence
+        assert evidence is not None
+        parity = evidence.exact_backend_parity_artifact
+        result = ArmPhaseResult(
+            evidence.arm_id,
+            "calibration",
+            "complete",
+            TEST_PLAN.calibration_budgets_updates[-1],
+            (outcome,),
+        )
+        values = (parity, evidence, outcome, result)
+        hashes = tuple(value.sha256 for value in values)
+
+        diagnostics = parity.cross_backend_diagnostics
+        delta = diagnostics[0]["exact_minus_portable"]
+        assert isinstance(delta, dict)
+        delta["raw_score"] = 123456
+
+        manifest = evidence.manifest()
+        parity_manifest = manifest["exact_backend_parity_artifact"]
+        assert isinstance(parity_manifest, dict)
+        manifest_diagnostics = parity_manifest["cross_backend_diagnostics"]
+        assert isinstance(manifest_diagnostics, list)
+        manifest_delta = manifest_diagnostics[0]["exact_minus_portable"]
+        assert isinstance(manifest_delta, dict)
+        manifest_delta["raw_score"] = 654321
+
+        self.assertNotEqual(
+            parity.cross_backend_diagnostics[0]["exact_minus_portable"],
+            delta,
+        )
+        self.assertEqual(tuple(value.sha256 for value in values), hashes)
+        self.assertTrue(
+            all(
+                value.sha256 == _canonical_sha256(value.manifest())
+                for value in values
+            )
+        )
 
     def test_codecs_reject_schema_type_and_reference_tampering(self) -> None:
         arm = CandidateArm(100_000, 0.0001)

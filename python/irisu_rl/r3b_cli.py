@@ -591,7 +591,7 @@ def _command_experiment_canonical_run_job(
 def _command_experiment_canonical_run_batch(
     args: argparse.Namespace,
 ) -> dict[str, object]:
-    """Train a CPU-budgeted job wave, then evaluate each job sequentially."""
+    """Train a CPU-budgeted job wave, then evaluate each job's shards in parallel."""
 
     inputs = _canonical_inputs(args.run, args.worker, args.library)
     authorization = None
@@ -852,7 +852,7 @@ def _parser() -> argparse.ArgumentParser:
     canonical_run.set_defaults(handler=_command_experiment_canonical_run_job)
     canonical_batch = experiment_commands.add_parser(
         "canonical-run-batch",
-        help="train a host-budgeted wave, then evaluate jobs sequentially",
+        help="train a host-budgeted wave, then evaluate report shards in parallel",
     )
     canonical_batch.add_argument("--run", required=True)
     canonical_batch.add_argument("--worker", required=True)
@@ -864,8 +864,8 @@ def _parser() -> argparse.ArgumentParser:
     )
     canonical_batch.add_argument("--authorization")
     canonical_batch.add_argument("--owner", default="canonical-batch")
-    canonical_batch.add_argument("--target-cpu-percent", type=int, default=80)
-    canonical_batch.add_argument("--reserve-cpus", type=int, default=1)
+    canonical_batch.add_argument("--target-cpu-percent", type=int, default=100)
+    canonical_batch.add_argument("--reserve-cpus", type=int, default=0)
     canonical_batch.add_argument("--max-parallel-jobs", type=int, default=16)
     canonical_batch.set_defaults(handler=_command_experiment_canonical_run_batch)
     baselines = experiment_commands.add_parser(
