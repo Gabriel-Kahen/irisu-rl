@@ -27,10 +27,7 @@ from irisu_pointer.steering import SteeringDecision, SteeringIntent
 from irisu_rl.actions import SemanticAction
 
 
-TRUSTED_JOINT = Path(
-    "/home/gabe/.codex/worktrees/e2f8/irisu/"
-    "python/irisu_pointer/joint_planner.py"
-)
+TRUSTED_JOINT = ROOT / "python/irisu_pointer/joint_planner.py"
 TRUSTED_JOINT_SHA256 = (
     "dc7009fc18a322eca5dace55b9baf982b6ced26c18517af752aab0f6365d362e"
 )
@@ -604,8 +601,7 @@ class ConservativeOfflineTests(unittest.TestCase):
         )
 
     def test_joint_planner_import_is_bound_to_exact_trusted_source(self) -> None:
-        self.assertEqual(joint_planner._TRUSTED_SOURCE, TRUSTED_JOINT)
-        self.assertEqual(joint_planner._TRUSTED_SHA256, TRUSTED_JOINT_SHA256)
+        self.assertEqual(Path(joint_planner.__file__).resolve(), TRUSTED_JOINT)
         self.assertEqual(
             hashlib.sha256(TRUSTED_JOINT.read_bytes()).hexdigest(),
             TRUSTED_JOINT_SHA256,

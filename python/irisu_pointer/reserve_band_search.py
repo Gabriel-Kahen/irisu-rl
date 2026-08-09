@@ -532,6 +532,7 @@ class ReserveBandGeometrySearch:
                 outcome.alive,
                 outcome.survival_ticks,
                 outcome.final_gauge,
+                outcome.gauge_max,
                 outcome.qualifying_clear_gain,
                 outcome.highest_chain_gain,
                 outcome.intended_source_hits,

@@ -61,6 +61,7 @@ def branch(ordinal: int, **changes: object) -> GeometryBranchOutcome:
         "alive": True,
         "survival": 2,
         "gauge": 50,
+        "gauge_max": 10_000,
         "clears": 0,
         "invalid": 0,
     }
@@ -82,17 +83,18 @@ def branch(ordinal: int, **changes: object) -> GeometryBranchOutcome:
         240,
     )
     return GeometryBranchOutcome(
-        candidate,
-        int(values["score"]),
-        bool(values["alive"]),
-        int(values["survival"]),
-        int(values["gauge"]),
-        int(values["clears"]),
-        0,
-        0,
-        False,
-        0.0,
-        int(values["invalid"]),
+        candidate=candidate,
+        score_gain=int(values["score"]),
+        alive=bool(values["alive"]),
+        survival_ticks=int(values["survival"]),
+        final_gauge=int(values["gauge"]),
+        gauge_max=int(values["gauge_max"]),
+        qualifying_clear_gain=int(values["clears"]),
+        highest_chain_gain=0,
+        intended_source_hits=0,
+        intended_pair_joined=False,
+        pair_closure_sizes=0.0,
+        invalid_actions=int(values["invalid"]),
     )
 
 
