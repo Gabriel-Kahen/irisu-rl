@@ -93,6 +93,7 @@ test("fast-forward targets an 80-tick batch", () => {
   game.observation = observation(0);
   game.running = true;
   game.fastForward = true;
+  game.fastForwardRefill = true;
   game.deadline = 20;
   let pumps = 0;
   game.pump = () => { pumps++; };
@@ -101,6 +102,103 @@ test("fast-forward targets an 80-tick batch", () => {
   assert.equal(pumps, 1);
   assert.equal(game.deadline, 81);
   assert.equal(delay, 20);
+});
+
+test("released fast-forward drains its accelerated backlog without collapsing to five", () => {
+  const game = new BrowserGame({close() {}}, () => {}, {
+    seed: 1, now: () => 61,
+    clock: {setTimeout: () => 1, clearTimeout() {}},
+  });
+  game.observation = observation(0);
+  game.running = true;
+  game.fastForward = true;
+  game.fastForwardRefill = false;
+  game.pendingTicks = 60;
+  game.deadline = 20;
+  game.pump = () => {};
+  game.schedule();
+  assert.equal(game.pendingTicks, 60);
+});
+
+test("a released wheel gesture still drains all 80 accelerated ticks", async () => {
+  const calls = [];
+  let tick = 2;
+  const client = {
+    async step(_kind, _x, _y, _suppressFreshEdges, waitTicks) {
+      calls.push(waitTicks);
+      tick += waitTicks;
+      return {observation: observation(tick), events: []};
+    },
+    close() {},
+  };
+  const game = new BrowserGame(client, () => {}, {
+    seed: 1, now: () => 0, clock: {setTimeout: () => 1, clearTimeout() {}},
+  });
+  game.observation = observation(2);
+  game.recordedWords = [0, 0];
+  game.running = true;
+  game.setFastForward(true);
+  game.setFastForward(false);
+  while (game.processing) await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(calls, [20, 20, 20, 20]);
+  assert.equal(game.observation.tick, 82);
+  assert.equal(game.pendingTicks, 0);
+  assert.equal(game.fastForward, false);
+});
+
+test("fast-forward renders at most every 20 accelerated ticks like v2.03", async () => {
+  const calls = [];
+  let tick = 2;
+  const client = {
+    step(kind, x, y, suppressFreshEdges, waitTicks) {
+      calls.push({kind, x, y, suppressFreshEdges, waitTicks});
+      tick += waitTicks;
+      return Promise.resolve({observation: observation(tick), events: []});
+    },
+    close() {},
+  };
+  const game = new BrowserGame(client, () => {}, {
+    seed: 1, now: () => 0, clock: {setTimeout: () => 1, clearTimeout() {}},
+  });
+  game.observation = observation(2);
+  game.running = true;
+  game.fastForward = true;
+  game.pendingTicks = 47;
+  game.recordedWords = [0, 0];
+  await game.pump();
+  assert.deepEqual(calls.map(call => call.waitTicks), [20, 20, 7]);
+  assert.ok(calls.every(call => call.kind === 0 && !call.suppressFreshEdges));
+  assert.equal(game.observation.tick, 49);
+  assert.equal(game.recordedWords.length, 49);
+  assert.equal(game.pendingTicks, 0);
+});
+
+test("fast-forward does not batch a shot or its release tick", async () => {
+  const calls = [];
+  let tick = 2;
+  const client = {
+    step(kind, _x, _y, _suppressFreshEdges, waitTicks) {
+      calls.push({kind, waitTicks});
+      tick += waitTicks;
+      return Promise.resolve({observation: observation(tick), events: []});
+    },
+    close() {},
+  };
+  const game = new BrowserGame(client, () => {}, {
+    seed: 1, now: () => 0, clock: {setTimeout: () => 1, clearTimeout() {}},
+  });
+  game.observation = observation(2);
+  game.running = true;
+  game.fastForward = true;
+  game.pendingTicks = 22;
+  game.recordedWords = [0, 0];
+  game.queue.push({kind: 1, x: 12, y: 34});
+  await game.pump();
+  assert.deepEqual(calls, [
+    {kind: 1, waitTicks: 1},
+    {kind: 0, waitTicks: 1},
+    {kind: 0, waitTicks: 20},
+  ]);
 });
 
 test("restart replaces the one-reset exact worker process", async () => {

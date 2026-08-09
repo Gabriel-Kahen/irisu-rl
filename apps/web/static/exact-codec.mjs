@@ -57,19 +57,22 @@ export function encodeReset(seed) {
   return bytes;
 }
 
-export function encodeStep(kind, x, y, suppressFreshEdges = false) {
+export function encodeStep(kind, x, y, suppressFreshEdges = false, waitTicks = 1) {
   if (!Number.isInteger(kind) || kind < 0 || kind > 3) {
     throw new RangeError("action kind must be in [0, 3]");
   }
   if (!Number.isFinite(x) || !Number.isFinite(y)) {
     throw new TypeError("action coordinates must be finite");
   }
+  if (!Number.isInteger(waitTicks) || waitTicks < 1 || waitTicks > 100000) {
+    throw new RangeError("wait ticks must be in [1, 100000]");
+  }
   const bytes = new Uint8Array(28);
   const view = bytesView(bytes);
   view.setUint32(0, kind, true);
   view.setFloat64(4, x, true);
   view.setFloat64(12, y, true);
-  view.setUint32(20, 1, true);
+  view.setUint32(20, waitTicks, true);
   view.setUint32(24, suppressFreshEdges ? 1 : 0, true);
   return bytes;
 }

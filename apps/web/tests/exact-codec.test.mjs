@@ -50,6 +50,9 @@ test("encodes exact reset and one-tick step requests", () => {
   assert.equal(view(step).getUint32(20, true), 1);
   assert.equal(view(step).getUint32(24, true), 0);
   assert.equal(view(encodeStep(1, 10, 20, true)).getUint32(24, true), 1);
+  assert.equal(view(encodeStep(0, 10, 20, false, 20)).getUint32(20, true), 20);
+  assert.throws(() => encodeStep(0, 10, 20, false, 0), /wait ticks/);
+  assert.throws(() => encodeStep(0, 10, 20, false, 100001), /wait ticks/);
 });
 
 test("validates and decodes the exact Hello identity", () => {

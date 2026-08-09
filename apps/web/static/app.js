@@ -1,4 +1,4 @@
-import {BrowserGame} from "./exact-runtime.js?v=20260809j";
+import {BrowserGame} from "./exact-runtime.js?v=20260809k";
 import {
   activatedTrailAlphas, colorFor, hasActivatedTrail,
 } from "./colors.mjs?v=20260723d";

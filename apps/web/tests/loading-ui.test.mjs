@@ -55,6 +55,16 @@ test("runtime preloads use the exact immutable worker URLs", () => {
   assert.match(html, new RegExp(`exact-runtime/buildroot-bzimage68\\.bin\\?v=${version}`));
 });
 
+test("browser module cache-bust chain stays aligned", () => {
+  const html = readFileSync(path.join(web, "static/index.html"), "utf8");
+  const app = readFileSync(path.join(web, "static/app.js"), "utf8");
+  const runtime = readFileSync(path.join(web, "static/exact-runtime.js"), "utf8");
+  const version = html.match(/app\.js\?v=([0-9a-z]+)/)?.[1];
+  assert.ok(version);
+  assert.match(app, new RegExp(`exact-runtime\\.js\\?v=${version}`));
+  assert.match(runtime, new RegExp(`exact-codec\\.mjs\\?v=${version}`));
+});
+
 test("browser guest uses a minimal executable direct init", () => {
   const board = path.join(web, "guest", "buildroot-external", "board", "irisu");
   const initPath = path.join(board, "rootfs-overlay", "irisu-direct-init");

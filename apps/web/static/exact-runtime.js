@@ -1,6 +1,6 @@
 import {
   OPCODE, decodeHello, decodeObservation, decodeReset, decodeStep, encodeReset, encodeStep,
-} from "./exact-codec.mjs";
+} from "./exact-codec.mjs?v=20260809k";
 import {
   ReplayObservationCache, decodeReplayWord, encodeReplayWord,
   quantizeReplayPoint, serializeReplay,
@@ -8,6 +8,7 @@ import {
 
 const kinds = {weak: 1, strong: 2, both: 3};
 const FAST_FORWARD_TICKS = 80;
+const FAST_FORWARD_WAIT_TICKS = 20;
 
 export class ExactWorkerClient {
   static async create({WorkerClass = globalThis.Worker, timeoutMs = 60000,
@@ -91,11 +92,11 @@ export class ExactWorkerClient {
 
   resetRaw(seed) { return this.rpc(OPCODE.reset, encodeReset(seed)); }
   reset(seed) { return this.resetRaw(seed).then(decodeReset); }
-  stepRaw(kind, x, y, suppressFreshEdges = false) {
-    return this.rpc(OPCODE.step, encodeStep(kind, x, y, suppressFreshEdges));
+  stepRaw(kind, x, y, suppressFreshEdges = false, waitTicks = 1) {
+    return this.rpc(OPCODE.step, encodeStep(kind, x, y, suppressFreshEdges, waitTicks));
   }
-  step(kind, x, y, suppressFreshEdges = false) {
-    return this.stepRaw(kind, x, y, suppressFreshEdges).then(decodeStep);
+  step(kind, x, y, suppressFreshEdges = false, waitTicks = 1) {
+    return this.stepRaw(kind, x, y, suppressFreshEdges, waitTicks).then(decodeStep);
   }
 
   close() {
@@ -127,6 +128,7 @@ export class BrowserGame {
     this.seed = seed === undefined ? crypto.getRandomValues(new Uint32Array(1))[0] : seed >>> 0;
     this.running = false;
     this.fastForward = false;
+    this.fastForwardRefill = false;
     this.queue = [];
     this.events = [];
     this.aim = {x: 320, y: 390};
@@ -182,6 +184,7 @@ export class BrowserGame {
     this.mode = "live";
     this.running = false;
     this.fastForward = false;
+    this.fastForwardRefill = false;
     this.pendingTicks = 0;
     this.queue.length = 0;
     this.events.length = 0;
@@ -263,6 +266,7 @@ export class BrowserGame {
       !this.observation.terminated && !this.observation.truncated);
     if (!this.running) {
       this.fastForward = false;
+      this.fastForwardRefill = false;
       this.pendingTicks = 0;
     }
     this.deadline = this.now() + 20;
@@ -273,8 +277,19 @@ export class BrowserGame {
     if (this.mode === "replay") return;
     const next = Boolean(active && this.running &&
       !this.observation.terminated && !this.observation.truncated);
-    if (next === this.fastForward) return;
-    this.fastForward = next;
+    if (next) {
+      if (this.fastForwardRefill) return;
+      this.fastForward = true;
+      this.fastForwardRefill = true;
+      this.pendingTicks = Math.max(this.pendingTicks, FAST_FORWARD_TICKS);
+      void this.pump();
+    } else {
+      if (!this.fastForwardRefill) return;
+      // Stop adding work, but keep the already-promised wheel backlog in the
+      // accelerated path until it has drained.
+      this.fastForwardRefill = false;
+      if (!this.pendingTicks && !this.processing) this.fastForward = false;
+    }
     this.emit();
   }
 
@@ -306,6 +321,7 @@ export class BrowserGame {
         this.observation.truncated ? "time_limit" : "game_over";
       this.running = false;
       this.fastForward = false;
+      this.fastForwardRefill = false;
       this.pendingTicks = 0;
       this.queue.length = 0;
     }
@@ -328,6 +344,7 @@ export class BrowserGame {
     this.seed = replay.seed >>> 0;
     this.running = false;
     this.fastForward = false;
+    this.fastForwardRefill = false;
     this.pendingTicks = 0;
     this.queue.length = 0;
     this.events.length = 0;
@@ -557,20 +574,36 @@ export class BrowserGame {
     try {
       while (this.pendingTicks && this.running && !this.closed) {
         const epoch = this.epoch;
-        const action = this.nextAction();
-        this.pendingTicks--;
+        const canBatchWait = this.fastForward && !this.releaseNext &&
+          this.queue.length === 0 && this.recordedWords.length >= 2;
+        const waitTicks = canBatchWait ?
+          Math.min(FAST_FORWARD_WAIT_TICKS, this.pendingTicks) : 1;
+        const action = canBatchWait ? {kind: 0, ...this.aim} : this.nextAction();
         const recordIndex = this.recordedWords.length;
+        const previousTick = this.observation.tick;
         const state = await this.client.step(action.kind, action.x, action.y,
-          recordIndex < 2);
+          recordIndex < 2, waitTicks);
         if (epoch !== this.epoch) continue;
-        this.recordedWords.push(encodeReplayWord(action.kind, action.x, action.y));
+        const advanced = state.observation.tick - previousTick;
+        if (!Number.isInteger(advanced) || advanced < 1 || advanced > waitTicks) {
+          throw new Error(`exact worker advanced ${advanced} ticks for a ${waitTicks}-tick step`);
+        }
+        this.pendingTicks = Math.max(0, this.pendingTicks - advanced);
+        const replayWord = encodeReplayWord(action.kind, action.x, action.y);
+        for (let index = 0; index < advanced; index++) this.recordedWords.push(replayWord);
         this.acceptStep(state);
         this.emit();
       }
     } catch (error) {
       if (!this.closed && pumpEpoch === this.epoch) this.report(error);
     }
-    finally { this.processing = false; }
+    finally {
+      this.processing = false;
+      if (this.fastForward && !this.fastForwardRefill && !this.pendingTicks) {
+        this.fastForward = false;
+        this.emit();
+      }
+    }
   }
 
   schedule() {
@@ -606,10 +639,12 @@ export class BrowserGame {
       const due = now < this.deadline ? 0 :
         Math.min(5, Math.floor((now - this.deadline) / 20) + 1);
       if (due) {
-        if (this.fastForward) {
+        if (this.fastForwardRefill) {
           this.pendingTicks = Math.max(this.pendingTicks, FAST_FORWARD_TICKS);
         }
-        else this.pendingTicks = Math.min(5, this.pendingTicks + due);
+        else if (!this.fastForward) {
+          this.pendingTicks = Math.min(5, this.pendingTicks + due);
+        }
         void this.pump();
       }
       if (this.fastForward && due) this.deadline = now + 20;
@@ -622,6 +657,7 @@ export class BrowserGame {
   report(error) {
     this.running = false;
     this.fastForward = false;
+    this.fastForwardRefill = false;
     this.pendingTicks = 0;
     this.onSnapshot(null, error);
   }
