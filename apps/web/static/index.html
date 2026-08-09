@@ -6,7 +6,9 @@
   <meta name="theme-color" content="#070a0b">
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self' blob:; style-src 'self'; connect-src 'self'">
   <title>irisu</title>
-  <link rel="stylesheet" href="./styles.css">
+  <link rel="stylesheet" href="./styles.css?v=20260809c">
+  <link rel="preload" href="./exact-runtime/v86.wasm" as="fetch" type="application/wasm" crossorigin>
+  <link rel="preload" href="./exact-runtime/buildroot-bzimage68.bin" as="fetch" crossorigin>
 </head>
 <body>
   <main class="app">
@@ -23,6 +25,14 @@
     <div class="layout">
       <section class="game-frame">
         <canvas id="game" width="640" height="480" aria-label="IriSu game field"></canvas>
+        <div id="runtimeLoading" class="runtime-loading" role="status" aria-live="polite" aria-atomic="true">
+          <div class="runtime-spinner" aria-hidden="true"><span></span></div>
+          <div class="runtime-loading-copy">
+            <strong>Preparing exact simulation</strong>
+            <span id="runtimeLoadingStatus">Downloading emulator and game engine…</span>
+            <span class="runtime-loading-meter" aria-hidden="true"></span>
+          </div>
+        </div>
         <div id="gameOver" class="modal" hidden>
           <span class="modal-kicker">RUN COMPLETE</span>
           <h1 id="finalTitle">Game over</h1>
@@ -57,6 +67,6 @@
     <div id="appError" class="app-error" role="alert" hidden></div>
   </main>
   <div id="toast" class="toast"></div>
-  <script type="module" src="./app.js?v=20260809b"></script>
+  <script type="module" src="./app.js?v=20260809c"></script>
 </body>
 </html>

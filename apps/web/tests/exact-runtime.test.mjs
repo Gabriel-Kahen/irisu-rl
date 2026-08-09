@@ -1,13 +1,21 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import {BrowserGame} from "../static/exact-runtime.js";
+import {BrowserGame, ExactWorkerClient} from "../static/exact-runtime.js";
 import {EXACT_CONFIG_HASH} from "../static/exact-codec.mjs";
 import {encodeReplayWord, parseReplay, serializeReplay} from "../static/replay.mjs";
 
 const observation = tick => ({
   tick, score: 0, gauge: 3000 - tick, gauge_max: 3000, level: 1,
   terminated: false, truncated: false, bodies: [], field: {}, difficulty: {},
+});
+
+test("forwards worker startup progress without coupling it to RPC state", () => {
+  const updates = [];
+  const worker = {};
+  const client = new ExactWorkerClient(worker, 100, message => updates.push(message));
+  client.onMessage({type: "progress", message: "Starting exact simulation…"});
+  assert.deepEqual(updates, ["Starting exact simulation…"]);
 });
 
 test("serializes queued async steps and inserts a release tick after a shot", async () => {
@@ -63,6 +71,25 @@ test("50 Hz scheduler queues elapsed ticks without overlapping the pump", () => 
   assert.equal(pumps, 1);
   assert.equal(game.deadline, 80);
   assert.equal(delay, 19);
+});
+
+test("fast-forward targets twice the previous tick batch", () => {
+  let delay;
+  const game = new BrowserGame({close() {}}, () => {}, {
+    seed: 1, now: () => 61,
+    clock: {setTimeout: (_callback, value) => { delay = value; return 1; }, clearTimeout() {}},
+  });
+  game.observation = observation(0);
+  game.running = true;
+  game.fastForward = true;
+  game.deadline = 20;
+  let pumps = 0;
+  game.pump = () => { pumps++; };
+  game.schedule();
+  assert.equal(game.pendingTicks, 40);
+  assert.equal(pumps, 1);
+  assert.equal(game.deadline, 81);
+  assert.equal(delay, 20);
 });
 
 test("restart replaces the one-reset exact worker process", async () => {

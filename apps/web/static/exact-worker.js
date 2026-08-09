@@ -127,7 +127,12 @@ function waitForPrompt() {
 }
 
 async function start() {
-  progress("Loading exact i386 runtime");
+  progress("Downloading emulator and game engine…");
+  const guestDownloads = Promise.all(guestFiles.map(async name => {
+    const response = await fetch(`./exact-runtime/guest/${name}`);
+    if (!response.ok) throw new Error(`could not load exact-runtime/guest/${name}`);
+    return {name, bytes: new Uint8Array(await response.arrayBuffer())};
+  }));
   emulator = new V86({
     wasm_path: "./exact-runtime/v86.wasm",
     memory_size: 128 * 1024 * 1024,
@@ -138,18 +143,22 @@ async function start() {
     filesystem: {},
     cmdline: "console=ttyS0 tsc=reliable mitigations=off random.trust_cpu=on",
     autostart: false,
+    fastboot: true,
     disable_keyboard: true,
+    disable_mouse: true,
+    disable_speaker: true,
   });
   emulator.add_listener("serial0-output-byte", onSerialByte);
-  await new Promise(resolve => emulator.add_listener("emulator-ready", resolve));
-  for (const name of guestFiles) {
-    const response = await fetch(`./exact-runtime/guest/${name}`);
-    if (!response.ok) throw new Error(`could not load exact-runtime/guest/${name}`);
-    await emulator.create_file(`/${name}`, new Uint8Array(await response.arrayBuffer()));
+  const emulatorReady = new Promise(resolve => emulator.add_listener("emulator-ready", resolve));
+  const [files] = await Promise.all([guestDownloads, emulatorReady]);
+  progress("Preparing exact game engine…");
+  for (const {name, bytes} of files) {
+    await emulator.create_file(`/${name}`, bytes);
   }
-  progress("Booting exact i386 guest");
+  progress("Starting exact simulation…");
   emulator.run();
   await waitForPrompt();
+  progress("Launching game engine…");
   const command = [
     "chmod +x /mnt/ld-linux.so.2 /mnt/irisu-exact-worker",
     "cd /",

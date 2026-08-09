@@ -6,6 +6,7 @@ Its open-bottom U-shaped well follows the measured v2.03 mode-0 geometry.
 - Left click or `W`: weak shot
 - Right click or `S`: strong shot
 - Shift + click: both shots
+- Mouse wheel down: fast-forward (wheel up stops)
 - Space: pause/resume
 - `R`: restart with a new random seed
 - **play replay**: open an original v2.03 normal-mode `.rpy` file
@@ -28,6 +29,8 @@ This writes the GitHub Pages artifact to `apps/web/dist`. The static site boots
 the exact i386 worker under v86 inside a Web Worker and requires no application
 server or cross-origin isolation. Dependencies are pinned and cached in
 `build-web/downloads`; generated guest binaries remain outside source control.
+The client overlaps emulator and guest-engine downloads, uses v86 fast boot,
+and shows the current startup phase until the first exact state is available.
 The workspace's standard exact-worker paths are used when the two environment
 variables are omitted. The build reproducibly compiles the pinned v86
 CORE-MATH patch; `IRISU_V86_WASM` may point at a prebuilt artifact with the
