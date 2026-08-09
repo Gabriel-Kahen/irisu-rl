@@ -15,12 +15,12 @@ test("static build contains only the pinned exact backend", () => {
   assert.match(build, /prepare-exact-runtime\.sh/);
   assert.match(build, /IRISU_EXACT_RUNTIME_DIR/);
   assert.doesNotMatch(build, /emcmake|irisu-wasm|PHYSICS_BACKEND=portable/);
-  assert.match(fetch, /web-exact-runtime-fastboot-20260809/);
-  assert.match(fetch, /ccdb8dd5a855490e54934c6985f598e4abb7ec4414c616fc355522cee257b7f2/);
+  assert.match(fetch, /web-exact-runtime-minboot-20260809/);
+  assert.match(fetch, /592161359a239c2c958c80e1e820164f45fda43a9925f7faf9bf69cc8e86da78/);
   assert.match(prepare, /4faa4508a89df3e1e62b80e2871b6a35b5913f220d53fe5de43408ad6512c261/);
   assert.match(prepare, /ce14d1cab9ce4331bf494fe92bf657029487aec9f7435e7479b3c7cb579fafb5/);
   assert.match(prepare, /73d1023eba1729d6aa6a9a3d3d52122c88e8f05b775caaa0557e042f68c34403/);
-  assert.match(prepare, /681388b6db219fbb1dc63a678cd276d73c21bbb047cd8c7a6771fc4e567591c0/);
+  assert.match(prepare, /b00cf50ca728c27519fdc2527692ea05d1f279989aa583bd280cd5211a71c31a/);
   assert.match(prepare, /IRISU_GUEST_BZIMAGE/);
   assert.match(prepare, /apps\/web\/guest\/build\.sh/);
   assert.doesNotMatch(prepare, /i\.copy\.sh/);

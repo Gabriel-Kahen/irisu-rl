@@ -1,11 +1,12 @@
 /* global V86 */
 "use strict";
 
-importScripts("./exact-runtime/libv86.js?v=20260809e");
+importScripts("./exact-runtime/libv86.js?v=20260809f");
 
 const MAGIC = 0x43505249;
 const VERSION = 1;
 const READY_MARKER = "__IRISU_RPC_READY__";
+const GUEST_ERROR_MARKER = "__IRISU_GUEST_ERROR__:";
 const guestFiles = [
   "irisu-exact-worker",
   "libirisu_box2d_msvc_exact_multiworld.so",
@@ -109,14 +110,21 @@ function rpc(opcode, payload) {
   });
 }
 
-function waitForPrompt() {
+function waitForProtocolReady() {
   return new Promise((resolve, reject) => {
     const deadline = setTimeout(() => {
       clearInterval(poll);
       reject(new Error(`guest boot timeout; console tail=${JSON.stringify(bootText.slice(-500))}`));
     }, 60000);
     const poll = setInterval(() => {
-      if (!bootText.includes("~% ")) return;
+      const errorAt = bootText.indexOf(GUEST_ERROR_MARKER);
+      if (errorAt >= 0) {
+        clearTimeout(deadline);
+        clearInterval(poll);
+        reject(new Error(bootText.slice(errorAt).split("\n", 1)[0]));
+        return;
+      }
+      if (!protocolReady) return;
       clearTimeout(deadline);
       clearInterval(poll);
       resolve();
@@ -127,19 +135,19 @@ function waitForPrompt() {
 async function start() {
   progress("Downloading emulator and game engine…");
   const guestDownloads = Promise.all(guestFiles.map(async name => {
-    const response = await fetch(`./exact-runtime/guest/${name}?v=20260809e`);
+    const response = await fetch(`./exact-runtime/guest/${name}?v=20260809f`);
     if (!response.ok) throw new Error(`could not load exact-runtime/guest/${name}`);
     return {name, bytes: new Uint8Array(await response.arrayBuffer())};
   }));
   emulator = new V86({
-    wasm_path: "./exact-runtime/v86.wasm?v=20260809e",
+    wasm_path: "./exact-runtime/v86.wasm?v=20260809f",
     memory_size: 128 * 1024 * 1024,
     vga_memory_size: 2 * 1024 * 1024,
-    bios: {url: "./exact-runtime/seabios.bin?v=20260809e"},
-    vga_bios: {url: "./exact-runtime/vgabios.bin?v=20260809e"},
-    bzimage: {url: "./exact-runtime/buildroot-bzimage68.bin?v=20260809e", async: false},
+    bios: {url: "./exact-runtime/seabios.bin?v=20260809f"},
+    vga_bios: {url: "./exact-runtime/vgabios.bin?v=20260809f"},
+    bzimage: {url: "./exact-runtime/buildroot-bzimage68.bin?v=20260809f", async: false},
     filesystem: {},
-    cmdline: "rdinit=/irisu-init console=ttyS0 quiet loglevel=0 tsc=reliable mitigations=off random.trust_cpu=on",
+    cmdline: "rdinit=/irisu-direct-init console=ttyS0 quiet loglevel=0 tsc=reliable mitigations=off random.trust_cpu=on",
     autostart: false,
     fastboot: true,
     disable_keyboard: true,
@@ -153,18 +161,9 @@ async function start() {
   for (const {name, bytes} of files) {
     await emulator.create_file(`/${name}`, bytes);
   }
-  progress("Starting exact simulation…");
+  progress("Starting exact game engine…");
   emulator.run();
-  await waitForPrompt();
-  progress("Launching game engine…");
-  const command = [
-    "chmod +x /mnt/ld-linux.so.2 /mnt/irisu-exact-worker",
-    "cd /",
-    "stty raw -echo",
-    "printf '\\137\\137IRISU\\137RPC\\137READY\\137\\137'",
-    "IRISU_EXACT_CW=0x27f exec /mnt/ld-linux.so.2 --library-path /mnt /mnt/irisu-exact-worker",
-  ].join(" && ");
-  emulator.serial0_send(`${command}\n`);
+  await waitForProtocolReady();
 }
 
 onmessage = event => {

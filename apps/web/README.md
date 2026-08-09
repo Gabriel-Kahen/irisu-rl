@@ -58,7 +58,7 @@ the seed and immutable input stream when their exact observations have left the
 bounded in-memory cache.
 
 GitHub Pages downloads the hash-pinned runtime from the
-[`web-exact-runtime-fastboot-20260809`](https://github.com/Gabriel-Kahen/irisu-rl/releases/tag/web-exact-runtime-fastboot-20260809)
+[`web-exact-runtime-minboot-20260809`](https://github.com/Gabriel-Kahen/irisu-rl/releases/tag/web-exact-runtime-minboot-20260809)
 release with `fetch-exact-runtime.sh`, verifies both the archive and its embedded
 runtime manifest, and passes the prepared directory through
 `IRISU_EXACT_RUNTIME_DIR`.

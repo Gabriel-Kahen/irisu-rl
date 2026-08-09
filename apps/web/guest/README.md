@@ -15,8 +15,10 @@ and Linux configs. The build pins and hashes Buildroot 2024.02.13; Buildroot
 pins the Linux, BusyBox, toolchain, and other source archives recorded by
 `legal-info/manifest.csv`.
 
-The guest mounts v86's `host9p` filesystem at `/mnt`, emits
+The diagnostic `/irisu-init` mounts v86's `host9p` filesystem at `/mnt`, emits
 `__IRISU_GUEST_READY__` on the serial console, and exposes a raw BusyBox shell.
+The browser uses `/irisu-direct-init`, which launches the exact worker directly
+after mounting only proc and `host9p`.
 `prepare-exact-runtime.sh` builds this image by default, or accepts an existing
 copy through `IRISU_GUEST_BZIMAGE` after enforcing its pinned hash. The recipe
 passed the exact 20-step v86/native response gate; the final response SHA-256

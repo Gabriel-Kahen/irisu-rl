@@ -85,6 +85,13 @@ export GIT_CEILING_DIRECTORIES="$output"
 
 buildroot_make=(make -C "$source" O="$build"
   BR2_EXTERNAL="$here/buildroot-external")
+# Several pinned host packages predate GCC 15's GNU C23 default. Keep their
+# host-only builds on the language revisions used by this Buildroot release.
+host_gcc_version=$(gcc -dumpversion)
+host_gcc_major=${host_gcc_version%%.*}
+if [[ "$host_gcc_major" =~ ^[0-9]+$ ]] && ((host_gcc_major >= 15)); then
+  buildroot_make+=('HOST_CFLAGS=-O2 -std=gnu17')
+fi
 "${buildroot_make[@]}" irisu_web_guest_defconfig
 "${buildroot_make[@]}" all
 "${buildroot_make[@]}" legal-info
