@@ -4,7 +4,8 @@ set -euo pipefail
 root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 build=${IRISU_WEB_BUILD_DIR:-"$root/build-web"}
 output=${1:-"$root/apps/web/dist"}
-runtime="$build/exact-runtime"
+runtime_override=${IRISU_EXACT_RUNTIME_DIR:-}
+runtime=${runtime_override:-"$build/exact-runtime"}
 
 output=$(realpath -m -- "$output")
 runtime=$(realpath -m -- "$runtime")
@@ -22,7 +23,15 @@ if [[ "$output" == "$static" || "$output/" == "$static/"* ||
 fi
 site_marker=.irisu-static-site
 
-"$root/apps/web/prepare-exact-runtime.sh" "$runtime"
+if [[ -n "$runtime_override" ]]; then
+  [[ -f "$runtime/.irisu-exact-runtime" && -f "$runtime/SHA256SUMS" ]] || {
+    echo "invalid prepared exact runtime: $runtime" >&2
+    exit 1
+  }
+  (cd "$runtime" && sha256sum -c SHA256SUMS)
+else
+  "$root/apps/web/prepare-exact-runtime.sh" "$runtime"
+fi
 stage=$(mktemp -d "${output}.stage.XXXXXX")
 cleanup() { rm -rf -- "$stage"; }
 trap cleanup EXIT

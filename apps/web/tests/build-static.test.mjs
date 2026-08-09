@@ -10,9 +10,13 @@ const web = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
 test("static build contains only the pinned exact backend", () => {
   const build = readFileSync(path.join(web, "build-static.sh"), "utf8");
+  const fetch = readFileSync(path.join(web, "fetch-exact-runtime.sh"), "utf8");
   const prepare = readFileSync(path.join(web, "prepare-exact-runtime.sh"), "utf8");
   assert.match(build, /prepare-exact-runtime\.sh/);
+  assert.match(build, /IRISU_EXACT_RUNTIME_DIR/);
   assert.doesNotMatch(build, /emcmake|irisu-wasm|PHYSICS_BACKEND=portable/);
+  assert.match(fetch, /web-exact-runtime-20260809/);
+  assert.match(fetch, /9937a50853fd5f29ddf853eb6e6e3ec6e55251b496f7306ed4855f8648937928/);
   assert.match(prepare, /4faa4508a89df3e1e62b80e2871b6a35b5913f220d53fe5de43408ad6512c261/);
   assert.match(prepare, /ce14d1cab9ce4331bf494fe92bf657029487aec9f7435e7479b3c7cb579fafb5/);
   assert.match(prepare, /73d1023eba1729d6aa6a9a3d3d52122c88e8f05b775caaa0557e042f68c34403/);

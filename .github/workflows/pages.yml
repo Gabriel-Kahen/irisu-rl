@@ -19,11 +19,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: mymindstorm/setup-emsdk@v14
-        with:
-          version: 4.0.10
-          actions-cache-folder: emsdk-cache
-      - run: apps/web/build-static.sh
+      - name: Download pinned exact runtime
+        run: apps/web/fetch-exact-runtime.sh "$RUNNER_TEMP/irisu-exact-runtime"
+      - name: Build static site
+        env:
+          IRISU_EXACT_RUNTIME_DIR: ${{ runner.temp }}/irisu-exact-runtime
+        run: apps/web/build-static.sh
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v4
         with:

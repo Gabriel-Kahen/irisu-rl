@@ -53,6 +53,12 @@ The transport can pause, step, and scrub; long backward seeks are rebuilt from
 the seed and immutable input stream when their exact observations have left the
 bounded in-memory cache.
 
+GitHub Pages downloads the hash-pinned runtime from the
+[`web-exact-runtime-20260809`](https://github.com/Gabriel-Kahen/irisu-rl/releases/tag/web-exact-runtime-20260809)
+release with `fetch-exact-runtime.sh`, verifies both the archive and its embedded
+runtime manifest, and passes the prepared directory through
+`IRISU_EXACT_RUNTIME_DIR`.
+
 ## Legacy native API server
 
 `apps/web/server.py` and the Dockerfile are retained for native API diagnostics.
