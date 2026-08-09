@@ -1,0 +1,21 @@
+{
+  "schema": 1,
+  "candidate": "v86-libm",
+  "first_exponent": 0,
+  "last_exponent": 145,
+  "input_count": 1224736768,
+  "metrics": {
+    "fsin": {"compared": 1224736768, "exact": 1224736767, "raw_mismatches": 1},
+    "fcos": {"compared": 1224736768, "exact": 1224736768, "raw_mismatches": 0},
+    "fsincos_sine": {"compared": 1224736768, "exact": 1224736767, "raw_mismatches": 1},
+    "fsincos_cosine": {"compared": 1224736768, "exact": 1224736768, "raw_mismatches": 0}
+  },
+  "first_counterexample": {
+    "input": "0x46199998",
+    "native_fsin": "0xbeb1fa5d",
+    "candidate_fsin": "0xbeb1fa5e"
+  },
+  "pair_disagreements": {"sine": 0, "cosine": 0},
+  "range_status_mismatches": 0,
+  "portable_status_model_mismatches": 0
+}

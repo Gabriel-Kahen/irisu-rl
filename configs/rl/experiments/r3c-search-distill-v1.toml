@@ -1,0 +1,98 @@
+version = "r3c-search-distill-v1"
+status = "exploratory_not_r3_evidence"
+deployable = false
+objective = "search_distillation_then_undiscounted_raw_score"
+
+[actions]
+wait_ticks = [1, 2, 4, 8, 16]
+x_radius_offsets = [-1.0, -0.5, 0.0, 0.5, 1.0]
+y_radius_offsets = [1.5, 2.0, 2.5]
+
+[model]
+global_hidden = 128
+body_hidden = 128
+attention_hidden = 192
+attention_heads = 4
+attention_layers = 2
+feedforward_hidden = 384
+relation_hidden = 64
+relation_color_scale = 4.0
+relation_distance_scale = 2.0
+matcher_prior_scale = 16.0
+matcher_gate_bias = 2.0
+target_residual_scale = 4.0
+matcher_kind_prior_scale = 12.0
+kind_residual_scale = 4.0
+recurrent_hidden = 192
+recurrent_layers = 1
+value_quantiles = 51
+dropout = 0.0
+
+[teacher]
+version = "spawn-censored-tactical-search-v1"
+maximum_candidates = 64
+maximum_depth = 1
+maximum_safe_horizon_ticks = 64
+scripted_anchors = [
+  "matcher",
+  "direct_matcher",
+  "side_ejector",
+  "imminent_rot_hazard",
+]
+future_rng = "never_read"
+spawn_boundary = "exclusive"
+
+[teacher.utility]
+raw_score = 1.0
+gauge_fraction = 0.10
+projectile_hit = 0.10
+chain_joined = 1.0
+cleared = 1.0
+ejected = 0.20
+rotten = -1.0
+confirmed_second_hit_destroyed = -2.0
+terminal = -4.0
+invalid_action = -4.0
+
+[distillation]
+seed = 2026072801
+learning_rate = 0.0003
+batch_mode = "full_batch_development_gate"
+steps = 600
+gradient_clip = 1.0
+kind_weight = 1.0
+wait_weight = 0.25
+target_weight = 2.0
+template_weight = 1.0
+quantile_weight = 0.25
+
+[development_gates]
+single_body_hit_rate = 0.90
+single_body_coordinate_rmse = 0.05
+same_color_target_accuracy = 0.90
+controlled_target_accuracy = 0.90
+crowded_multi_pair_target_accuracy = 0.90
+selected_target_hit_rate = 0.80
+oracle_causal_success_retention = 0.80
+actionable_non_wait_recall = 0.80
+maximum_wait_only_episode_fraction = 0.20
+maximum_no_action_trajectory_equality = 0.25
+
+[full_game_development]
+training_backend = "portable"
+confirmation_backend = "exact"
+evaluation_ticks = 50000
+selection_metric = "undiscounted_raw_score"
+report = [
+  "score",
+  "level",
+  "highest_chain",
+  "qualifying_clears",
+  "gauge",
+  "rot",
+  "action_kinds",
+  "wait_durations",
+  "projectile_hits",
+  "chain_joins",
+  "clears",
+]

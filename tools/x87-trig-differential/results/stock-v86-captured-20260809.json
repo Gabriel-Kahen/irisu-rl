@@ -1,0 +1,19 @@
+{
+  "schema": 1,
+  "candidate": "Rust libm f64 sin/cos rounded to f32 with x87 range guard",
+  "control_word": "0x027f",
+  "input_count_before_dedup": 13096069,
+  "input_count": 10080004,
+  "maximum_finite_absolute_bits": "0x41bf6214",
+  "metrics": {
+    "fsin": {"compared": 10080004, "exact": 10080004},
+    "fcos": {"compared": 10080004, "exact": 10080004},
+    "fsincos_sine": {"compared": 10080004, "exact": 10080004},
+    "fsincos_cosine": {"compared": 10080004, "exact": 10080004}
+  },
+  "native_status_counts": {
+    "fsin": {"0x0000": 1, "0x0020": 10080003},
+    "fcos": {"0x0000": 1, "0x0020": 10080003},
+    "fsincos": {"0x0000": 1, "0x0020": 10080003}
+  }
+}

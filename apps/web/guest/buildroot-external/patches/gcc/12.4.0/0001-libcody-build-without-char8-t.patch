@@ -1,0 +1,31 @@
+From: IriSys contributors
+Subject: [PATCH] libcody: build without distinct char8_t literals
+
+GCC 12's bundled libcody assumes that a u8 string literal has element type
+char. Since C++20 it has element type char8_t. A modern host compiler can
+therefore fail while bootstrapping GCC when a recursive build overrides the
+C++11 mode selected by libcody's configure script.
+
+Pass -fno-char8_t in libcody's own compile options. This restores the source
+semantics it was written for even when a parent make overrides CXX. It affects
+only the host-side compiler bootstrap; target code and the guest runtime are
+unchanged.
+
+---
+ libcody/Makefile.in | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/libcody/Makefile.in b/libcody/Makefile.in
+index 1b7a4cc..94a25f4 100644
+--- a/libcody/Makefile.in
++++ b/libcody/Makefile.in
+@@ -22,6 +22,7 @@ INSTALL := $(srcdir)/build-aux/install-sh
+ CXXFLAGS := @CXXFLAGS@
+ CXXINC := $(filter -I%,@CXX@)
+ CXXOPTS := $(CXXFLAGS) @PICFLAG@
++CXXOPTS += -fno-char8_t
+ 
+ ifneq (@EXCEPTIONS@,yes)
+ CXXOPTS += -fno-exceptions -fno-rtti
+-- 
+2.50.1

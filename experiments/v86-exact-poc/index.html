@@ -1,0 +1,182 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>IriSu exact worker under v86</title>
+  <style>
+    :root { color-scheme: dark; font-family: ui-monospace, monospace; }
+    body { max-width: 900px; margin: 2rem auto; padding: 0 1rem; background: #11151b; color: #dbe7f3; }
+    h1 { font: 600 1.4rem system-ui, sans-serif; }
+    #status { color: #9ed0ff; }
+    pre { min-height: 24rem; padding: 1rem; overflow: auto; background: #0a0d11; border: 1px solid #293444; white-space: pre-wrap; }
+    .ok { color: #8ee6a1; }
+    .error { color: #ff9b9b; }
+  </style>
+</head>
+<body>
+  <h1>Exact i386 physics worker in a browser</h1>
+  <p id="status">Starting Web Worker…</p>
+  <pre id="log"></pre>
+  <script type="module">
+    const status = document.querySelector("#status");
+    const log = document.querySelector("#log");
+    const NATIVE_FINAL_SHA256 = "dcb234c9ffb3c0140ebfa98c735c5568b36603999885a733482db7e012f3f9e1";
+    const worker = new Worker("./exact-v86-worker.js");
+    const startupAt = performance.now();
+    let nextMessageId = 1;
+    const pending = new Map();
+    let resolveReady;
+    let rejectReady;
+    const ready = new Promise((resolve, reject) => {
+      resolveReady = resolve;
+      rejectReady = reject;
+    });
+
+    const line = value => {
+      log.textContent += `${value}\n`;
+      log.scrollTop = log.scrollHeight;
+    };
+
+    worker.onmessage = event => {
+      const message = event.data;
+      if (message.type === "progress") {
+        status.textContent = message.message;
+        line(message.message);
+        return;
+      }
+      if (message.type === "ready") {
+        resolveReady();
+        return;
+      }
+      if (message.type === "response") {
+        const request = pending.get(message.messageId);
+        if (!request) return;
+        pending.delete(message.messageId);
+        if (message.error) request.reject(new Error(message.error));
+        else request.resolve(new Uint8Array(message.payload));
+        return;
+      }
+      if (message.type === "fatal") {
+        status.textContent = "Failed";
+        status.className = "error";
+        line(`ERROR: ${message.error}`);
+        rejectReady(new Error(message.error));
+        for (const request of pending.values()) request.reject(new Error(message.error));
+        pending.clear();
+      }
+    };
+
+    const rpc = (opcode, payload = new Uint8Array()) => new Promise((resolve, reject) => {
+      const messageId = nextMessageId++;
+      pending.set(messageId, { resolve, reject });
+      const copy = payload.slice();
+      worker.postMessage({ type: "rpc", messageId, opcode, payload: copy.buffer }, [copy.buffer]);
+    });
+
+    const readU16String = (view, bytes, state) => {
+      const size = view.getUint16(state.offset, true);
+      state.offset += 2;
+      const value = new TextDecoder().decode(bytes.subarray(state.offset, state.offset + size));
+      state.offset += size;
+      return value;
+    };
+
+    const decodeHello = bytes => {
+      const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+      const state = { offset: 32 };
+      return {
+        protocol: view.getUint32(0, true),
+        pointerBits: view.getUint32(4, true),
+        bodyCapacity: view.getUint32(8, true),
+        pid: view.getUint32(12, true),
+        configHash: view.getBigUint64(16, true).toString(16),
+        controlWord: view.getUint32(24, true).toString(16),
+        processModel: view.getUint32(28, true),
+        backend: readU16String(view, bytes, state),
+        compiler: readU16String(view, bytes, state),
+        exactSha256: readU16String(view, bytes, state),
+      };
+    };
+
+    const decodeObservation = bytes => {
+      const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+      return {
+        tick: view.getBigUint64(0, true).toString(),
+        score: view.getBigInt64(8, true).toString(),
+        gauge: view.getBigInt64(16, true).toString(),
+        level: view.getUint32(88, true),
+        bodyCount: view.getUint32(104, true),
+      };
+    };
+
+    const seedPayload = seed => {
+      const bytes = new Uint8Array(8);
+      new DataView(bytes.buffer).setBigUint64(0, BigInt(seed), true);
+      return bytes;
+    };
+
+    const stepPayload = () => {
+      const bytes = new Uint8Array(28);
+      const view = new DataView(bytes.buffer);
+      view.setUint32(0, 0, true);
+      view.setFloat64(4, 0, true);
+      view.setFloat64(12, 0, true);
+      view.setUint32(20, 1, true);
+      view.setUint32(24, 0, true);
+      return bytes;
+    };
+
+    const run = async () => {
+      await ready;
+      line(`Guest boot + exact-worker launch: ${(performance.now() - startupAt).toFixed(1)} ms`);
+      const hello = decodeHello(await rpc(1));
+      line(`Hello: ${JSON.stringify(hello, null, 2)}`);
+      if (hello.pointerBits !== 32 || hello.controlWord !== "27f") {
+        throw new Error("unexpected exact-worker ABI or x87 control word");
+      }
+
+      const resetStart = performance.now();
+      const reset = decodeObservation(await rpc(2, seedPayload(0)));
+      const resetMs = performance.now() - resetStart;
+      line(`Reset: ${JSON.stringify(reset)} (${resetMs.toFixed(1)} ms)`);
+
+      const observeCount = 20;
+      let observedBytes = 0;
+      const observeStart = performance.now();
+      for (let index = 0; index < observeCount; index++) {
+        observedBytes += (await rpc(4)).byteLength;
+      }
+      const observeMs = performance.now() - observeStart;
+      line(`Observe: ${observeCount} RPCs, ${(observeMs / observeCount).toFixed(2)} ms/RPC, ${(observedBytes / observeMs).toFixed(1)} kB/s`);
+
+      const stepCount = 20;
+      let lastStep;
+      let lastStepBytes;
+      const stepStart = performance.now();
+      for (let index = 0; index < stepCount; index++) {
+        lastStepBytes = await rpc(3, stepPayload());
+        lastStep = decodeObservation(lastStepBytes);
+      }
+      const stepMs = performance.now() - stepStart;
+      const finalHash = [...new Uint8Array(await crypto.subtle.digest("SHA-256", lastStepBytes))]
+        .map(byte => byte.toString(16).padStart(2, "0")).join("");
+      line(`Step: ${stepCount} ticks, ${(stepMs / stepCount).toFixed(2)} ms/tick, ${(1000 * stepCount / stepMs).toFixed(1)} ticks/s`);
+      line(`Final observation prefix: ${JSON.stringify(lastStep)}`);
+      line(`Final response SHA-256: ${finalHash}`);
+      if (finalHash !== NATIVE_FINAL_SHA256) throw new Error("v86 result differs from the native exact-worker reference");
+      status.textContent = "PoC passed";
+      status.className = "ok";
+      document.title = "PASS — v86 exact worker";
+      document.documentElement.dataset.result = "pass";
+    };
+
+    run().catch(error => {
+      status.textContent = "Failed";
+      status.className = "error";
+      line(`ERROR: ${error.stack || error}`);
+      document.documentElement.dataset.result = "fail";
+    });
+  </script>
+</body>
+</html>

@@ -1,10 +1,10 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-ready="false">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#070a0b">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; connect-src 'self'">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self' blob:; style-src 'self'; connect-src 'self'">
   <title>irisu</title>
   <link rel="stylesheet" href="./styles.css">
 </head>
@@ -13,6 +13,8 @@
     <header>
       <div class="brand">irisu</div>
       <div class="header-actions">
+        <button id="openReplayButton" type="button" disabled>play replay</button>
+        <input id="replayFileInput" type="file" accept=".rpy,application/octet-stream" hidden>
         <button id="pauseButton">pause <kbd>space</kbd></button>
         <button id="restartButton">restart <kbd>R</kbd></button>
       </div>
@@ -25,14 +27,36 @@
           <span class="modal-kicker">RUN COMPLETE</span>
           <h1 id="finalTitle">Game over</h1>
           <p id="finalScore">00000000</p>
-          <button id="againButton" class="primary">try again</button>
+          <div class="modal-actions">
+            <button id="saveReplayButton" type="button">save replay (.rpy)</button>
+            <button id="againButton" type="button" class="primary">try again</button>
+          </div>
         </div>
         <div id="paused" class="pause-mark" hidden>PAUSED</div>
       </section>
 
+      <section id="replayControls" class="replay-controls" aria-label="Replay playback controls" hidden>
+        <div class="replay-meta">
+          <strong id="replayName">Replay</strong>
+          <span id="replayStatus"></span>
+          <span id="replayAnnouncement" class="visually-hidden" role="status" aria-live="polite"></span>
+        </div>
+        <div class="replay-transport">
+          <button id="replayPlayButton" type="button">pause</button>
+          <button id="replayBackButton" type="button" aria-label="Step back one replay frame">−1</button>
+          <button id="replayForwardButton" type="button" aria-label="Step forward one replay frame">+1</button>
+          <label class="visually-hidden" for="replayScrubber">Replay position</label>
+          <input id="replayScrubber" class="replay-scrubber" type="range" min="0" max="0" value="0" step="1">
+          <output id="replayPosition" for="replayScrubber">frame 0 / 0</output>
+          <button id="exitReplayButton" type="button">new game</button>
+        </div>
+        <div id="replayError" class="replay-error" role="alert" hidden></div>
+      </section>
+
     </div>
+    <div id="appError" class="app-error" role="alert" hidden></div>
   </main>
   <div id="toast" class="toast"></div>
-  <script type="module" src="./app.js?v=20260723d"></script>
+  <script type="module" src="./app.js?v=20260809b"></script>
 </body>
 </html>

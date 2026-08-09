@@ -1,0 +1,139 @@
+version = "r3e-sustainable-v1"
+status = "development_only_not_canonical_evidence"
+deployable = false
+canonical_r3_evidence = false
+sealed_evaluation_allowed = false
+objective = "oracle_visited_all_candidate_geometry_ranking_with_winner_baseline"
+trusted_runtime = "artifacts/r3/runtime/main-0c48dba-20260723/portable-build/libirisu_clone.so"
+
+[base_policy]
+checkpoint = "artifacts/r3/development/r3d-survival-v5-20260729/long-development.pt"
+sha256 = "31c9bc5e10b0ad021eecedf0c0037de6b24bd4d74e0cfbe9b4922b77dc53da1d"
+cooldown_ticks = 16
+minimum_pair_closure_sizes = 0.05
+impact_side_sizes = 0.50
+impact_below_sizes = 0.75
+source_velocity_lead_ticks = 1.0
+ticks_per_second = 50.0
+act_logit_bias = 1.0
+
+[profiles.smoke]
+collection_seeds = 1
+collection_ticks = 400
+query_stride_shots = 1
+maximum_search_queries_per_episode = 4
+evaluation_seeds = 2
+evaluation_horizons = [400]
+training_steps = [1, 2]
+batch_size = 4
+
+[profiles.fast]
+collection_seeds = 4
+collection_ticks = 2000
+query_stride_shots = 2
+maximum_search_queries_per_episode = 64
+evaluation_seeds = 8
+evaluation_horizons = [2000, 10000]
+training_steps = [30, 60, 120, 240]
+batch_size = 64
+
+[profiles.medium]
+collection_seeds = 8
+collection_ticks = 5000
+query_stride_shots = 2
+maximum_search_queries_per_episode = 96
+evaluation_seeds = 8
+evaluation_horizons = [2000, 10000, 20000]
+training_steps = [60, 120, 240, 480, 960]
+batch_size = 128
+
+[profiles.deep]
+collection_seeds = 8
+collection_ticks = 20000
+query_stride_shots = 2
+maximum_search_queries_per_episode = 256
+evaluation_seeds = 16
+evaluation_horizons = [2000, 10000, 20000, 50000]
+training_steps = [120, 240, 480, 960, 1920, 3840]
+batch_size = 128
+
+[profiles.long]
+collection_seeds = 16
+collection_ticks = 10000
+query_stride_shots = 2
+maximum_search_queries_per_episode = 256
+evaluation_seeds = 16
+evaluation_horizons = [2000, 10000, 20000]
+training_steps = [30, 60, 120, 240, 480, 960]
+batch_size = 128
+
+[collection_teacher]
+kind = "runway_geometry"
+runway_ticks = 256
+cross_spawn_boundaries = true
+drives_collection_rollout_on_queried_shots = true
+rollout_mode = "oracle_visited"
+
+[search]
+horizon_ticks = 64
+velocity_lead_ticks = 1.0
+ticks_per_second = 50.0
+support_fractions = [0.35, 0.65, 0.85]
+support_clearance_sizes = 0.25
+grid_x_fractions = [0.25, 0.50, 0.75]
+grid_y_sizes = [0.60, 0.75, 0.90]
+max_candidates = 32
+
+[geometry_model]
+body_hidden = 96
+pair_hidden = 128
+dropout = 0.0
+board_context_hidden = 128
+
+[training]
+seed = 2026072901
+learning_rate = 0.0003
+torch_threads = 1
+curve_protocol = "fresh_identical_initialization_at_each_cumulative_step_budget"
+
+[training.ranking]
+listwise_weight = 1.0
+pairwise_weight = 1.0
+all_available_candidate_outcomes = true
+winner_classifier_retained_as_baseline = true
+
+[deployment]
+minimum_candidate_confidence = 0.70
+minimum_logit_margin_over_incumbent = 1.0
+minimum_gauge_fraction = 0.075
+maximum_unverified_corrections = 2
+unavailable_candidate_slots = "hard_masked"
+fallback = "frozen_v5_analytic_geometry"
+
+[selection]
+eligibility_horizons = "all_profile_evaluation_horizons"
+ranking_horizon = "longest_profile_evaluation_horizon"
+baseline_tie_policy = "retain_frozen_v5"
+catastrophic_survival_ratio = 0.50
+catastrophic_survival_loss_ticks = 1000
+ranking = [
+  "require_zero_new_paired_terminal_failures_at_all_horizons",
+  "require_zero_new_paired_gauge_failures_at_all_horizons",
+  "require_zero_catastrophic_paired_survival_regressions_at_all_horizons",
+  "minimum_candidate_gauge_failures_at_longest_horizon",
+  "maximum_rescued_gauge_failures_at_longest_horizon",
+  "maximum_minimum_paired_survival_ratio_at_longest_horizon",
+  "maximum_minimum_paired_survival_delta_at_longest_horizon",
+  "minimum_paired_survival_regressions_at_longest_horizon",
+  "maximum_p10_survival_ticks",
+  "maximum_median_survival_ticks",
+  "maximum_median_raw_score",
+  "minimum_training_steps",
+]
+
+[evaluation]
+collection_suite = "r3e-policy-visited-collection-v1"
+development_suite = "r3e-fixed-disjoint-development-v1"
+fixed_seed_count = 32
+training_seed_overlap_with_development = false
+sealed_test_allowed = false

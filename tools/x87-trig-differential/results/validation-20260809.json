@@ -1,0 +1,76 @@
+{
+  "schema": 1,
+  "date": "2026-08-09",
+  "host": {
+    "architecture": "x86_64",
+    "cpu": "AMD Ryzen 7 3700X 8-Core Processor",
+    "x87_control_word": "0x027f"
+  },
+  "candidate": {
+    "name": "CORE-MATH cr_sincosf with x87 range and status model",
+    "core_math_commit": "07cf01e12a42b82cc478341982936cad7f3f9bdc",
+    "core_math_source_sha256": "aa391047a7bf5813561def1c4483b1a730a0eac20018b819e3c37441eed610ea",
+    "harness_source_sha256": "4124aea368bd1792aaf8f506f6def0e01443856ae6eab32c4729636b41bcc89a"
+  },
+  "captured_workload": {
+    "corpus": ".tmp/exact-core-perf-20260721/trig-keys-3000.bin",
+    "corpus_sha256": "f431ad78a502f3438d20a19e8751db62da8a2d6b11dec57cc45031056b799b11",
+    "calls_before_deduplication": 13096069,
+    "unique_inputs": 10080004,
+    "unique_negative_inputs": 4234522,
+    "maximum_finite_absolute_bits": "0x41bf6214",
+    "fsin_exact": 10080004,
+    "fcos_exact": 10080004,
+    "fsincos_sine_exact": 10080004,
+    "fsincos_cosine_exact": 10080004,
+    "status_model_mismatches": 0,
+    "pair_vs_unary_mismatches": 0,
+    "report": "captured-keys-20260809.json",
+    "report_sha256": "fd3b3897b5e1863ba68849b41f07701e70592a6f41f57f6ba369a43bfb4af482"
+  },
+  "positive_binary32_exhaustive": {
+    "exponent_first": 0,
+    "exponent_last": 145,
+    "raw_bit_first": "0x00000000",
+    "raw_bit_last": "0x48ffffff",
+    "magnitude_upper_bound_exclusive": 524288,
+    "inputs": 1224736768,
+    "fsin_exact": 1224736768,
+    "fcos_exact": 1224736768,
+    "fsincos_sine_exact": 1224736768,
+    "fsincos_cosine_exact": 1224736768,
+    "raw_mismatches": 0,
+    "status_model_mismatches": null,
+    "status_model_note": "The numerical exhaustive sweep predated the status-model counter. The model was instead checked on the captured workload, curated boundary/classes, and the uniform-raw random run.",
+    "pair_vs_unary_mismatches": 0,
+    "note": "Executed in bounded-memory exponent chunks; sine oddness and cosine evenness were not used to inflate the tested input count."
+  },
+  "first_nonexact_exponent_sweep": {
+    "exponents": [146, 147, 148, 149],
+    "inputs": 33554432,
+    "fsin_mismatches": 18,
+    "fcos_mismatches": 15,
+    "fsin_max_ulp": 2,
+    "fcos_max_ulp": 3,
+    "first_mismatch_exponent": 146,
+    "first_mismatch_magnitude_lower_bound": 524288
+  },
+  "uniform_raw_random": {
+    "seed": "0x6a09e667f3bcc909",
+    "unique_inputs": 9988273,
+    "fsin_exact": 9256486,
+    "fcos_exact": 9256701,
+    "fsincos_available": 7451796,
+    "fsin_exact_rate": 0.926735382583,
+    "fcos_exact_rate": 0.926756907826,
+    "status_model_mismatches": 0,
+    "range_c2_mismatches": 0,
+    "pair_vs_unary_mismatches": 0,
+    "note": "The range guard retains all finite inputs with |x| >= 2^63. Mismatch density below that limit rises with exponent because native x87 uses finite-pi argument reduction."
+  },
+  "conclusion": {
+    "observed_gameplay_domain": "CORE-MATH final binary32 outputs are exact for every captured key.",
+    "bounded_domain": "CORE-MATH final binary32 outputs are exhaustively exact for every positive binary32 value below 524288; the observed maximum angle is below 24.",
+    "unbounded_domain": "CORE-MATH alone is not a total replacement for arbitrary large finite angles. Corrections or a hardware-compatible reduction path are required beginning in exponent 146."
+  }
+}

@@ -1,0 +1,26 @@
+{
+  "schema":1,
+  "candidate":"CORE-MATH cr_sincosf with x87 range guard",
+  "control_word":"0x027f",
+  "final_control_word":"0x027f",
+  "input_count_before_dedup":13096069,
+  "input_count":10080004,
+  "included_curated":false,
+  "input_profile":{"finite":10080004,"nonfinite":0,"positive_zero":1,"negative_zero":0,"out_of_range":0,"maximum_finite_absolute_bits":"0x41bf6214"},
+  "deduplicated":true,
+  "metrics":{
+    "fsin":{"compared":10080004,"exact":10080004,"exact_rate":1,"nan_equivalent":10080004,"one_ulp":0,"larger_than_one_ulp":0,"max_ulp":0,"raw_mismatches_by_exponent":{},"samples":[]},
+    "fcos":{"compared":10080004,"exact":10080004,"exact_rate":1,"nan_equivalent":10080004,"one_ulp":0,"larger_than_one_ulp":0,"max_ulp":0,"raw_mismatches_by_exponent":{},"samples":[]},
+    "fsincos_sine":{"compared":10080004,"exact":10080004,"exact_rate":1,"nan_equivalent":10080004,"one_ulp":0,"larger_than_one_ulp":0,"max_ulp":0,"raw_mismatches_by_exponent":{},"samples":[]},
+    "fsincos_cosine":{"compared":10080004,"exact":10080004,"exact_rate":1,"nan_equivalent":10080004,"one_ulp":0,"larger_than_one_ulp":0,"max_ulp":0,"raw_mismatches_by_exponent":{},"samples":[]}
+  },
+  "native_pair_consistency":{"available":10080004,"unavailable":0,"sine_disagrees_with_fsin":0,"cosine_disagrees_with_fcos":0},
+  "range_status":{"fsin_c2_mismatches":0,"fcos_c2_mismatches":0,"fsincos_c2_mismatches":0,"fsincos_remaining_mismatches":0},
+  "portable_status_model":{"fsin_mismatches":0,"fcos_mismatches":0,"fsincos_mismatches":0},
+  "native_status_counts":{
+    "fsin":{"0x0000":1,"0x0020":10080003},
+    "fcos":{"0x0000":1,"0x0020":10080003},
+    "fsincos":{"0x0000":1,"0x0020":10080003}
+  }
+}
+

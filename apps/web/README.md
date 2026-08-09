@@ -3,45 +3,61 @@
 This asset-free browser client renders the real headless simulator at 50 Hz.
 Its open-bottom U-shaped well follows the measured v2.03 mode-0 geometry.
 
-## Run locally
-
-```bash
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build -j
-python3 apps/web/server.py
-```
-
-Open <http://127.0.0.1:8000>.
-
 - Left click or `W`: weak shot
 - Right click or `S`: strong shot
 - Shift + click: both shots
 - Space: pause/resume
 - `R`: restart with a new random seed
+- **play replay**: open an original v2.03 normal-mode `.rpy` file
+- **save replay**: download the completed run from the game-over dialog
 
 Touch taps fire weak shots; desktop players can right-click or press `S` for a
 strong shot.
 
-## Build the static WebAssembly app
+## Build the static exact app
 
-Install the Emscripten SDK, then run:
+Build the existing 32-bit exact worker and provide its MSVC9 r58 host, then run:
 
 ```bash
-apps/web/build-static.sh
+IRISU_EXACT_WORKER=/path/to/irisu-exact-worker \
+IRISU_EXACT_HOST=/path/to/libirisu_box2d_msvc_exact_multiworld.so \
+  apps/web/build-static.sh
 ```
 
-This writes the GitHub Pages artifact to `apps/web/dist`. The browser module is
-single-threaded so it does not require cross-origin isolation headers. Import
-the default factory from `irisu-wasm.js`, await it, and use `cwrap` with the exported
-`irisu_web_create`, `irisu_web_destroy`, `irisu_web_reset`, and
-`irisu_web_step` functions. Reset and step return JSON containing
-`{observation, events}`.
+This writes the GitHub Pages artifact to `apps/web/dist`. The static site boots
+the exact i386 worker under v86 inside a Web Worker and requires no application
+server or cross-origin isolation. Dependencies are pinned and cached in
+`build-web/downloads`; generated guest binaries remain outside source control.
+The workspace's standard exact-worker paths are used when the two environment
+variables are omitted. The build reproducibly compiles the pinned v86
+CORE-MATH patch; `IRISU_V86_WASM` may point at a prebuilt artifact with the
+required hash. It also builds the pinned project-owned Linux guest; a prebuilt
+copy with the required hash may be supplied as `IRISU_GUEST_BZIMAGE`. See
+`EXACT_RUNTIME.md` for provenance and licensing.
 
-## Host later
+Serve the completed directory with any ordinary static file host for local
+testing, for example:
 
-The app serves its static frontend and JSON API from one process, so it can be
-deployed without CORS configuration. Hosting platforms should build from the
-repository root and provide `HOST=0.0.0.0` plus their assigned `PORT`:
+```bash
+python3 -m http.server 8000 --directory apps/web/dist
+```
+
+Open <http://127.0.0.1:8000>. Gameplay and physics remain entirely in the
+browser; this process only serves immutable files.
+
+Saved replays use the original v2.03 52-byte header and per-20 ms input-word
+format. The exact actions accepted by the simulator are recorded, including
+release and idle ticks, and terminal metadata comes from the first recorded
+finish. Replay playback applies the original two-frame startup edge rule.
+The transport can pause, step, and scrub; long backward seeks are rebuilt from
+the seed and immutable input stream when their exact observations have left the
+bounded in-memory cache.
+
+## Legacy native API server
+
+`apps/web/server.py` and the Dockerfile are retained for native API diagnostics.
+They use the portable shared library and are not the exact browser app or its
+deployment path. The static app above does not call their JSON API.
 
 ```bash
 docker build -f apps/web/Dockerfile -t irisu-web .
@@ -51,6 +67,6 @@ docker run --rm -p 8000:8000 irisu-web
 `IRISU_SEED` sets the initial seed and `IRISU_CLONE_LIBRARY` selects a custom
 native build. `GET /healthz` is available for health checks.
 
-The current server owns one shared in-memory game. Before exposing it as a
-multi-user service, add per-session game instances or isolate each player in a
-separate process.
+The diagnostic server owns one shared in-memory game. Before exposing its API
+as a multi-user service, add per-session game instances or isolate each player
+in a separate process.

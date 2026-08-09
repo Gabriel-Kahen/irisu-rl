@@ -447,3 +447,35 @@ CPU budgeting must not infer throughput from logical CPU count alone.
 
 This is a systems smoke, not a learning or transfer benchmark. Its output is
 always labeled privileged, non-deployable, and pre-readiness.
+
+## R3d relative-steering development diagnostics
+
+`r3d_replay_supervision.py` reproduces the trusted 41,449 replay through the
+exact worker and extracts identity-bound source-to-destination shot labels.
+`rl_r3d_steering.py` trains the directed-pair imitator on disjoint
+demonstration plus archive-branch labels, then compares it with the controller
+and legacy matcher on fixed unseen development seeds. Archive snapshots are
+actually restored and branched; they are not diagnostic-only.
+
+```bash
+PYTHONPATH=python .venv/bin/python benchmarks/r3d_replay_supervision.py
+PYTHONPATH=python .venv/bin/python benchmarks/rl_r3d_steering.py \
+  --profile fast \
+  --evaluation-seeds 16 \
+  --evaluation-ticks 10000 \
+  --policy-out artifacts/r3/development/r3d-survival-v5-20260729/long-development.pt \
+  --result-out artifacts/r3/development/r3d-survival-v5-20260729/long-development.json
+PYTHONPATH=python .venv/bin/python benchmarks/rl_r3d_steering.py \
+  --profile fast \
+  --evaluation-suite survival-holdout \
+  --evaluation-seeds 16 \
+  --evaluation-ticks 10000 \
+  --policy-out artifacts/r3/development/r3d-survival-v5-20260729/long-survival-holdout.pt \
+  --result-out artifacts/r3/development/r3d-survival-v5-20260729/long-survival-holdout.json
+```
+
+Both tools are development-only, reject canonical run storage and sealed/test
+paths where applicable, bind their source/runtime/config identities, and report
+failed curriculum gates without promoting them. See
+[`docs/rl-r3d.md`](../docs/rl-r3d.md) for architecture, evidence, and the
+promotion order.

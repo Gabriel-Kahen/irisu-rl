@@ -1,0 +1,4 @@
+__pycache__/
+*.o
+/x87-trig-diff
+/v86-libm/target/

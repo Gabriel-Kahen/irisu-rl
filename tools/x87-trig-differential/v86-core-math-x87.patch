@@ -1,0 +1,201 @@
+diff --git a/Makefile b/Makefile
+index 38f94a47..585a6fa1 100644
+--- a/Makefile
++++ b/Makefile
+@@ -73,6 +73,7 @@ CARGO_FLAGS_SAFE=\
+ 		-C linker=tools/rust-lld-wrapper \
+ 		-C link-args="--import-table --global-base=4096 $(STRIP_DEBUG_FLAG)" \
+ 		-C link-args="build/softfloat.o" \
++		-C link-args="build/core_math_sincosf.o" \
+ 		-C link-args="build/zstddeclib.o" \
+ 		--verbose
+ 
+@@ -206,7 +207,7 @@ src/rust/gen/analyzer.rs: $(ANALYZER_DEPENDENCIES)
+ src/rust/gen/analyzer0f.rs: $(ANALYZER_DEPENDENCIES)
+ 	./gen/generate_analyzer.js --output-dir build/ --table analyzer0f
+ 
+-build/v86.wasm: $(RUST_FILES) build/softfloat.o build/zstddeclib.o Cargo.toml
++build/v86.wasm: $(RUST_FILES) build/softfloat.o build/core_math_sincosf.o build/zstddeclib.o Cargo.toml
+ 	mkdir -p build/
+ 	-BLOCK_SIZE=K ls -l build/v86.wasm
+ 	cargo rustc --release $(CARGO_FLAGS)
+@@ -214,7 +215,7 @@ build/v86.wasm: $(RUST_FILES) build/softfloat.o build/zstddeclib.o Cargo.toml
+ 	-$(WASM_OPT) && wasm-opt -O2 --strip-debug build/v86.wasm -o build/v86.wasm
+ 	BLOCK_SIZE=K ls -l build/v86.wasm
+ 
+-build/v86-debug.wasm: $(RUST_FILES) build/softfloat.o build/zstddeclib.o Cargo.toml
++build/v86-debug.wasm: $(RUST_FILES) build/softfloat.o build/core_math_sincosf.o build/zstddeclib.o Cargo.toml
+ 	mkdir -p build/
+ 	-BLOCK_SIZE=K ls -l build/v86-debug.wasm
+ 	cargo rustc $(CARGO_FLAGS)
+@@ -247,6 +248,16 @@ build/softfloat.o: lib/softfloat/softfloat.c
+ 	    -o build/softfloat.o \
+ 	    lib/softfloat/softfloat.c
+ 
++# CORE-MATH cr_sincosf, pinned and license-preserved by the IriSu integration.
++CORE_MATH_SINCOSF ?= ../../tools/x87-trig-differential/core_math_sincosf.c
++build/core_math_sincosf.o: $(CORE_MATH_SINCOSF)
++	mkdir -p build
++	clang -c -Wall \
++	    --target=wasm32 -O3 -flto -nostdlib -fno-stack-protector \
++	    -fvisibility=hidden -ffunction-sections -fdata-sections \
++	    -o build/core_math_sincosf.o \
++	    $(CORE_MATH_SINCOSF)
++
+ build/zstddeclib.o: lib/zstd/zstddeclib.c
+ 	mkdir -p build
+ 	clang -c -Wall \
+diff --git a/src/rust/cpu/fpu.rs b/src/rust/cpu/fpu.rs
+index 4ddaba96..a2b4a321 100644
+--- a/src/rust/cpu/fpu.rs
++++ b/src/rust/cpu/fpu.rs
+@@ -5,6 +5,10 @@ use crate::softfloat::{Precision, RoundingMode, F80};
+ 
+ use std::f64;
+ 
++extern "C" {
++    fn cr_sincosf(x: f32, sine: *mut f32, cosine: *mut f32);
++}
++
+ const FPU_C0: u16 = 0x100;
+ const FPU_C1: u16 = 0x200;
+ const FPU_C2: u16 = 0x400;
+@@ -22,6 +26,66 @@ const FPU_EX_U: u16 = 1 << 4; // underflow
+ const FPU_EX_P: u16 = 1 << 5; // precision
+ const FPU_EX_SF: u16 = 1 << 6;
+ 
++// Native x87 reduces finite inputs only while |x| < 2^63.
++const FPU_TRIG_LIMIT_EXPONENT: u16 = 0x403E;
++// Exhaustively validated for every binary32 magnitude below 2^19. The game
++// corpus reaches only 0x41bf6214 (< 24); larger values retain v86's generic
++// f64 implementation because AMD x87 and correctly-rounded sinf diverge there.
++const FPU_TRIG_PROVEN_F32_LIMIT: u32 = 0x4900_0000;
++
++fn f80_reloadable_f32(value: F80) -> Option<i32> {
++    F80::clear_exception_flags();
++    let bits = value.to_f32();
++    if F80::get_exception_flags() != 0 {
++        return None;
++    }
++    F80::clear_exception_flags();
++    let roundtrip = F80::of_f32(bits);
++    if F80::get_exception_flags() == 0 &&
++        roundtrip.mantissa == value.mantissa &&
++        roundtrip.sign_exponent == value.sign_exponent
++    {
++        Some(bits)
++    }
++    else {
++        None
++    }
++}
++
++unsafe fn fpu_trig_f32(value: F80) -> Option<(F80, F80)> {
++    let bits = f80_reloadable_f32(value)? as u32;
++    let absolute = bits & 0x7FFF_FFFF;
++    let exponent = absolute & 0x7F80_0000;
++    let fraction = absolute & 0x007F_FFFF;
++
++    if exponent == 0x7F80_0000 {
++        let quiet_nan = fraction != 0 && fraction & 0x0040_0000 != 0;
++        if !quiet_nan {
++            *fpu_status_word |= FPU_EX_I;
++        }
++    }
++    else if absolute != 0 {
++        *fpu_status_word |= FPU_EX_P;
++        if exponent == 0 {
++            *fpu_status_word |= FPU_EX_D;
++        }
++    }
++
++    if absolute >= FPU_TRIG_PROVEN_F32_LIMIT {
++        return None;
++    }
++
++    let mut sine = 0.0f32;
++    let mut cosine = 0.0f32;
++    cr_sincosf(f32::from_bits(bits), &mut sine, &mut cosine);
++    Some((F80::of_f32(sine.to_bits() as i32), F80::of_f32(cosine.to_bits() as i32)))
++}
++
++fn fpu_trig_out_of_range(value: F80) -> bool {
++    let exponent = value.sign_exponent & 0x7FFF;
++    exponent >= FPU_TRIG_LIMIT_EXPONENT && exponent != 0x7FFF
++}
++
+ pub fn fpu_write_st(index: i32, value: F80) {
+     dbg_assert!(index >= 0 && index < 8);
+     unsafe {
+@@ -859,14 +923,19 @@ pub unsafe fn fpu_fsqrt() {
+ 
+ pub unsafe fn fpu_fsincos() {
+     let st0 = fpu_get_st0();
+-    //if pow(-2.0, 63.0) < st0 && st0 < pow(2.0, 63.0) {
+-    fpu_write_st(*fpu_stack_ptr as i32, st0.sin());
+-    fpu_push(st0.cos());
++    if fpu_trig_out_of_range(st0) {
++        *fpu_status_word |= FPU_C2;
++        return;
++    }
++    if let Some((sine, cosine)) = fpu_trig_f32(st0) {
++        fpu_write_st(*fpu_stack_ptr as i32, sine);
++        fpu_push(cosine);
++    }
++    else {
++        fpu_write_st(*fpu_stack_ptr as i32, st0.sin());
++        fpu_push(st0.cos());
++    }
+     *fpu_status_word &= !FPU_C2;
+-    //}
+-    //else {
+-    //    *fpu_status_word |= FPU_C2;
+-    //}
+ }
+ 
+ pub unsafe fn fpu_frndint() {
+@@ -882,24 +951,32 @@ pub unsafe fn fpu_fscale() {
+ 
+ pub unsafe fn fpu_fsin() {
+     let st0 = fpu_get_st0();
+-    //if pow(-2.0, 63.0) < st0 && st0 < pow(2.0, 63.0) {
+-    fpu_write_st(*fpu_stack_ptr as i32, st0.sin());
++    if fpu_trig_out_of_range(st0) {
++        *fpu_status_word |= FPU_C2;
++        return;
++    }
++    if let Some((sine, _)) = fpu_trig_f32(st0) {
++        fpu_write_st(*fpu_stack_ptr as i32, sine);
++    }
++    else {
++        fpu_write_st(*fpu_stack_ptr as i32, st0.sin());
++    }
+     *fpu_status_word &= !FPU_C2;
+-    //}
+-    //else {
+-    //    *fpu_status_word |= FPU_C2;
+-    //}
+ }
+ 
+ pub unsafe fn fpu_fcos() {
+     let st0 = fpu_get_st0();
+-    //if pow(-2.0, 63.0) < st0 && st0 < pow(2.0, 63.0) {
+-    fpu_write_st(*fpu_stack_ptr as i32, st0.cos());
++    if fpu_trig_out_of_range(st0) {
++        *fpu_status_word |= FPU_C2;
++        return;
++    }
++    if let Some((_, cosine)) = fpu_trig_f32(st0) {
++        fpu_write_st(*fpu_stack_ptr as i32, cosine);
++    }
++    else {
++        fpu_write_st(*fpu_stack_ptr as i32, st0.cos());
++    }
+     *fpu_status_word &= !FPU_C2;
+-    //}
+-    //else {
+-    //    *fpu_status_word |= FPU_C2;
+-    //}
+ }
+ 
+ pub unsafe fn fpu_fdecstp() {

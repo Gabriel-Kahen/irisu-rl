@@ -1,0 +1,13 @@
+#!/bin/sh
+
+case "$1" in
+  start)
+    mkdir -p /mnt
+    mount -t 9p -o trans=virtio,version=9p2000.L,cache=loose host9p /mnt || exit 1
+    printf '%s\n' '__IRISU_GUEST_READY__' >/dev/ttyS0
+    ;;
+  stop)
+    umount /mnt 2>/dev/null || true
+    ;;
+esac
+

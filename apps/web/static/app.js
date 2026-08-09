@@ -1,7 +1,8 @@
-import {BrowserGame} from "./wasm-runtime.js";
+import {BrowserGame} from "./exact-runtime.js";
 import {
   activatedTrailAlphas, colorFor, hasActivatedTrail,
 } from "./colors.mjs?v=20260723d";
+import {parseReplay, REPLAY_TICK_MS} from "./replay.mjs";
 
 const canvas = document.querySelector("#game");
 const ctx = canvas.getContext("2d");
@@ -10,6 +11,15 @@ const ui = {
   over: $("#gameOver"), again: $("#againButton"), finalTitle: $("#finalTitle"),
   finalScore: $("#finalScore"),
   paused: $("#paused"), pause: $("#pauseButton"), restart: $("#restartButton"),
+  app: $(".app"), openReplay: $("#openReplayButton"),
+  replayFile: $("#replayFileInput"), saveReplay: $("#saveReplayButton"),
+  replayControls: $("#replayControls"), replayName: $("#replayName"),
+  replayStatus: $("#replayStatus"), replayError: $("#replayError"),
+  replayAnnouncement: $("#replayAnnouncement"),
+  replayPlay: $("#replayPlayButton"), replayBack: $("#replayBackButton"),
+  replayForward: $("#replayForwardButton"), replayScrubber: $("#replayScrubber"),
+  replayPosition: $("#replayPosition"), exitReplay: $("#exitReplayButton"),
+  appError: $("#appError"),
   toast: $("#toast"),
 };
 
@@ -23,6 +33,8 @@ let toastTimer;
 let fastForwardTimer;
 let game = null;
 let trailTick = -1;
+let replayLoadEpoch = 0;
+let lastReplayAnnouncement = "";
 const bodyTrails = new Map();
 
 const fastForwardIdleMs = 160;
@@ -47,7 +59,21 @@ function showToast(text) {
   toastTimer = setTimeout(() => ui.toast.classList.remove("show"), 1200);
 }
 
+function showPersistentError(text = "") {
+  ui.appError.textContent = text;
+  ui.appError.hidden = !text;
+}
+
+function announceReplay(key, text) {
+  if (key === lastReplayAnnouncement) return;
+  lastReplayAnnouncement = key;
+  ui.replayAnnouncement.textContent = text;
+}
+
 function acceptSnapshot(next, force = false) {
+  force ||= Boolean(snapshot && next?.mode !== snapshot.mode);
+  force ||= next?.mode === "replay" && snapshot?.mode === "replay" &&
+    next.replay.frame < snapshot.replay.frame;
   if (!force && snapshot && next.seed === snapshot.seed &&
       next.observation.tick < snapshot.observation.tick) return;
   if (force || !snapshot || next.seed !== snapshot.seed ||
@@ -100,12 +126,71 @@ function setRunning(running) {
 
 function restart() {
   if (!game) return;
+  replayLoadEpoch++;
   stopFastForward();
+  ui.replayError.hidden = true;
+  showPersistentError();
   const seed = crypto.getRandomValues(new Uint32Array(1))[0];
   game.restart(seed);
   started = true;
   lastEvent = -1;
   syncUi();
+}
+
+function replayFilename(state) {
+  const now = new Date();
+  const part = value => String(value).padStart(2, "0");
+  const stamp = `${now.getFullYear()}${part(now.getMonth() + 1)}${part(now.getDate())}_` +
+    `${part(now.getHours())}${part(now.getMinutes())}${part(now.getSeconds())}`;
+  const score = Math.max(0, state.score).toString().padStart(8, "0").slice(-8);
+  return `irisu_${score}_${stamp}_0.rpy`;
+}
+
+function saveReplay() {
+  if (!game || !snapshot?.can_save_replay) return;
+  try {
+    const data = game.replayBytes();
+    const url = URL.createObjectURL(new Blob([data], {type: "application/octet-stream"}));
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = replayFilename(snapshot.observation);
+    document.body.append(anchor);
+    anchor.click();
+    anchor.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 60_000);
+    showToast(`saved ${anchor.download}`);
+  } catch (error) {
+    showToast(error.message);
+  }
+}
+
+async function openReplayFile(file) {
+  const epoch = ++replayLoadEpoch;
+  stopFastForward();
+  ui.replayError.hidden = true;
+  showPersistentError();
+  ui.openReplay.disabled = true;
+  ui.replayStatus.textContent = "Loading exact replay…";
+  announceReplay("loading", "Loading exact replay");
+  try {
+    const replay = parseReplay(await file.arrayBuffer());
+    if (epoch !== replayLoadEpoch) return;
+    const loaded = await game.loadReplay(replay, file.name || "replay.rpy");
+    if (!loaded || epoch !== replayLoadEpoch) return;
+    showPersistentError();
+    started = true;
+    lastEvent = Number.MAX_SAFE_INTEGER;
+    syncUi();
+  } catch (error) {
+    if (epoch !== replayLoadEpoch) return;
+    ui.replayError.textContent = error.message;
+    ui.replayError.hidden = false;
+    ui.replayControls.hidden = false;
+    showPersistentError(error.message);
+    showToast(error.message);
+  } finally {
+    if (epoch === replayLoadEpoch) ui.openReplay.disabled = !game;
+  }
 }
 
 function bodyPath(body, size) {
@@ -265,51 +350,141 @@ function processEvents(events) {
 function syncUi() {
   if (!snapshot) return;
   const state = snapshot.observation;
+  const replay = snapshot.replay;
+  const replayMode = snapshot.mode === "replay";
   started ||= snapshot.running || state.tick > 0;
   ui.pause.firstChild.textContent = snapshot.running ? "pause " : "resume ";
+  ui.pause.disabled = replayMode && replay.frame >= replay.total_frames;
   ui.paused.hidden = !started || snapshot.running || state.terminated || state.truncated;
-  ui.over.hidden = !(state.terminated || state.truncated);
+  ui.over.hidden = replayMode ?
+    !(replay.complete && replay.frame >= replay.total_frames) :
+    !(state.terminated || state.truncated);
   if (!ui.over.hidden) {
-    ui.finalTitle.textContent = snapshot.terminal_reason === "level_completed" ? "Level 100 complete" : snapshot.terminal_reason === "time_limit" ? "Time limit" : "Game over";
+    ui.finalTitle.textContent = replayMode ?
+      snapshot.terminal_reason === "replay_exhausted" ? "Replay exhausted" : "Replay complete" :
+      snapshot.terminal_reason === "level_completed" ? "Level 100 complete" :
+        snapshot.terminal_reason === "time_limit" ? "Time limit" : "Game over";
     ui.finalScore.textContent = `${String(state.score).padStart(8, "0")} · level ${state.level}`;
   }
-  processEvents(snapshot.events);
+  ui.saveReplay.hidden = replayMode || !snapshot.can_save_replay;
+  ui.again.textContent = replayMode ? "new game" : "try again";
+  ui.replayControls.hidden = !replayMode;
+  ui.app.classList.toggle("replay-mode", replayMode);
+  document.documentElement.dataset.mode = snapshot.mode;
+  if (replayMode) {
+    if (replay.cursor) aim = {x: replay.cursor.x, y: replay.cursor.y, visible: true};
+    else aim.visible = false;
+    ui.replayName.textContent = replay.name;
+    ui.replayScrubber.max = String(replay.total_frames);
+    ui.replayScrubber.value = String(replay.frame);
+    ui.replayScrubber.setAttribute("aria-valuetext",
+      `frame ${replay.frame} of ${replay.total_frames}`);
+    ui.replayPosition.value = `frame ${replay.frame} / ${replay.total_frames}`;
+    const seconds = (replay.frame * REPLAY_TICK_MS / 1000).toFixed(1);
+    const totalSeconds = (replay.total_frames * REPLAY_TICK_MS / 1000).toFixed(1);
+    ui.replayPosition.textContent = `${replay.frame} / ${replay.total_frames} · ${seconds}s / ${totalSeconds}s`;
+    ui.replayPlay.textContent = snapshot.running ? "pause" : "play";
+    ui.replayPlay.disabled = replay.frame >= replay.total_frames;
+    ui.replayBack.disabled = replay.frame <= 0;
+    ui.replayForward.disabled = replay.frame >= replay.total_frames;
+    ui.replayStatus.textContent = replay.buffering ?
+      `Buffering ${replay.buffered_frames} / ${replay.total_frames}…` :
+      replay.complete ? (replay.warning || "Exact replay ready") :
+        `Prepared ${replay.buffered_frames} / ${replay.total_frames}`;
+    if (replay.complete) announceReplay("complete", "Replay is ready");
+    else if (replay.buffering) announceReplay("buffering", "Buffering replay");
+    ui.replayError.textContent = replay.warning;
+    ui.replayError.hidden = !replay.warning;
+    document.documentElement.dataset.replayFrame = String(replay.frame);
+    document.documentElement.dataset.replayBuffered = String(replay.buffered_frames);
+  } else {
+    lastReplayAnnouncement = "";
+    ui.replayError.hidden = true;
+    delete document.documentElement.dataset.replayFrame;
+    delete document.documentElement.dataset.replayBuffered;
+    processEvents(snapshot.events);
+  }
 }
 
 function receiveSnapshot(next, error) {
   if (error) {
+    document.documentElement.dataset.ready = "false";
+    document.documentElement.dataset.error = error.message;
+    ui.replayError.textContent = error.message;
+    ui.replayError.hidden = false;
+    showPersistentError(error.message);
     showToast(error.message);
     return;
   }
   acceptSnapshot(next);
+  document.documentElement.dataset.ready = "true";
+  delete document.documentElement.dataset.error;
+  document.documentElement.dataset.tick = String(next.observation.tick);
+  document.documentElement.dataset.seed = String(next.seed);
   syncUi();
 }
 
-canvas.addEventListener("pointermove", (event) => { aim = {...canvasPoint(event), visible: true}; });
-canvas.addEventListener("pointerleave", () => { aim.visible = false; });
+canvas.addEventListener("pointermove", (event) => {
+  if (snapshot?.mode === "replay") return;
+  aim = {...canvasPoint(event), visible: true};
+  game?.setAim(aim.x, aim.y);
+});
+canvas.addEventListener("pointerleave", () => {
+  if (snapshot?.mode !== "replay") aim.visible = false;
+});
 canvas.addEventListener("pointerdown", (event) => {
   event.preventDefault();
+  if (snapshot?.mode === "replay") return;
   aim = {...canvasPoint(event), visible: true};
+  game?.setAim(aim.x, aim.y);
   shoot(event.shiftKey ? "both" : event.button === 2 ? "strong" : "weak");
 });
 canvas.addEventListener("contextmenu", (event) => event.preventDefault());
 canvas.addEventListener("wheel", (event) => {
   event.preventDefault();
+  if (snapshot?.mode === "replay") return;
   if (event.deltaY > 0) continueFastForward();
   else if (event.deltaY < 0) stopFastForward();
 }, {passive: false});
 ui.pause.addEventListener("click", () => setRunning(!snapshot?.running));
 ui.restart.addEventListener("click", restart);
 ui.again.addEventListener("click", restart);
+ui.saveReplay.addEventListener("click", saveReplay);
+ui.openReplay.addEventListener("click", () => {
+  if (ui.replayFile.showPicker) ui.replayFile.showPicker();
+  else ui.replayFile.click();
+});
+ui.replayFile.addEventListener("change", () => {
+  const file = ui.replayFile.files?.[0];
+  ui.replayFile.value = "";
+  if (file) void openReplayFile(file);
+});
+ui.replayPlay.addEventListener("click", () => setRunning(!snapshot?.running));
+ui.replayBack.addEventListener("click", () => game?.stepReplay(-1));
+ui.replayForward.addEventListener("click", () => game?.stepReplay(1));
+ui.replayScrubber.addEventListener("input", () => {
+  const frame = Number(ui.replayScrubber.value);
+  ui.replayPosition.textContent = `frame ${frame} / ${ui.replayScrubber.max}`;
+});
+ui.replayScrubber.addEventListener("change", () => game?.seekReplay(
+  Number(ui.replayScrubber.value)));
+ui.exitReplay.addEventListener("click", restart);
 window.addEventListener("keydown", (event) => {
-  if (event.target instanceof HTMLInputElement) return;
+  if (event.target instanceof HTMLInputElement || event.target instanceof HTMLButtonElement ||
+      event.target?.isContentEditable) return;
   if (event.code === "Space") { event.preventDefault(); setRunning(!snapshot?.running); }
   if (event.key.toLowerCase() === "r") restart();
-  if (event.key.toLowerCase() === "w") shoot("weak");
-  if (event.key.toLowerCase() === "s") shoot("strong");
+  if (snapshot?.mode !== "replay" && event.key.toLowerCase() === "w") shoot("weak");
+  if (snapshot?.mode !== "replay" && event.key.toLowerCase() === "s") shoot("strong");
 });
 window.addEventListener("blur", stopFastForward);
 
 draw();
-BrowserGame.create(receiveSnapshot).then((instance) => { game = instance; })
+BrowserGame.create(receiveSnapshot).then((instance) => {
+  game = instance;
+  game.setAim(aim.x, aim.y);
+  document.documentElement.dataset.backend = "exact-v86";
+  document.documentElement.dataset.ready = "true";
+  ui.openReplay.disabled = false;
+})
   .catch((error) => receiveSnapshot(null, error));

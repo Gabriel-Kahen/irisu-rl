@@ -1,0 +1,105 @@
+version = "r3c-policy-iteration-v1"
+status = "development_only_not_canonical_evidence"
+deployable = false
+objective = "complete_game_undiscounted_raw_score"
+selection_backend = "portable"
+confirmation_backend = "exact"
+
+[trajectory]
+format = "irisu-pointer-trajectories-v1"
+gamma_per_tick = 0.9995
+burn_in_decisions = 8
+unroll_decisions = 32
+stride_decisions = 32
+episode_disjoint = true
+model_visible_ids = false
+
+[reward]
+version = "pointer-delayed-reward-v1"
+raw_score_delta = 1.0
+survival_tick = 0.02
+chain_continuation = 100.0
+chain_join = 25.0
+clear = 100.0
+gauge_delta = 1.0
+rot_penalty = -100.0
+terminal_penalty = -1000.0
+invalid_penalty = -1000.0
+final_selection_uses_shaping = false
+
+[dagger]
+iterations = 4
+episodes_per_iteration = 64
+teacher_beta_ppm = [1000000, 650000, 350000, 100000]
+uncertainty_threshold = 0.55
+search_query_stride = 16
+maximum_search_queries_per_episode = 32
+search_correction_weight = 8.0
+replay_capacity_episodes = 256
+elite_replay_fraction = 0.25
+failure_replay_fraction = 0.25
+training_seed_overlap_with_development = false
+advantage_weighted_behavior_temperature = 100.0
+advantage_weighted_behavior_maximum_weight = 20.0
+advantage_weighted_behavior_coefficient = 0.5
+
+[search]
+version = "spawn-censored-macro-beam-search-v1"
+maximum_candidates = 25
+maximum_safe_horizon_ticks = 64
+maximum_depth = 3
+beam_width = 5
+settle_ticks = [0, 8, 24]
+maximum_branch_evaluations = 512
+future_rng = "never_read"
+fallback = "paced_matcher"
+minimum_search_score = 0.0
+continuation_critic = "lower_quantile_mean"
+continuation_lower_fraction = 0.25
+continuation_scale = 0.25
+continuation_enabled_after_iteration = 0
+
+[sequence_training]
+learning_rate = 0.0003
+weight_decay = 0.00001
+tbptt_decisions = 32
+episode_minibatch_size = 4
+gradient_clip = 1.0
+kind_weight = 1.0
+wait_weight = 0.5
+target_weight = 2.0
+template_weight = 1.0
+quantile_weight = 0.01
+entropy_weight = 0.001
+kind_balance_power = 1.0
+maximum_kind_weight = 32.0
+quantiles = 51
+updates_per_iteration = 64
+
+[actor_distillation]
+schema = "actor-vision-v1"
+minimum_alignment_confidence = 0.60
+minimum_uniqueness_margin = 0.05
+maximum_geometry_error = 0.20
+strip_privileged_fields = true
+position_noise_pixels = 2.0
+velocity_noise_pixels_per_second = 10.0
+confidence_noise = 0.05
+train_separate_actor_model = true
+perfect_track_adapter_is_development_only = true
+
+[full_game_development]
+suite = "r3c-full-game-unseen-development-v1"
+fixed_unsealed_seeds = 8
+complete_games_required = true
+selection_metric = "median_undiscounted_raw_score"
+report_percentiles = [10, 25, 50, 75, 90]
+
+[promotion]
+minimum_median_raw_score = 100000
+minimum_p10_raw_score = 25000
+minimum_median_survival_ticks = 10000
+minimum_median_unique_hit_pairs = 25
+minimum_completion_rate = 1.0
+maximum_invalid_actions = 0
+sealed_test_allowed = false

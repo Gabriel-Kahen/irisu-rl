@@ -1,0 +1,123 @@
+{
+  "schema": 1,
+  "status": "pass",
+  "scope": "one opcode-3 RPC and full variable-size transition response per replay tick",
+  "transport": "virtio-console /dev/hvc0 chunk events",
+  "replay": {
+    "path": "/home/gabe/Documents/irisu/reference/replays/raw/internet/irisu_00041449_20100725_182435_7.rpy",
+    "bytes": 188128,
+    "sha256": "73bf5b5d4a478c9bf73b62a6df98f16a01fde2cf97eb751438cd0ae857e3362d",
+    "available_frames": 47019,
+    "tested_frames": 47019
+  },
+  "artifacts": {
+    "runtime": {
+      "libv86.js": {
+        "bytes": 356169,
+        "sha256": "730d3e4e4bd1d9c7ede4a4995f23da87261a723b3524da9a75c90e6e0610f46b"
+      },
+      "libv86.mjs": {
+        "bytes": 356131,
+        "sha256": "408b0969f943dfd4d0350f6196404fc99fe676e853c36dc09a1959a0f9f751c2"
+      },
+      "v86.wasm": {
+        "bytes": 2088388,
+        "sha256": "73d1023eba1729d6aa6a9a3d3d52122c88e8f05b775caaa0557e042f68c34403"
+      },
+      "buildroot-bzimage68.bin": {
+        "bytes": 10068480,
+        "sha256": "507a759c70ab7a490a233be454d0b5b88bc667956a410b531cb4edc091e2eb1c"
+      },
+      "seabios.bin": {
+        "bytes": 131072,
+        "sha256": "73e3f359102e3a9982c35fce98eb7cd08f18303ac7f1ba6ebfbe6cdc1c244d98"
+      },
+      "vgabios.bin": {
+        "bytes": 36352,
+        "sha256": "a4bc0d80cc3ca028c73dafa8fee396b8d054ce87ebd8abfbd31b06b437607880"
+      }
+    },
+    "guest": {
+      "irisu-exact-worker": {
+        "bytes": 501068,
+        "sha256": "410bc7a49e345f433bfc331deacb62dc534b01ded6ba3dc6c5fc29ff0c71532f"
+      },
+      "libirisu_box2d_msvc_exact_multiworld.so": {
+        "bytes": 141140,
+        "sha256": "ce14d1cab9ce4331bf494fe92bf657029487aec9f7435e7479b3c7cb579fafb5"
+      },
+      "ld-linux.so.2": {
+        "bytes": 219856,
+        "sha256": "6770c051013d0ea4e6c4f08c08b8d79b8d5be2f24cee7309e3b1ec51940ff553"
+      },
+      "libc.so.6": {
+        "bytes": 2306812,
+        "sha256": "6f59ff673154720142afd7ad07f3bcb53155ce9ef7d1e5ac732f067761dca758"
+      },
+      "libm.so.6": {
+        "bytes": 1160648,
+        "sha256": "00d95b14cfe23c6425a4450b078a3214640748a4949a46b14852f69094fafb43"
+      },
+      "libgcc_s.so.1": {
+        "bytes": 222884,
+        "sha256": "a53ae62e992b9cae7cc2b7983671aac97430980f5ef699d06defb8b852fbf405"
+      },
+      "libstdc++.so.6": {
+        "bytes": 2508964,
+        "sha256": "90abf0c6a98625b812132ea9af960ee8b036e3f519e368de1084fb50532ba021"
+      }
+    },
+    "native_worker": {
+      "path": "/home/gabe/Documents/irisu/build-physics-integration-exact-multiworld-2/irisu-exact-worker",
+      "sha256": "4faa4508a89df3e1e62b80e2871b6a35b5913f220d53fe5de43408ad6512c261"
+    }
+  },
+  "parity": {
+    "compared_responses": 47019,
+    "first_mismatch": null,
+    "stream_sha256": "45a452c215ceebb63788ed616891dcc2e69b0a4c97ccbc0c51a12c32d8834c52",
+    "terminal_runner_comparison_applicable": true,
+    "terminal_matches_runner": true,
+    "final": {
+      "tick": 47019,
+      "score": 41449,
+      "gauge": 1,
+      "clears": 379,
+      "level": 38,
+      "highest_chain": 5,
+      "bodies": 20
+    },
+    "runner": {
+      "tick": 47019,
+      "score": 41449,
+      "gauge": 1,
+      "level": 38,
+      "highest_chain": 5,
+      "clears": 379
+    }
+  },
+  "performance": {
+    "boot_ms": 4243.335749,
+    "elapsed_ms": 128548.05462299999,
+    "ticks_per_second": 365.76982932876916,
+    "response_bytes": 99610456,
+    "response_megabytes_per_second": 0.7748888638737716,
+    "maximum_response_bytes": 6027,
+    "response_latency_ms": {
+      "mean": 2.723815399455535,
+      "p50": 2.1245380000036675,
+      "p95": 5.883955000000242,
+      "p99": 9.552228999993531,
+      "max": 181.48475299999973
+    },
+    "sixty_hz_deadline_ms": 16.666666666666668,
+    "sixty_hz_deadline_misses": 87,
+    "body_count": {
+      "mean": 17.66707075862949,
+      "p50": 16,
+      "p95": 29,
+      "p99": 33,
+      "max": 36
+    }
+  }
+}

@@ -1,0 +1,1202 @@
+{
+  "artifacts": {
+    "native_runner": {
+      "path": "/home/gabe/Documents/irisu/build-physics-integration-exact-multiworld-2/irisu-exact-replay",
+      "sha256": "d06e1ff08811b21047b827bebb27ea39295445b64d3b56c772617befb1bc22f9"
+    },
+    "v86": {
+      "guest": {
+        "irisu-exact-replay": {
+          "bytes": 379784,
+          "sha256": "021c6bb768e4c15eb42777d86cb1b56909ccd35f066cfec9cee1d6e2502f1766"
+        },
+        "ld-linux.so.2": {
+          "bytes": 219856,
+          "sha256": "6770c051013d0ea4e6c4f08c08b8d79b8d5be2f24cee7309e3b1ec51940ff553"
+        },
+        "libc.so.6": {
+          "bytes": 2306812,
+          "sha256": "6f59ff673154720142afd7ad07f3bcb53155ce9ef7d1e5ac732f067761dca758"
+        },
+        "libgcc_s.so.1": {
+          "bytes": 222884,
+          "sha256": "a53ae62e992b9cae7cc2b7983671aac97430980f5ef699d06defb8b852fbf405"
+        },
+        "libirisu_box2d_msvc_exact_multiworld.so": {
+          "bytes": 141140,
+          "sha256": "ce14d1cab9ce4331bf494fe92bf657029487aec9f7435e7479b3c7cb579fafb5"
+        },
+        "libm.so.6": {
+          "bytes": 1160648,
+          "sha256": "00d95b14cfe23c6425a4450b078a3214640748a4949a46b14852f69094fafb43"
+        },
+        "libstdc++.so.6": {
+          "bytes": 2508964,
+          "sha256": "90abf0c6a98625b812132ea9af960ee8b036e3f519e368de1084fb50532ba021"
+        }
+      },
+      "runtime": {
+        "buildroot-bzimage68.bin": {
+          "bytes": 6111744,
+          "sha256": "389fb6e37c9f9f101232ad68b7177bced98caee9f7a531e99ea00b836833ea33"
+        },
+        "libv86.js": {
+          "bytes": 356169,
+          "sha256": "730d3e4e4bd1d9c7ede4a4995f23da87261a723b3524da9a75c90e6e0610f46b"
+        },
+        "libv86.mjs": {
+          "bytes": 356131,
+          "sha256": "408b0969f943dfd4d0350f6196404fc99fe676e853c36dc09a1959a0f9f751c2"
+        },
+        "seabios.bin": {
+          "bytes": 131072,
+          "sha256": "73e3f359102e3a9982c35fce98eb7cd08f18303ac7f1ba6ebfbe6cdc1c244d98"
+        },
+        "v86.wasm": {
+          "bytes": 2088388,
+          "sha256": "73d1023eba1729d6aa6a9a3d3d52122c88e8f05b775caaa0557e042f68c34403"
+        },
+        "vgabios.bin": {
+          "bytes": 36352,
+          "sha256": "a4bc0d80cc3ca028c73dafa8fee396b8d054ce87ebd8abfbd31b06b437607880"
+        }
+      }
+    }
+  },
+  "performance": {
+    "batch_ms": 123071.10462299999,
+    "boot_ms": 3305.838172
+  },
+  "replays": [
+    {
+      "executed_ticks": 1020,
+      "frame_count": 2075,
+      "name": "irisu_00000040_20190417_184328_1.rpy",
+      "native": {
+        "elapsed_seconds": 0.12331184699905862,
+        "stdout_bytes": 18561,
+        "stdout_sha256": "99614fa02737fd0c363068e31f00b5b5dbbd18283f0a84bea3a75c246b0c00cc",
+        "ticks_per_second": 8271.711314224227
+      },
+      "native_vs_observed_v203": {
+        "available_state_checkpoints": null,
+        "available_state_checkpoints_exact": null,
+        "checkpoint": {
+          "kind": "natural_terminal",
+          "matches": true
+        },
+        "evidence": {
+          "authority": "observed_bundled_v203_playback",
+          "box2d_sha256": "34f1387cbe51fb09a3e7cd868236ed3c0b73be2f70fcf5b09ae6c48187d14fcd",
+          "events_path": "/home/gabe/Documents/irisu/reference/runs/replay-header40-full-event-gdb-20260720-001/events.jsonl",
+          "events_sha256": "0a8222d03f8b7099697ba8c067a7dc56a28fe1fe3af10d26da9f6ab887938f69",
+          "executable_sha256": "0636d3e44439d88807d0c00aeb1bb072316c69fc13a21f79d67e53affad28255",
+          "metadata_path": "/home/gabe/Documents/irisu/reference/runs/replay-header40-full-event-gdb-20260720-001/metadata.json",
+          "metadata_sha256": "367f1ea47c263cf1eec4f6a8fa7a39e852a1562f2f4fa79a2ff957f76687ccf7",
+          "repeated_byte_identically": true
+        },
+        "full_scoring_parity": true,
+        "rot_penalty_timeline": {
+          "actual": {
+            "count": 2,
+            "sha256": "6afd3501a3c9ff7299baf573f403bf302afa673ab362238ba05512c8e5793100"
+          },
+          "expected": {
+            "count": 2,
+            "sha256": "6afd3501a3c9ff7299baf573f403bf302afa673ab362238ba05512c8e5793100"
+          },
+          "first_mismatch_index": null,
+          "matches": true
+        },
+        "score_timeline": {
+          "actual": {
+            "count": 4,
+            "sha256": "34c15b3efef4d5da4ddc688aed6ed55d2a6b4020e474a02f2ad5495f9d2ca0b9"
+          },
+          "expected": {
+            "count": 4,
+            "sha256": "34c15b3efef4d5da4ddc688aed6ed55d2a6b4020e474a02f2ad5495f9d2ca0b9"
+          },
+          "first_mismatch_index": null,
+          "matches": true
+        },
+        "terminal": {
+          "clears": {
+            "actual": 2,
+            "delta": 0,
+            "expected": 2,
+            "matches": true
+          },
+          "gauge": {
+            "actual": 1,
+            "delta": 0,
+            "expected": 1,
+            "matches": true
+          },
+          "highest_chain": {
+            "actual": 2,
+            "delta": 0,
+            "expected": 2,
+            "matches": true
+          },
+          "level": {
+            "actual": 1,
+            "delta": 0,
+            "expected": 1,
+            "matches": true
+          },
+          "score": {
+            "actual": 32,
+            "delta": 0,
+            "expected": 32,
+            "matches": true
+          },
+          "score_calls": {
+            "actual": 4,
+            "delta": 0,
+            "expected": 4,
+            "matches": true
+          },
+          "terminal_frame": {
+            "actual": 1019,
+            "delta": 0,
+            "expected": 1019,
+            "matches": true
+          },
+          "tick": {
+            "actual": 1020,
+            "delta": 0,
+            "expected": 1020,
+            "matches": true
+          }
+        },
+        "terminal_state_exact": true
+      },
+      "native_vs_v86": {
+        "exact": true,
+        "fields": {
+          "clears": {
+            "actual": 2,
+            "expected": 2,
+            "matches": true
+          },
+          "confirmed": {
+            "actual": 2,
+            "expected": 2,
+            "matches": true
+          },
+          "gauge": {
+            "actual": 1,
+            "expected": 1,
+            "matches": true
+          },
+          "highest_chain": {
+            "actual": 2,
+            "expected": 2,
+            "matches": true
+          },
+          "level": {
+            "actual": 1,
+            "expected": 1,
+            "matches": true
+          },
+          "score": {
+            "actual": 32,
+            "expected": 32,
+            "matches": true
+          },
+          "score_calls": {
+            "actual": 4,
+            "expected": 4,
+            "matches": true
+          },
+          "terminal_frame": {
+            "actual": 1019,
+            "expected": 1019,
+            "matches": true
+          },
+          "tick": {
+            "actual": 1020,
+            "expected": 1020,
+            "matches": true
+          }
+        },
+        "first_mismatch": null,
+        "timelines": {
+          "gauge_timeline": {
+            "actual_count": 1024,
+            "actual_sha256": "f459db66d3d5036ffee67c815b2b49a78c22beae70225eda0a726c6b960a44ab",
+            "expected_count": 1024,
+            "expected_sha256": "f459db66d3d5036ffee67c815b2b49a78c22beae70225eda0a726c6b960a44ab",
+            "first_mismatch": null,
+            "matches": true
+          },
+          "score_timeline": {
+            "actual_count": 4,
+            "actual_sha256": "34c15b3efef4d5da4ddc688aed6ed55d2a6b4020e474a02f2ad5495f9d2ca0b9",
+            "expected_count": 4,
+            "expected_sha256": "34c15b3efef4d5da4ddc688aed6ed55d2a6b4020e474a02f2ad5495f9d2ca0b9",
+            "first_mismatch": null,
+            "matches": true
+          }
+        }
+      },
+      "replay_sha256": "ba9a75ae2b802787cd0fb7c6e3186753b18013cf45fd6db827c6ea24e888bdb9",
+      "v86": {
+        "elapsed_seconds": 8.91,
+        "exit_code": 0,
+        "raw_stdout_matches_native": true,
+        "stderr": "",
+        "stdout_bytes": 18561,
+        "stdout_sha256": "99614fa02737fd0c363068e31f00b5b5dbbd18283f0a84bea3a75c246b0c00cc",
+        "ticks_per_second": 114.47811447811448,
+        "wall_ms": 9076.785458
+      },
+      "v86_vs_observed_v203": {
+        "available_state_checkpoints": null,
+        "available_state_checkpoints_exact": null,
+        "checkpoint": {
+          "kind": "natural_terminal",
+          "matches": true
+        },
+        "evidence": {
+          "authority": "observed_bundled_v203_playback",
+          "box2d_sha256": "34f1387cbe51fb09a3e7cd868236ed3c0b73be2f70fcf5b09ae6c48187d14fcd",
+          "events_path": "/home/gabe/Documents/irisu/reference/runs/replay-header40-full-event-gdb-20260720-001/events.jsonl",
+          "events_sha256": "0a8222d03f8b7099697ba8c067a7dc56a28fe1fe3af10d26da9f6ab887938f69",
+          "executable_sha256": "0636d3e44439d88807d0c00aeb1bb072316c69fc13a21f79d67e53affad28255",
+          "metadata_path": "/home/gabe/Documents/irisu/reference/runs/replay-header40-full-event-gdb-20260720-001/metadata.json",
+          "metadata_sha256": "367f1ea47c263cf1eec4f6a8fa7a39e852a1562f2f4fa79a2ff957f76687ccf7",
+          "repeated_byte_identically": true
+        },
+        "full_scoring_parity": true,
+        "rot_penalty_timeline": {
+          "actual": {
+            "count": 2,
+            "sha256": "6afd3501a3c9ff7299baf573f403bf302afa673ab362238ba05512c8e5793100"
+          },
+          "expected": {
+            "count": 2,
+            "sha256": "6afd3501a3c9ff7299baf573f403bf302afa673ab362238ba05512c8e5793100"
+          },
+          "first_mismatch_index": null,
+          "matches": true
+        },
+        "score_timeline": {
+          "actual": {
+            "count": 4,
+            "sha256": "34c15b3efef4d5da4ddc688aed6ed55d2a6b4020e474a02f2ad5495f9d2ca0b9"
+          },
+          "expected": {
+            "count": 4,
+            "sha256": "34c15b3efef4d5da4ddc688aed6ed55d2a6b4020e474a02f2ad5495f9d2ca0b9"
+          },
+          "first_mismatch_index": null,
+          "matches": true
+        },
+        "terminal": {
+          "clears": {
+            "actual": 2,
+            "delta": 0,
+            "expected": 2,
+            "matches": true
+          },
+          "gauge": {
+            "actual": 1,
+            "delta": 0,
+            "expected": 1,
+            "matches": true
+          },
+          "highest_chain": {
+            "actual": 2,
+            "delta": 0,
+            "expected": 2,
+            "matches": true
+          },
+          "level": {
+            "actual": 1,
+            "delta": 0,
+            "expected": 1,
+            "matches": true
+          },
+          "score": {
+            "actual": 32,
+            "delta": 0,
+            "expected": 32,
+            "matches": true
+          },
+          "score_calls": {
+            "actual": 4,
+            "delta": 0,
+            "expected": 4,
+            "matches": true
+          },
+          "terminal_frame": {
+            "actual": 1019,
+            "delta": 0,
+            "expected": 1019,
+            "matches": true
+          },
+          "tick": {
+            "actual": 1020,
+            "delta": 0,
+            "expected": 1020,
+            "matches": true
+          }
+        },
+        "terminal_state_exact": true
+      }
+    },
+    {
+      "executed_ticks": 1514,
+      "frame_count": 1514,
+      "name": "irisu_00000056_20190417_184425_2.rpy",
+      "native": {
+        "elapsed_seconds": 0.12806900200121163,
+        "stdout_bytes": 27866,
+        "stdout_sha256": "e2d847697aeb9b937fa138ef2f5ebb92e3b56b35a17a9787acfef13d555c1740",
+        "ticks_per_second": 11821.752151903835
+      },
+      "native_vs_observed_v203": {
+        "available_state_checkpoints": null,
+        "available_state_checkpoints_exact": null,
+        "checkpoint": {
+          "actual_terminal_frame": 1527,
+          "actual_tick": 1514,
+          "all_replay_frames_consumed": true,
+          "expected_frame_count": 1514,
+          "kind": "replay_exhaustion",
+          "matches": true,
+          "no_natural_terminal_before_exhaustion": true
+        },
+        "evidence": {
+          "authority": "observed_bundled_v203_playback",
+          "box2d_sha256": "34f1387cbe51fb09a3e7cd868236ed3c0b73be2f70fcf5b09ae6c48187d14fcd",
+          "events_path": "/home/gabe/Documents/irisu/reference/runs/replay-header56-full-event-gdb-20260720-001/events.jsonl",
+          "events_sha256": "bd716e2d94263a7af7da9fc96fc34c3f228641d174df3f2f466e309d5f99b63a",
+          "executable_sha256": "0636d3e44439d88807d0c00aeb1bb072316c69fc13a21f79d67e53affad28255",
+          "metadata_path": "/home/gabe/Documents/irisu/reference/runs/replay-header56-full-event-gdb-20260720-001/metadata.json",
+          "metadata_sha256": "62a675e59f6a932c38444ac69a8916034c0eb000aa3ad95cf918d42e0ea9baea",
+          "repeated_byte_identically": true
+        },
+        "full_scoring_parity": true,
+        "rot_penalty_timeline": {
+          "actual": {
+            "count": 1,
+            "sha256": "8e3879a6aa09b74f88b3264ea714e32a9f9f99f3e40e65e9acd999dc43c0194b"
+          },
+          "expected": {
+            "count": 1,
+            "sha256": "8e3879a6aa09b74f88b3264ea714e32a9f9f99f3e40e65e9acd999dc43c0194b"
+          },
+          "first_mismatch_index": null,
+          "matches": true
+        },
+        "score_timeline": {
+          "actual": {
+            "count": 11,
+            "sha256": "cadf793de6a41e64379abcf01c5687e928b1fb549e3942299765b201870e0bca"
+          },
+          "expected": {
+            "count": 11,
+            "sha256": "cadf793de6a41e64379abcf01c5687e928b1fb549e3942299765b201870e0bca"
+          },
+          "first_mismatch_index": null,
+          "matches": true
+        },
+        "terminal": {
+          "clears": {
+            "actual": 6,
+            "delta": 0,
+            "expected": 6,
+            "matches": true
+          },
+          "gauge": {
+            "actual": 1766,
+            "delta": 0,
+            "expected": 1766,
+            "matches": true
+          },
+          "highest_chain": {
+            "actual": 2,
+            "delta": 0,
+            "expected": 2,
+            "matches": true
+          },
+          "level": {
+            "actual": 1,
+            "delta": 0,
+            "expected": 1,
+            "matches": true
+          },
+          "score": {
+            "actual": 88,
+            "delta": 0,
+            "expected": 88,
+            "matches": true
+          },
+          "score_calls": {
+            "actual": 11,
+            "delta": 0,
+            "expected": 11,
+            "matches": true
+          },
+          "tick": {
+            "actual": 1514,
+            "delta": 0,
+            "expected": 1514,
+            "matches": true
+          }
+        },
+        "terminal_state_exact": true
+      },
+      "native_vs_v86": {
+        "exact": true,
+        "fields": {
+          "clears": {
+            "actual": 6,
+            "expected": 6,
+            "matches": true
+          },
+          "confirmed": {
+            "actual": 6,
+            "expected": 6,
+            "matches": true
+          },
+          "gauge": {
+            "actual": 1766,
+            "expected": 1766,
+            "matches": true
+          },
+          "highest_chain": {
+            "actual": 2,
+            "expected": 2,
+            "matches": true
+          },
+          "level": {
+            "actual": 1,
+            "expected": 1,
+            "matches": true
+          },
+          "score": {
+            "actual": 88,
+            "expected": 88,
+            "matches": true
+          },
+          "score_calls": {
+            "actual": 11,
+            "expected": 11,
+            "matches": true
+          },
+          "terminal_frame": {
+            "actual": 1527,
+            "expected": 1527,
+            "matches": true
+          },
+          "tick": {
+            "actual": 1514,
+            "expected": 1514,
+            "matches": true
+          }
+        },
+        "first_mismatch": null,
+        "timelines": {
+          "gauge_timeline": {
+            "actual_count": 1518,
+            "actual_sha256": "07364c88146233cc06d10b8362bdf64fb0938189c21a99799c53f92b9f60f845",
+            "expected_count": 1518,
+            "expected_sha256": "07364c88146233cc06d10b8362bdf64fb0938189c21a99799c53f92b9f60f845",
+            "first_mismatch": null,
+            "matches": true
+          },
+          "score_timeline": {
+            "actual_count": 11,
+            "actual_sha256": "cadf793de6a41e64379abcf01c5687e928b1fb549e3942299765b201870e0bca",
+            "expected_count": 11,
+            "expected_sha256": "cadf793de6a41e64379abcf01c5687e928b1fb549e3942299765b201870e0bca",
+            "first_mismatch": null,
+            "matches": true
+          }
+        }
+      },
+      "replay_sha256": "410a8a1cec3d5bb6688c41f02934473b7b8e26e00b727aff2aad174d45332321",
+      "v86": {
+        "elapsed_seconds": 8.240000000000002,
+        "exit_code": 0,
+        "raw_stdout_matches_native": true,
+        "stderr": "",
+        "stdout_bytes": 27866,
+        "stdout_sha256": "e2d847697aeb9b937fa138ef2f5ebb92e3b56b35a17a9787acfef13d555c1740",
+        "ticks_per_second": 183.73786407766985,
+        "wall_ms": 8359.804777999998
+      },
+      "v86_vs_observed_v203": {
+        "available_state_checkpoints": null,
+        "available_state_checkpoints_exact": null,
+        "checkpoint": {
+          "actual_terminal_frame": 1527,
+          "actual_tick": 1514,
+          "all_replay_frames_consumed": true,
+          "expected_frame_count": 1514,
+          "kind": "replay_exhaustion",
+          "matches": true,
+          "no_natural_terminal_before_exhaustion": true
+        },
+        "evidence": {
+          "authority": "observed_bundled_v203_playback",
+          "box2d_sha256": "34f1387cbe51fb09a3e7cd868236ed3c0b73be2f70fcf5b09ae6c48187d14fcd",
+          "events_path": "/home/gabe/Documents/irisu/reference/runs/replay-header56-full-event-gdb-20260720-001/events.jsonl",
+          "events_sha256": "bd716e2d94263a7af7da9fc96fc34c3f228641d174df3f2f466e309d5f99b63a",
+          "executable_sha256": "0636d3e44439d88807d0c00aeb1bb072316c69fc13a21f79d67e53affad28255",
+          "metadata_path": "/home/gabe/Documents/irisu/reference/runs/replay-header56-full-event-gdb-20260720-001/metadata.json",
+          "metadata_sha256": "62a675e59f6a932c38444ac69a8916034c0eb000aa3ad95cf918d42e0ea9baea",
+          "repeated_byte_identically": true
+        },
+        "full_scoring_parity": true,
+        "rot_penalty_timeline": {
+          "actual": {
+            "count": 1,
+            "sha256": "8e3879a6aa09b74f88b3264ea714e32a9f9f99f3e40e65e9acd999dc43c0194b"
+          },
+          "expected": {
+            "count": 1,
+            "sha256": "8e3879a6aa09b74f88b3264ea714e32a9f9f99f3e40e65e9acd999dc43c0194b"
+          },
+          "first_mismatch_index": null,
+          "matches": true
+        },
+        "score_timeline": {
+          "actual": {
+            "count": 11,
+            "sha256": "cadf793de6a41e64379abcf01c5687e928b1fb549e3942299765b201870e0bca"
+          },
+          "expected": {
+            "count": 11,
+            "sha256": "cadf793de6a41e64379abcf01c5687e928b1fb549e3942299765b201870e0bca"
+          },
+          "first_mismatch_index": null,
+          "matches": true
+        },
+        "terminal": {
+          "clears": {
+            "actual": 6,
+            "delta": 0,
+            "expected": 6,
+            "matches": true
+          },
+          "gauge": {
+            "actual": 1766,
+            "delta": 0,
+            "expected": 1766,
+            "matches": true
+          },
+          "highest_chain": {
+            "actual": 2,
+            "delta": 0,
+            "expected": 2,
+            "matches": true
+          },
+          "level": {
+            "actual": 1,
+            "delta": 0,
+            "expected": 1,
+            "matches": true
+          },
+          "score": {
+            "actual": 88,
+            "delta": 0,
+            "expected": 88,
+            "matches": true
+          },
+          "score_calls": {
+            "actual": 11,
+            "delta": 0,
+            "expected": 11,
+            "matches": true
+          },
+          "tick": {
+            "actual": 1514,
+            "delta": 0,
+            "expected": 1514,
+            "matches": true
+          }
+        },
+        "terminal_state_exact": true
+      }
+    },
+    {
+      "executed_ticks": 47019,
+      "frame_count": 47019,
+      "name": "irisu_00041449_20100725_182435_7.rpy",
+      "native": {
+        "elapsed_seconds": 1.3491569079997134,
+        "stdout_bytes": 993804,
+        "stdout_sha256": "bb8a81554cfc03bbfa186fdba6ee080f691eaabb451e1f562627050ed2fdf236",
+        "ticks_per_second": 34850.65356090516
+      },
+      "native_vs_observed_v203": {
+        "available_state_checkpoints": null,
+        "available_state_checkpoints_exact": null,
+        "checkpoint": {
+          "kind": "natural_terminal",
+          "matches": true
+        },
+        "evidence": {
+          "authority": "observed_bundled_v203_playback",
+          "box2d_sha256": "34f1387cbe51fb09a3e7cd868236ed3c0b73be2f70fcf5b09ae6c48187d14fcd",
+          "events_path": "/home/gabe/Documents/irisu/reference/runs/replay-41449-full-event-gdb-20260720-004/events.jsonl",
+          "events_sha256": "f8ab8fb968543ca7ca0daf30d6b78e07575659e0d87d799cd9e7dc66edf2e878",
+          "executable_sha256": "0636d3e44439d88807d0c00aeb1bb072316c69fc13a21f79d67e53affad28255",
+          "metadata_path": "/home/gabe/Documents/irisu/reference/runs/replay-41449-full-event-gdb-20260720-004/metadata.json",
+          "metadata_sha256": "42916b6da5e9f08052841c454dc52ece157a734dd24a1a8b9cb99284ce8eb4ed",
+          "repeated_byte_identically": false
+        },
+        "full_scoring_parity": true,
+        "rot_penalty_timeline": {
+          "actual": {
+            "count": 80,
+            "sha256": "a3fcbc01283718965789f85318062565f551b3cab56ddeb3210cbf40c2beb632"
+          },
+          "expected": {
+            "count": 80,
+            "sha256": "a3fcbc01283718965789f85318062565f551b3cab56ddeb3210cbf40c2beb632"
+          },
+          "first_mismatch_index": null,
+          "matches": true
+        },
+        "score_timeline": {
+          "actual": {
+            "count": 455,
+            "sha256": "2446d2fc707b9268503431c50bc1d93d1b6c230660ad01bbc7981c3f33d51453"
+          },
+          "expected": {
+            "count": 455,
+            "sha256": "2446d2fc707b9268503431c50bc1d93d1b6c230660ad01bbc7981c3f33d51453"
+          },
+          "first_mismatch_index": null,
+          "matches": true
+        },
+        "terminal": {
+          "clears": {
+            "actual": 379,
+            "delta": 0,
+            "expected": 379,
+            "matches": true
+          },
+          "gauge": {
+            "actual": 1,
+            "delta": 0,
+            "expected": 1,
+            "matches": true
+          },
+          "highest_chain": {
+            "actual": 5,
+            "delta": 0,
+            "expected": 5,
+            "matches": true
+          },
+          "level": {
+            "actual": 38,
+            "delta": 0,
+            "expected": 38,
+            "matches": true
+          },
+          "score": {
+            "actual": 41449,
+            "delta": 0,
+            "expected": 41449,
+            "matches": true
+          },
+          "score_calls": {
+            "actual": 455,
+            "delta": 0,
+            "expected": 455,
+            "matches": true
+          },
+          "terminal_frame": {
+            "actual": 47018,
+            "delta": 0,
+            "expected": 47018,
+            "matches": true
+          },
+          "tick": {
+            "actual": 47019,
+            "delta": 0,
+            "expected": 47019,
+            "matches": true
+          }
+        },
+        "terminal_state_exact": true
+      },
+      "native_vs_v86": {
+        "exact": true,
+        "fields": {
+          "clears": {
+            "actual": 379,
+            "expected": 379,
+            "matches": true
+          },
+          "confirmed": {
+            "actual": 379,
+            "expected": 379,
+            "matches": true
+          },
+          "gauge": {
+            "actual": 1,
+            "expected": 1,
+            "matches": true
+          },
+          "highest_chain": {
+            "actual": 5,
+            "expected": 5,
+            "matches": true
+          },
+          "level": {
+            "actual": 38,
+            "expected": 38,
+            "matches": true
+          },
+          "score": {
+            "actual": 41449,
+            "expected": 41449,
+            "matches": true
+          },
+          "score_calls": {
+            "actual": 455,
+            "expected": 455,
+            "matches": true
+          },
+          "terminal_frame": {
+            "actual": 47018,
+            "expected": 47018,
+            "matches": true
+          },
+          "tick": {
+            "actual": 47019,
+            "expected": 47019,
+            "matches": true
+          }
+        },
+        "first_mismatch": null,
+        "timelines": {
+          "gauge_timeline": {
+            "actual_count": 47651,
+            "actual_sha256": "1cdf83fa8d9780247559be697c635d0258418e9ac2fde56de0f3197aa645c0ed",
+            "expected_count": 47651,
+            "expected_sha256": "1cdf83fa8d9780247559be697c635d0258418e9ac2fde56de0f3197aa645c0ed",
+            "first_mismatch": null,
+            "matches": true
+          },
+          "score_timeline": {
+            "actual_count": 455,
+            "actual_sha256": "2446d2fc707b9268503431c50bc1d93d1b6c230660ad01bbc7981c3f33d51453",
+            "expected_count": 455,
+            "expected_sha256": "2446d2fc707b9268503431c50bc1d93d1b6c230660ad01bbc7981c3f33d51453",
+            "first_mismatch": null,
+            "matches": true
+          }
+        }
+      },
+      "replay_sha256": "73bf5b5d4a478c9bf73b62a6df98f16a01fde2cf97eb751438cd0ae857e3362d",
+      "v86": {
+        "elapsed_seconds": 89.34,
+        "exit_code": 0,
+        "raw_stdout_matches_native": true,
+        "stderr": "",
+        "stdout_bytes": 993804,
+        "stdout_sha256": "bb8a81554cfc03bbfa186fdba6ee080f691eaabb451e1f562627050ed2fdf236",
+        "ticks_per_second": 526.2928139691068,
+        "wall_ms": 89442.983945
+      },
+      "v86_vs_observed_v203": {
+        "available_state_checkpoints": null,
+        "available_state_checkpoints_exact": null,
+        "checkpoint": {
+          "kind": "natural_terminal",
+          "matches": true
+        },
+        "evidence": {
+          "authority": "observed_bundled_v203_playback",
+          "box2d_sha256": "34f1387cbe51fb09a3e7cd868236ed3c0b73be2f70fcf5b09ae6c48187d14fcd",
+          "events_path": "/home/gabe/Documents/irisu/reference/runs/replay-41449-full-event-gdb-20260720-004/events.jsonl",
+          "events_sha256": "f8ab8fb968543ca7ca0daf30d6b78e07575659e0d87d799cd9e7dc66edf2e878",
+          "executable_sha256": "0636d3e44439d88807d0c00aeb1bb072316c69fc13a21f79d67e53affad28255",
+          "metadata_path": "/home/gabe/Documents/irisu/reference/runs/replay-41449-full-event-gdb-20260720-004/metadata.json",
+          "metadata_sha256": "42916b6da5e9f08052841c454dc52ece157a734dd24a1a8b9cb99284ce8eb4ed",
+          "repeated_byte_identically": false
+        },
+        "full_scoring_parity": true,
+        "rot_penalty_timeline": {
+          "actual": {
+            "count": 80,
+            "sha256": "a3fcbc01283718965789f85318062565f551b3cab56ddeb3210cbf40c2beb632"
+          },
+          "expected": {
+            "count": 80,
+            "sha256": "a3fcbc01283718965789f85318062565f551b3cab56ddeb3210cbf40c2beb632"
+          },
+          "first_mismatch_index": null,
+          "matches": true
+        },
+        "score_timeline": {
+          "actual": {
+            "count": 455,
+            "sha256": "2446d2fc707b9268503431c50bc1d93d1b6c230660ad01bbc7981c3f33d51453"
+          },
+          "expected": {
+            "count": 455,
+            "sha256": "2446d2fc707b9268503431c50bc1d93d1b6c230660ad01bbc7981c3f33d51453"
+          },
+          "first_mismatch_index": null,
+          "matches": true
+        },
+        "terminal": {
+          "clears": {
+            "actual": 379,
+            "delta": 0,
+            "expected": 379,
+            "matches": true
+          },
+          "gauge": {
+            "actual": 1,
+            "delta": 0,
+            "expected": 1,
+            "matches": true
+          },
+          "highest_chain": {
+            "actual": 5,
+            "delta": 0,
+            "expected": 5,
+            "matches": true
+          },
+          "level": {
+            "actual": 38,
+            "delta": 0,
+            "expected": 38,
+            "matches": true
+          },
+          "score": {
+            "actual": 41449,
+            "delta": 0,
+            "expected": 41449,
+            "matches": true
+          },
+          "score_calls": {
+            "actual": 455,
+            "delta": 0,
+            "expected": 455,
+            "matches": true
+          },
+          "terminal_frame": {
+            "actual": 47018,
+            "delta": 0,
+            "expected": 47018,
+            "matches": true
+          },
+          "tick": {
+            "actual": 47019,
+            "delta": 0,
+            "expected": 47019,
+            "matches": true
+          }
+        },
+        "terminal_state_exact": true
+      }
+    },
+    {
+      "executed_ticks": 8368,
+      "frame_count": 35694,
+      "name": "irisu_00043791_20111118_222006_26.rpy",
+      "native": {
+        "elapsed_seconds": 0.2529470459994627,
+        "stdout_bytes": 162488,
+        "stdout_sha256": "5f3cff536b2122d5fe93cbfe02a833c63f06283b05ecf82fee7fcb6af74cfa32",
+        "ticks_per_second": 33082.02302555364
+      },
+      "native_vs_observed_v203": {
+        "available_state_checkpoints": null,
+        "available_state_checkpoints_exact": null,
+        "checkpoint": {
+          "kind": "natural_terminal",
+          "matches": true
+        },
+        "evidence": {
+          "authority": "observed_bundled_v203_playback",
+          "box2d_sha256": "34f1387cbe51fb09a3e7cd868236ed3c0b73be2f70fcf5b09ae6c48187d14fcd",
+          "events_path": "/home/gabe/Documents/irisu/reference/runs/replay-43791-full-event-gdb-20260720-001/events.jsonl",
+          "events_sha256": "9933ba8de1979b8f8171839c5de07ff9e2a72b4928b93722c5352712c35f1d27",
+          "executable_sha256": "0636d3e44439d88807d0c00aeb1bb072316c69fc13a21f79d67e53affad28255",
+          "metadata_path": "/home/gabe/Documents/irisu/reference/runs/replay-43791-full-event-gdb-20260720-001/metadata.json",
+          "metadata_sha256": "3ac01af4235c19f1a78556bbe3f0f09daebba159668cebaa9da9b646c7983b31",
+          "repeated_byte_identically": true
+        },
+        "full_scoring_parity": true,
+        "rot_penalty_timeline": {
+          "actual": {
+            "count": 20,
+            "sha256": "5afb5fc3f7091a7397179249dbce86f2bbca46d93b5052769a4be216589a5130"
+          },
+          "expected": {
+            "count": 20,
+            "sha256": "5afb5fc3f7091a7397179249dbce86f2bbca46d93b5052769a4be216589a5130"
+          },
+          "first_mismatch_index": null,
+          "matches": true
+        },
+        "score_timeline": {
+          "actual": {
+            "count": 66,
+            "sha256": "d5723a498c49b0d0cd28cd76e0173a24c60f839bec9624b859b937c1bbe93d5d"
+          },
+          "expected": {
+            "count": 66,
+            "sha256": "d5723a498c49b0d0cd28cd76e0173a24c60f839bec9624b859b937c1bbe93d5d"
+          },
+          "first_mismatch_index": null,
+          "matches": true
+        },
+        "terminal": {
+          "clears": {
+            "actual": 44,
+            "delta": 0,
+            "expected": 44,
+            "matches": true
+          },
+          "gauge": {
+            "actual": 1,
+            "delta": 0,
+            "expected": 1,
+            "matches": true
+          },
+          "highest_chain": {
+            "actual": 6,
+            "delta": 0,
+            "expected": 6,
+            "matches": true
+          },
+          "level": {
+            "actual": 5,
+            "delta": 0,
+            "expected": 5,
+            "matches": true
+          },
+          "score": {
+            "actual": 1794,
+            "delta": 0,
+            "expected": 1794,
+            "matches": true
+          },
+          "score_calls": {
+            "actual": 66,
+            "delta": 0,
+            "expected": 66,
+            "matches": true
+          },
+          "terminal_frame": {
+            "actual": 8367,
+            "delta": 0,
+            "expected": 8367,
+            "matches": true
+          },
+          "tick": {
+            "actual": 8368,
+            "delta": 0,
+            "expected": 8368,
+            "matches": true
+          }
+        },
+        "terminal_state_exact": true
+      },
+      "native_vs_v86": {
+        "exact": true,
+        "fields": {
+          "clears": {
+            "actual": 44,
+            "expected": 44,
+            "matches": true
+          },
+          "confirmed": {
+            "actual": 44,
+            "expected": 44,
+            "matches": true
+          },
+          "gauge": {
+            "actual": 1,
+            "expected": 1,
+            "matches": true
+          },
+          "highest_chain": {
+            "actual": 6,
+            "expected": 6,
+            "matches": true
+          },
+          "level": {
+            "actual": 5,
+            "expected": 5,
+            "matches": true
+          },
+          "score": {
+            "actual": 1794,
+            "expected": 1794,
+            "matches": true
+          },
+          "score_calls": {
+            "actual": 66,
+            "expected": 66,
+            "matches": true
+          },
+          "terminal_frame": {
+            "actual": 8367,
+            "expected": 8367,
+            "matches": true
+          },
+          "tick": {
+            "actual": 8368,
+            "expected": 8368,
+            "matches": true
+          }
+        },
+        "first_mismatch": null,
+        "timelines": {
+          "gauge_timeline": {
+            "actual_count": 8429,
+            "actual_sha256": "d947a913816498e4d309c2ab723c5ae34b14ca93a40b067a03ba61165c5d1488",
+            "expected_count": 8429,
+            "expected_sha256": "d947a913816498e4d309c2ab723c5ae34b14ca93a40b067a03ba61165c5d1488",
+            "first_mismatch": null,
+            "matches": true
+          },
+          "score_timeline": {
+            "actual_count": 66,
+            "actual_sha256": "d5723a498c49b0d0cd28cd76e0173a24c60f839bec9624b859b937c1bbe93d5d",
+            "expected_count": 66,
+            "expected_sha256": "d5723a498c49b0d0cd28cd76e0173a24c60f839bec9624b859b937c1bbe93d5d",
+            "first_mismatch": null,
+            "matches": true
+          }
+        }
+      },
+      "replay_sha256": "bcb4567326ee35e51f320c55233bf74447fc364e94bf8854117e474c11ad55ec",
+      "v86": {
+        "elapsed_seconds": 16.10000000000001,
+        "exit_code": 0,
+        "raw_stdout_matches_native": true,
+        "stderr": "",
+        "stdout_bytes": 162488,
+        "stdout_sha256": "5f3cff536b2122d5fe93cbfe02a833c63f06283b05ecf82fee7fcb6af74cfa32",
+        "ticks_per_second": 519.7515527950308,
+        "wall_ms": 16183.841233
+      },
+      "v86_vs_observed_v203": {
+        "available_state_checkpoints": null,
+        "available_state_checkpoints_exact": null,
+        "checkpoint": {
+          "kind": "natural_terminal",
+          "matches": true
+        },
+        "evidence": {
+          "authority": "observed_bundled_v203_playback",
+          "box2d_sha256": "34f1387cbe51fb09a3e7cd868236ed3c0b73be2f70fcf5b09ae6c48187d14fcd",
+          "events_path": "/home/gabe/Documents/irisu/reference/runs/replay-43791-full-event-gdb-20260720-001/events.jsonl",
+          "events_sha256": "9933ba8de1979b8f8171839c5de07ff9e2a72b4928b93722c5352712c35f1d27",
+          "executable_sha256": "0636d3e44439d88807d0c00aeb1bb072316c69fc13a21f79d67e53affad28255",
+          "metadata_path": "/home/gabe/Documents/irisu/reference/runs/replay-43791-full-event-gdb-20260720-001/metadata.json",
+          "metadata_sha256": "3ac01af4235c19f1a78556bbe3f0f09daebba159668cebaa9da9b646c7983b31",
+          "repeated_byte_identically": true
+        },
+        "full_scoring_parity": true,
+        "rot_penalty_timeline": {
+          "actual": {
+            "count": 20,
+            "sha256": "5afb5fc3f7091a7397179249dbce86f2bbca46d93b5052769a4be216589a5130"
+          },
+          "expected": {
+            "count": 20,
+            "sha256": "5afb5fc3f7091a7397179249dbce86f2bbca46d93b5052769a4be216589a5130"
+          },
+          "first_mismatch_index": null,
+          "matches": true
+        },
+        "score_timeline": {
+          "actual": {
+            "count": 66,
+            "sha256": "d5723a498c49b0d0cd28cd76e0173a24c60f839bec9624b859b937c1bbe93d5d"
+          },
+          "expected": {
+            "count": 66,
+            "sha256": "d5723a498c49b0d0cd28cd76e0173a24c60f839bec9624b859b937c1bbe93d5d"
+          },
+          "first_mismatch_index": null,
+          "matches": true
+        },
+        "terminal": {
+          "clears": {
+            "actual": 44,
+            "delta": 0,
+            "expected": 44,
+            "matches": true
+          },
+          "gauge": {
+            "actual": 1,
+            "delta": 0,
+            "expected": 1,
+            "matches": true
+          },
+          "highest_chain": {
+            "actual": 6,
+            "delta": 0,
+            "expected": 6,
+            "matches": true
+          },
+          "level": {
+            "actual": 5,
+            "delta": 0,
+            "expected": 5,
+            "matches": true
+          },
+          "score": {
+            "actual": 1794,
+            "delta": 0,
+            "expected": 1794,
+            "matches": true
+          },
+          "score_calls": {
+            "actual": 66,
+            "delta": 0,
+            "expected": 66,
+            "matches": true
+          },
+          "terminal_frame": {
+            "actual": 8367,
+            "delta": 0,
+            "expected": 8367,
+            "matches": true
+          },
+          "tick": {
+            "actual": 8368,
+            "delta": 0,
+            "expected": 8368,
+            "matches": true
+          }
+        },
+        "terminal_state_exact": true
+      }
+    }
+  ],
+  "schema": 1,
+  "scope": {
+    "control_word": "0x027f",
+    "execution": "one v86 boot; each whole replay runs in guest with no per-tick host RPC",
+    "transport": "replay inputs and runner outputs use virtio-9p; serial carries completion markers only"
+  },
+  "status": "pass",
+  "summary": {
+    "discovered": 5,
+    "eligible": 4,
+    "native_vs_v86_exact": 4,
+    "native_vs_v86_raw_stdout_exact": 4,
+    "observed_v203_oracles": 4,
+    "total_frames": 86302,
+    "v86_full_scoring_parity": 4
+  }
+}

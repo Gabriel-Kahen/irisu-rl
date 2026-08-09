@@ -1,0 +1,3 @@
+name: IRISU_GUEST
+desc: Minimal reproducible v86 guest for the exact browser runtime
+

@@ -1,0 +1,5 @@
+export HOME=/root
+export PATH=/sbin:/usr/sbin:/bin:/usr/bin
+export PS1='~% '
+umask 022
+

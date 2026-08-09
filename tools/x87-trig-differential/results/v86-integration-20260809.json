@@ -1,0 +1,56 @@
+{
+  "schema": 1,
+  "date": "2026-08-09",
+  "v86": {
+    "commit": "f3d4472a9c934b9ad78a311f5849ba711a296d23",
+    "patched_wasm_sha256": "73d1023eba1729d6aa6a9a3d3d52122c88e8f05b775caaa0557e042f68c34403",
+    "stock_wasm_sha256": "8a969d64cf8f64b8183fdcc3a2ccdb31ae5ae6db7c9fba49949106f574640a7b"
+  },
+  "scope": {
+    "core_math_path": "exactly binary32-reloadable operands with absolute raw bits below 0x49000000",
+    "captured_maximum_absolute_bits": "0x41bf6214",
+    "outside_proven_domain": "stock v86 f64 fallback",
+    "x87_range": "finite |x| >= 2^63 sets C2 and leaves the operand; FSINCOS does not push"
+  },
+  "guest_instruction_differential": {
+    "wasm_sha256": "73d1023eba1729d6aa6a9a3d3d52122c88e8f05b775caaa0557e042f68c34403",
+    "inputs": 100014,
+    "record_bytes": 3100434,
+    "native_sha256": "535b054f721dbe9a72201d2d9905496143502ac56be5421c816be993a6312011",
+    "v86_sha256": "535b054f721dbe9a72201d2d9905496143502ac56be5421c816be993a6312011",
+    "mismatches": 0
+  },
+  "short_worker": {
+    "wasm_sha256": "73d1023eba1729d6aa6a9a3d3d52122c88e8f05b775caaa0557e042f68c34403",
+    "ticks": 20,
+    "final_response_sha256": "dcb234c9ffb3c0140ebfa98c735c5568b36603999885a733482db7e012f3f9e1",
+    "matches_native": true
+  },
+  "longest_replay": {
+    "wasm_sha256": "a507bed61d8dc3676f753cc7f4852bbd3701e62ece18cec2b411d60d95090510",
+    "ticks": 47019,
+    "score": 41449,
+    "full_json_sha256": "bb8a81554cfc03bbfa186fdba6ee080f691eaabb451e1f562627050ed2fdf236",
+    "byte_exact_native_vs_v86": true,
+    "note": "This run preceded the >=2^19 generic-fallback guard. Every captured replay operand remains on the identical CORE-MATH path in the final 73d1023e artifact. The final-artifact four-replay gate is recorded separately by the production integration."
+  },
+  "stock_v86": {
+    "captured_unique_inputs": 10080004,
+    "captured_numeric_mismatches": 0,
+    "positive_f32_inputs_below_2_pow_19": 1224736768,
+    "bounded_fsin_mismatches": 1,
+    "bounded_fcos_mismatches": 0,
+    "actual_guest_boundary_probe": {
+      "inputs": 14,
+      "mismatching_records": 12,
+      "native_sha256": "94ed1964ae715350135f0137ce6082665345ad1199bdcdc3a63e0043ec8a9582",
+      "stock_v86_sha256": "d9b65c59839cf80b2dea999d11fd28637028d2d3ed881cedd23548175c1ba3e8",
+      "failures": ["missing IE/DE/PE status modeling", "missing 2^63 C2 range behavior", "FSIN output mismatch at 0x46199998"]
+    },
+    "first_counterexample": {
+      "input": "0x46199998",
+      "native_fsin": "0xbeb1fa5d",
+      "stock_v86_candidate": "0xbeb1fa5e"
+    }
+  }
+}

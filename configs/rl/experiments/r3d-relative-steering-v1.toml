@@ -1,0 +1,95 @@
+version = "r3d-relative-steering-v1"
+status = "development_only_not_canonical_evidence"
+deployable = false
+canonical_r3_evidence = false
+sealed_evaluation_allowed = false
+objective = "learn_public_source_to_destination_steering_then_raw_score"
+selection_backend = "portable"
+trusted_runtime = "artifacts/r3/runtime/main-0c48dba-20260723/portable-build/libirisu_clone.so"
+
+[profiles.fast]
+demonstration_seeds = 8
+demonstration_ticks = 2000
+evaluation_seeds = 8
+evaluation_ticks = 2000
+training_steps = 240
+batch_size = 64
+
+[profiles.long]
+demonstration_seeds = 8
+demonstration_ticks = 10000
+evaluation_seeds = 16
+evaluation_ticks = 50000
+training_steps = 1200
+batch_size = 128
+
+[controller]
+observe_ticks = 16
+resolution_wait_ticks = 4
+abandon_ticks = 32
+impact_side_sizes = 0.50
+impact_below_sizes = 0.75
+source_velocity_lead_ticks = 1.0
+minimum_pair_closure_sizes = 0.05
+ticks_per_second = 50.0
+hazard_remaining_ticks = 48
+enable_bonus = false
+enable_rotten_matching = true
+enable_hazard_ejection = false
+enable_edge_ejection = false
+
+[model]
+body_hidden = 96
+global_hidden = 64
+pair_hidden = 128
+dropout = 0.0
+
+[inference]
+act_logit_bias = 1.0
+
+[training]
+seed = 2026072806
+learning_rate = 0.0003
+torch_threads = 1
+demonstration_seed_overlap_with_development = false
+labels = "closed_loop_public_source_destination_decisions"
+policy_inputs_future_rng = "never_exposed"
+
+[legacy]
+shot_period_ticks = 4
+cursor_y = 380.0
+
+[archive]
+capture_stride_ticks = 512
+improvement_horizon_ticks = 128
+improvement_max_elites = 24
+wait_candidates = [4, 8, 16]
+ranking = [
+  "baseline_survival_nondominance",
+  "raw_score_gain",
+  "survival_ticks",
+  "alive",
+  "final_gauge",
+  "qualifying_clear_gain",
+  "highest_chain_gain",
+]
+hidden_rng = "opaque_snapshot_state_consumed_only_by_development_rollout_teacher"
+snapshot_use = "development_branch_improvement_only"
+
+[evaluation]
+suite = "r3d-fixed-unseen-development-v1"
+report = [
+  "raw_score",
+  "survival_ticks",
+  "shots_fired",
+  "shot_hit_rate",
+  "chain_joins_per_shot",
+  "cleared_events_per_shot",
+  "qualifying_clears_per_shot",
+  "rotten",
+  "ejected",
+  "highest_chain",
+  "gauge_failures",
+]
+curriculum_gates = "irisu_pointer.strategic.DEFAULT_CURRICULUM_GATES"
+sealed_test_allowed = false
