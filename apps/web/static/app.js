@@ -1,4 +1,4 @@
-import {BrowserGame} from "./exact-runtime.js?v=20260809c";
+import {BrowserGame} from "./exact-runtime.js?v=20260809d";
 import {
   activatedTrailAlphas, colorFor, hasActivatedTrail,
 } from "./colors.mjs?v=20260723d";
@@ -67,7 +67,7 @@ function showPersistentError(text = "") {
 }
 
 function updateRuntimeLoading(message) {
-  ui.runtimeLoadingStatus.textContent = message;
+  if (ui.runtimeLoadingStatus) ui.runtimeLoadingStatus.textContent = message;
 }
 
 function announceReplay(key, text) {
@@ -419,13 +419,13 @@ function receiveSnapshot(next, error) {
     ui.replayError.textContent = error.message;
     ui.replayError.hidden = false;
     showPersistentError(error.message);
-    ui.runtimeLoading.classList.add("error");
+    ui.runtimeLoading?.classList.add("error");
     updateRuntimeLoading("The exact simulation could not start.");
     showToast(error.message);
     return;
   }
   acceptSnapshot(next);
-  ui.runtimeLoading.hidden = true;
+  if (ui.runtimeLoading) ui.runtimeLoading.hidden = true;
   document.documentElement.dataset.ready = "true";
   delete document.documentElement.dataset.error;
   document.documentElement.dataset.tick = String(next.observation.tick);
