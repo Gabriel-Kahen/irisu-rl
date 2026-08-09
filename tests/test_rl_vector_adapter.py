@@ -114,6 +114,103 @@ class FakeTruncatingVector(FakeActiveVector):
 
 
 class AdapterTests(unittest.TestCase):
+    def test_teacher_path_encodes_each_completed_macro_once(self) -> None:
+        class CountingEncoder(TeacherStateEncoder):
+            def __init__(self) -> None:
+                self.batch_sizes: list[int] = []
+
+            def encode(self, observations):
+                self.batch_sizes.append(len(observations))
+                return super().encode(observations)
+
+        encoder = CountingEncoder()
+        adapter = MacroVectorAdapter(FakeActiveVector(), encoder=encoder)
+        adapter.reset()
+        adapter.step(
+            (
+                SemanticAction.wait(1),
+                SemanticAction.wait(8),
+                SemanticAction.weak(0.25, 0.5),
+                SemanticAction.strong(0.75, 0.5),
+            )
+        )
+        # Reset, completed non-release/release lanes, then terminal autoreset.
+        self.assertEqual(encoder.batch_sizes, [4, 3, 1, 1])
+        self.assertEqual(adapter.current_observation.source_tick.tolist(), [1, 8, 2, 0])
+
+    def test_batch_sensitive_encoder_retains_full_width_macro_encoding(self) -> None:
+        class BatchSensitiveEncoder:
+            def __init__(self) -> None:
+                self.base = TeacherStateEncoder()
+                self.batch_sizes: list[int] = []
+
+            def encode(self, observations):
+                self.batch_sizes.append(len(observations))
+                encoded = self.base.encode(observations)
+                encoded.global_features[:, 0] = len(observations)
+                return encoded
+
+        encoder = BatchSensitiveEncoder()
+        adapter = MacroVectorAdapter(FakeActiveVector(), encoder=encoder)
+        adapter.reset()
+        transitions = adapter.step(
+            (
+                SemanticAction.wait(1),
+                SemanticAction.wait(8),
+                SemanticAction.weak(0.25, 0.5),
+                SemanticAction.strong(0.75, 0.5),
+            )
+        )
+        # Unmarked encoders keep the legacy full-width first phase. Release and
+        # terminal-reset batches remain subsets, as they were before the fast path.
+        self.assertEqual(encoder.batch_sizes, [4, 4, 1, 1])
+        self.assertEqual(
+            transitions[0].transition_next_observation.global_features[0, 0],
+            4,
+        )
+        self.assertEqual(
+            transitions[2].transition_next_observation.global_features[0, 0],
+            1,
+        )
+
+    def test_wait_views_are_owned_before_release_backend_mutation(self) -> None:
+        class ReusingVector(FakeActiveVector):
+            def step(self, actions):
+                result = super().step(actions)
+                self.first_views = result[0]
+                return result
+
+            def step_many(self, indices, actions):
+                result = super().step_many(indices, actions)
+                for observation in self.first_views:
+                    observation.level = 999
+                    observation.tick = -999
+                    observation.score = -999
+                    observation.gauge = -999
+                    observation.gauge_max = -999
+                return result
+
+        adapter = MacroVectorAdapter(ReusingVector(), encoder=TeacherStateEncoder())
+        adapter.reset()
+        transitions = adapter.step(
+            (
+                SemanticAction.wait(1),
+                SemanticAction.wait(8),
+                SemanticAction.weak(0.25, 0.5),
+                SemanticAction.strong(0.75, 0.5),
+            )
+        )
+        names = transitions[0].transition_next_observation.schema.global_features
+        level = names.index("level_log1p")
+        self.assertAlmostEqual(
+            transitions[0].transition_next_observation.global_features[0, level],
+            np.log1p(1) / 8,
+        )
+        self.assertEqual(transitions[0].end_tick, 1)
+        self.assertEqual(transitions[0].raw_reward, 1)
+        self.assertEqual(transitions[0].end_gauge, 100)
+        self.assertEqual(transitions[0].gauge_max, 1000)
+
     def test_mixed_macros_release_only_shots_and_preserve_final_observation(
         self,
     ) -> None:

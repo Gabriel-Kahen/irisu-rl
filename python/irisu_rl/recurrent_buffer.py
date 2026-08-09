@@ -288,6 +288,58 @@ class RecurrentRolloutBuffer:
                     transition.seed,
                 )
             )
+        action_kind = torch.tensor([value[0] for value in prepared], dtype=torch.long)
+        action_wait_index = torch.tensor(
+            [value[1] for value in prepared], dtype=torch.long
+        )
+        action_xy = torch.tensor(
+            [(value[2], value[3]) for value in prepared], dtype=torch.float32
+        )
+        raw_reward = torch.tensor([value[4] for value in prepared], dtype=torch.int64)
+        stored_optimizer_reward = (
+            prepared_optimizer_reward
+            if prepared_optimizer_reward is not None
+            else torch.tensor(
+                [value[4] / self.reward_scale for value in prepared],
+                dtype=torch.float32,
+            )
+        )
+        elapsed_ticks = torch.tensor(
+            [value.elapsed_ticks for value in transitions], dtype=torch.int64
+        )
+        terminated = torch.tensor(
+            [value.terminated for value in transitions], dtype=torch.bool
+        )
+        truncated = torch.tensor(
+            [value.truncated for value in transitions], dtype=torch.bool
+        )
+        macro_interrupted = torch.tensor(
+            [value.macro_interrupted for value in transitions], dtype=torch.bool
+        )
+        bootstrap_mask = torch.tensor(
+            [value.bootstrap_mask for value in transitions], dtype=torch.bool
+        )
+        trace_mask = torch.tensor(
+            [value.trace_mask for value in transitions], dtype=torch.bool
+        )
+        train_mask = torch.tensor(
+            [
+                not (
+                    value.truncated
+                    and value.macro_interrupted
+                    and not value.bootstrap_mask
+                )
+                for value in transitions
+            ],
+            dtype=torch.bool,
+        )
+        episode_id = torch.tensor(
+            [value[6] for value in prepared], dtype=torch.int64
+        )
+        seed = torch.tensor([value[7] for value in prepared], dtype=torch.int64)
+        config_hash = torch.tensor(
+            [value[5] for value in prepared], dtype=torch.uint64
+        )
 
         # No validation that can fail occurs after this transaction boundary.
         self.global_features[index].copy_(
@@ -306,35 +358,21 @@ class RecurrentRolloutBuffer:
         self.critic_condition[index].copy_(prepared_critic_condition)
         self.kind_mask[index].copy_(prepared_kind_mask)
         self.wait_mask[index].copy_(prepared_wait_mask)
-        for lane, transition in enumerate(transitions):
-            kind, wait_index, x, y, raw_reward, config_hash, episode_id, seed = (
-                prepared[lane]
-            )
-            self.action_kind[index, lane] = kind
-            self.action_wait_index[index, lane] = wait_index
-            self.action_xy[index, lane] = torch.tensor((x, y))
-            self.raw_reward[index, lane] = raw_reward
-            self.optimizer_reward[index, lane] = (
-                prepared_optimizer_reward[lane]
-                if prepared_optimizer_reward is not None
-                else raw_reward / self.reward_scale
-            )
-            self.elapsed_ticks[index, lane] = transition.elapsed_ticks
-            self.terminated[index, lane] = transition.terminated
-            self.truncated[index, lane] = transition.truncated
-            self.macro_interrupted[index, lane] = transition.macro_interrupted
-            self.bootstrap_mask[index, lane] = transition.bootstrap_mask
-            self.trace_mask[index, lane] = transition.trace_mask
-            self.train_mask[index, lane] = not (
-                transition.truncated
-                and transition.macro_interrupted
-                and not transition.bootstrap_mask
-            )
-            self.episode_id[index, lane] = episode_id
-            self.seed[index, lane] = seed
-            self.config_hash[index, lane].copy_(
-                torch.tensor(config_hash, dtype=torch.uint64)
-            )
+        self.action_kind[index].copy_(action_kind)
+        self.action_wait_index[index].copy_(action_wait_index)
+        self.action_xy[index].copy_(action_xy)
+        self.raw_reward[index].copy_(raw_reward)
+        self.optimizer_reward[index].copy_(stored_optimizer_reward)
+        self.elapsed_ticks[index].copy_(elapsed_ticks)
+        self.terminated[index].copy_(terminated)
+        self.truncated[index].copy_(truncated)
+        self.macro_interrupted[index].copy_(macro_interrupted)
+        self.bootstrap_mask[index].copy_(bootstrap_mask)
+        self.trace_mask[index].copy_(trace_mask)
+        self.train_mask[index].copy_(train_mask)
+        self.episode_id[index].copy_(episode_id)
+        self.seed[index].copy_(seed)
+        self.config_hash[index].copy_(config_hash)
         self.size += 1
 
     def finalize(

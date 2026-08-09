@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from functools import cache
 from typing import Any
 
 import numpy as np
@@ -292,15 +293,31 @@ def _visible(meta: tuple[float, ...]) -> bool:
     )
 
 
+@cache
+def _ctypes_body_dtype(body_type: type) -> np.dtype:
+    """Resolve each aligned or packed ctypes body layout only once."""
+
+    return np.dtype(body_type)
+
+
 def _typed_teacher_bodies(
     observation: object, count: int, width: int
 ) -> tuple[np.ndarray, np.ndarray]:
     """Vectorized aligned-or-packed ctypes extraction; returns owned rows."""
 
-    bodies = np.ctypeslib.as_array(observation.bodies)[:count]
+    body_array = observation.bodies
     output = np.zeros((count, width), dtype=np.float32)
     if count == 0:
         return output, np.empty(0, dtype=np.int64)
+    body_type = getattr(type(body_array), "_type_", None)
+    if body_type is None:
+        bodies = np.ctypeslib.as_array(body_array)[:count]
+    else:
+        bodies = np.frombuffer(
+            body_array,
+            dtype=_ctypes_body_dtype(body_type),
+            count=count,
+        )
     kind = bodies["kind"].astype(np.int64)
     valid_kind = (kind >= 0) & (kind < 3)
     output[np.arange(count), np.where(valid_kind, kind, 3)] = 1.0
@@ -354,6 +371,7 @@ class ActorTrackEncoder:
     """Encode only deployment-reproducible HUD, bridge, and track records."""
 
     schema = ACTOR_VISION_V1
+    lane_independent = True
 
     def encode(self, observations: Sequence[Mapping[str, Any]]) -> EncodedBatch:
         if any(not isinstance(value, Mapping) for value in observations):
@@ -487,6 +505,7 @@ class TeacherStateEncoder:
     """Encode public simulator truth for a teacher or privileged critic."""
 
     schema = TEACHER_V1
+    lane_independent = True
 
     def encode(self, observations: Sequence[object]) -> EncodedBatch:
         output = _empty(self.schema, len(observations))
