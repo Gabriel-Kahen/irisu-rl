@@ -22,19 +22,37 @@ test("exact startup has an accessible animated loading state", () => {
   assert.match(app, /if \(ui\.runtimeLoading\) ui\.runtimeLoading\.hidden = true/);
 });
 
-test("exact worker overlaps guest downloads with emulator startup", () => {
+test("exact worker downloads runtime in parallel and keeps a persistent fallback cache", () => {
   const worker = readFileSync(path.join(web, "static/exact-worker.js"), "utf8");
   assert.match(worker, /Promise\.all\(guestFiles\.map/);
-  assert.match(worker, /Promise\.all\(\[guestDownloads, emulatorReady\]\)/);
+  assert.match(worker, /const \[bios, vgaBios, bzimage, files, wasmModule\] = await Promise\.all/);
+  assert.match(worker, /compilingWasm = fetchRuntimeBuffer\("v86\.wasm"\)\.then\(WebAssembly\.compile\)/);
+  assert.match(worker, /wasm_fn: imports => WebAssembly\.instantiate\(wasmModule/);
+  assert.match(worker, /bios: \{buffer: bios\}/);
+  assert.match(worker, /bzimage: \{buffer: bzimage\}/);
+  assert.match(worker, /typeof caches === "undefined" \? Promise\.resolve\(null\)/);
+  assert.match(worker, /cache\.match\(request\)/);
+  assert.match(worker, /cache\.put\(request, response\.clone\(\)\)\.catch/);
+  assert.match(worker, /evictRuntime\("v86\.wasm"\)/);
   assert.match(worker, /fastboot: true/);
   assert.match(worker, /rdinit=\/irisu-direct-init/);
   assert.match(worker, /waitForProtocolReady/);
   assert.doesNotMatch(worker, /waitForPrompt/);
   assert.match(worker, /memory_size: 128 \* 1024 \* 1024/);
   const guestList = worker.match(/const guestFiles = \[([\s\S]*?)\];/)?.[1] || "";
-  assert.doesNotMatch(guestList, /libm\.so\.6|libgcc_s\.so\.1/);
-  assert.match(guestList, /ld-linux\.so\.2/);
-  assert.match(guestList, /libc\.so\.6/);
+  assert.doesNotMatch(guestList, /libm\.so\.6|libgcc_s\.so\.1|ld-linux\.so\.2|libc\.so\.6/);
+  assert.match(guestList, /irisu-exact-worker/);
+  assert.match(guestList, /libirisu_box2d_msvc_exact_multiworld\.so/);
+  assert.match(guestList, /libstdc\+\+\.so\.6/);
+});
+
+test("runtime preloads use the exact immutable worker URLs", () => {
+  const html = readFileSync(path.join(web, "static/index.html"), "utf8");
+  const worker = readFileSync(path.join(web, "static/exact-worker.js"), "utf8");
+  const version = worker.match(/const RUNTIME_VERSION = "([^"]+)"/)?.[1];
+  assert.ok(version);
+  assert.match(html, new RegExp(`exact-runtime/v86\\.wasm\\?v=${version}`));
+  assert.match(html, new RegExp(`exact-runtime/buildroot-bzimage68\\.bin\\?v=${version}`));
 });
 
 test("browser guest uses a minimal executable direct init", () => {
@@ -45,7 +63,8 @@ test("browser guest uses a minimal executable direct init", () => {
   assert.equal(statSync(initPath).mode & 0o111, 0o111);
   assert.match(init, /mount -t proc proc \/proc/);
   assert.match(init, /mount -t 9p .* host9p \/mnt/);
-  assert.match(init, /exec \/mnt\/ld-linux\.so\.2/);
+  assert.match(init, /exec \/mnt\/irisu-exact-worker/);
+  assert.doesNotMatch(init, /\/mnt\/(?:ld-linux|libc\.so)/);
   assert.doesNotMatch(init, /mount -t (?:devtmpfs|sysfs)|exec \/bin\/sh/);
   for (const option of ["ACPI", "INET", "WIRELESS", "INPUT", "VT", "DEVTMPFS", "SYSFS", "TMPFS"]) {
     assert.match(config, new RegExp(`# CONFIG_${option} is not set`));

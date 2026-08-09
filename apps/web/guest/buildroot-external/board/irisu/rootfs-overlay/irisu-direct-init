@@ -11,12 +11,11 @@ mkdir -p /mnt
 mount -t proc proc /proc || fail mount-proc
 mount -t 9p -o trans=virtio,version=9p2000.L,cache=loose host9p /mnt || fail mount-9p
 for file in irisu-exact-worker libirisu_box2d_msvc_exact_multiworld.so \
-  ld-linux.so.2 libc.so.6 libstdc++.so.6; do
+  libstdc++.so.6; do
   [ -s "/mnt/$file" ] || fail "missing-$file"
 done
-chmod +x /mnt/ld-linux.so.2 /mnt/irisu-exact-worker
+chmod +x /mnt/irisu-exact-worker
 cd /
 stty raw -echo
 printf '\137\137IRISU\137RPC\137READY\137\137'
-IRISU_EXACT_CW=0x27f exec /mnt/ld-linux.so.2 --library-path /mnt \
-  /mnt/irisu-exact-worker
+IRISU_EXACT_CW=0x27f exec /mnt/irisu-exact-worker

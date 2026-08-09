@@ -13,9 +13,20 @@ export class ExactWorkerClient {
   static async create({WorkerClass = globalThis.Worker, timeoutMs = 60000,
     onProgress = () => {}} = {}) {
     if (!WorkerClass) throw new Error("Web Workers are unavailable");
-    const worker = new WorkerClass(new URL("./exact-worker.js?v=20260809f", import.meta.url));
+    const worker = new WorkerClass(new URL("./exact-worker.js?v=20260809j", import.meta.url));
     const client = new ExactWorkerClient(worker, timeoutMs, onProgress);
-    await client.ready;
+    let timer;
+    try {
+      await Promise.race([client.ready, new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error("exact worker startup timed out")), timeoutMs);
+      })]);
+    } catch (error) {
+      worker.terminate?.();
+      client.fail(error);
+      throw error;
+    } finally {
+      clearTimeout(timer);
+    }
     client.info = decodeHello(await client.rpc(OPCODE.hello));
     return client;
   }

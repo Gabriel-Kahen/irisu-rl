@@ -15,32 +15,38 @@ runtime_marker=.irisu-exact-runtime
 cache=${IRISU_WEB_DOWNLOAD_CACHE:-"$web_build/downloads"}
 worker=${IRISU_EXACT_WORKER:-"$root/build-physics-integration-exact-multiworld-2/irisu-exact-worker"}
 host=${IRISU_EXACT_HOST:-"$root/.tmp/exact-range-host-symbolic-20260721/libirisu_box2d_msvc_exact_multiworld.so"}
+worker_build=$(dirname -- "$worker")
+worker_object=${IRISU_EXACT_WORKER_OBJECT:-"$worker_build/CMakeFiles/irisu-exact-worker.dir/tools/exact-physics-prototype/ipc_worker.cpp.o"}
+core_archive=${IRISU_EXACT_CORE_ARCHIVE:-"$worker_build/libirisu_core.a"}
 patched_v86=${IRISU_V86_WASM:-}
 guest_override=${IRISU_GUEST_BZIMAGE:-}
 guest=${guest_override:-"$web_build/guest/bzImage"}
+guest_toolchain=${IRISU_GUEST_TOOLCHAIN_DIR:-"$web_build/guest/output/host/bin"}
 
 v86_version=0.5.432
 v86_commit=f3d4472a9c934b9ad78a311f5849ba711a296d23
 v86_sha=de9379ee1ccc118903558faed9ff577a66d486c5551b9e5ef359f0d388c40ebb
-guest_sha=b00cf50ca728c27519fdc2527692ea05d1f279989aa583bd280cd5211a71c31a
+guest_sha=d0317109d9cec024f5d01bac9cfd7399d699bcd48816e2373195ac2ee336949c
 seabios_sha=73e3f359102e3a9982c35fce98eb7cd08f18303ac7f1ba6ebfbe6cdc1c244d98
 vgabios_sha=a4bc0d80cc3ca028c73dafa8fee396b8d054ce87ebd8abfbd31b06b437607880
-libc_sha=410dae774925cb89a959a595bb9c9766f910df9ce3fdba334544fd7f0cb04b7e
-libgcc_sha=a4c71fd856d2a48a7505a087b4186e3cca23f94603c05e3fb7c799b27e72f761
 libstdcpp_sha=b6020260b92a97ac33ae58a73b16f3ab31fed7632e9b861f7cd5fc393facd6ed
 gcc_base_sha=cab3cc6782d6cd3445d184ad317bbd8cc46395eb2675ccd75f4b57147469887a
 exact_worker_sha=4faa4508a89df3e1e62b80e2871b6a35b5913f220d53fe5de43408ad6512c261
+worker_object_sha=812b4876d588ae9539ac164d27d2ca5efd96d423428e4367f6145d36b79e9bba
+core_archive_sha=442aefadd8b65f65ccc036e93047f7181458d384ff07eb280ca0c92ecc194c6e
 exact_host_sha=ce14d1cab9ce4331bf494fe92bf657029487aec9f7435e7479b3c7cb579fafb5
 patched_v86_sha=73d1023eba1729d6aa6a9a3d3d52122c88e8f05b775caaa0557e042f68c34403
-staged_worker_sha=410bc7a49e345f433bfc331deacb62dc534b01ded6ba3dc6c5fc29ff0c71532f
+staged_worker_sha=8ef81521e81a5b2a764c305ac48dad997b28476bcd2fccbd1c9aed9603322854
 
-for command in ar cmake curl objcopy sha256sum tar; do
+for command in ar cmake curl sha256sum tar; do
   command -v "$command" >/dev/null || { echo "missing required command: $command" >&2; exit 1; }
 done
-for input in "$worker" "$host"; do
+for input in "$worker" "$worker_object" "$core_archive" "$host"; do
   [[ -f "$input" ]] || { echo "missing exact runtime input: $input" >&2; exit 1; }
 done
 printf '%s  %s\n' "$exact_worker_sha" "$worker" | sha256sum -c -
+printf '%s  %s\n' "$worker_object_sha" "$worker_object" | sha256sum -c -
+printf '%s  %s\n' "$core_archive_sha" "$core_archive" | sha256sum -c -
 printf '%s  %s\n' "$exact_host_sha" "$host" | sha256sum -c -
 mkdir -p "$web_build"
 if [[ -z "$patched_v86" ]]; then
@@ -53,6 +59,9 @@ printf '%s  %s\n' "$patched_v86_sha" "$patched_v86" | sha256sum -c -
 if [[ -z "$guest_override" ]] &&
    { [[ ! -f "$guest" ]] ||
      ! printf '%s  %s\n' "$guest_sha" "$guest" | sha256sum -c - >/dev/null 2>&1; }; then
+  "$root/apps/web/guest/build.sh" "$web_build/guest"
+fi
+if [[ ! -x "$guest_toolchain/i686-buildroot-linux-gnu-gcc" ]]; then
   "$root/apps/web/guest/build.sh" "$web_build/guest"
 fi
 [[ -f "$guest" ]] || { echo "missing project guest image: $guest" >&2; exit 1; }
@@ -69,15 +78,11 @@ fetch() {
 }
 
 v86="$cache/v86-$v86_version.tgz"
-libc="$cache/libc6_2.41-12+deb13u3_i386.deb"
-libgcc="$cache/libgcc-s1_14.2.0-19_i386.deb"
 libstdcpp="$cache/libstdc++6_14.2.0-19_i386.deb"
 gcc_base="$cache/gcc-14-base_14.2.0-19_i386.deb"
 fetch "https://registry.npmjs.org/v86/-/v86-$v86_version.tgz" "$v86" "$v86_sha"
 fetch "https://raw.githubusercontent.com/copy/v86/$v86_commit/bios/seabios.bin" "$cache/seabios.bin" "$seabios_sha"
 fetch "https://raw.githubusercontent.com/copy/v86/$v86_commit/bios/vgabios.bin" "$cache/vgabios.bin" "$vgabios_sha"
-fetch "https://deb.debian.org/debian/pool/main/g/glibc/libc6_2.41-12+deb13u3_i386.deb" "$libc" "$libc_sha"
-fetch "https://deb.debian.org/debian/pool/main/g/gcc-14/libgcc-s1_14.2.0-19_i386.deb" "$libgcc" "$libgcc_sha"
 fetch "https://deb.debian.org/debian/pool/main/g/gcc-14/libstdc++6_14.2.0-19_i386.deb" "$libstdcpp" "$libstdcpp_sha"
 fetch "https://deb.debian.org/debian/pool/main/g/gcc-14/gcc-14-base_14.2.0-19_i386.deb" "$gcc_base" "$gcc_base_sha"
 
@@ -95,27 +100,26 @@ rmdir "$stage/build"
 cp "$patched_v86" "$stage/v86.wasm"
 cp "$guest" "$stage/buildroot-bzimage68.bin"
 cp "$cache/seabios.bin" "$cache/vgabios.bin" "$stage"
-for package in "$libc" "$libgcc" "$libstdcpp" "$gcc_base"; do
+for package in "$libstdcpp" "$gcc_base"; do
   ar p "$package" data.tar.xz | tar -xJ -C "$debian"
 done
 debian_lib="$debian/usr/lib/i386-linux-gnu"
 
-# Arch's i386 CRT over-declares this launcher as x86-v3. Its text is baseline
-# i386/SSE, so remove only that loader policy note. The exact physics host and
-# the launcher's executable sections are not rewritten.
-objcopy --remove-section .note.gnu.property "$worker" "$stage/guest/irisu-exact-worker"
+# Relink only the approved application objects against the guest's pinned
+# Buildroot glibc. The application's compiled code and exact physics host are
+# reused unchanged.
+IRISU_GUEST_TOOLCHAIN_DIR="$guest_toolchain" \
+  "$root/apps/web/relink-exact-worker.sh" "$worker_object" "$core_archive" \
+  "$host" "$debian_lib/libstdc++.so.6" "$stage/guest/irisu-exact-worker"
 printf '%s  %s\n' "$staged_worker_sha" "$stage/guest/irisu-exact-worker" | \
   sha256sum -c -
 cp "$host" "$stage/guest/libirisu_box2d_msvc_exact_multiworld.so"
-cp -L "$debian_lib/ld-linux.so.2" "$stage/guest/ld-linux.so.2"
-cp -L "$debian_lib/libc.so.6" "$stage/guest/libc.so.6"
-cp -L "$debian_lib/libm.so.6" "$stage/guest/libm.so.6"
-cp -L "$debian_lib/libgcc_s.so.1" "$stage/guest/libgcc_s.so.1"
 cp -L "$debian_lib/libstdc++.so.6" "$stage/guest/libstdc++.so.6"
-cp "$debian/usr/share/doc/libc6/copyright" "$stage/COPYRIGHT.glibc"
 cp "$debian/usr/share/doc/gcc-14-base/copyright" "$stage/COPYRIGHT.gcc-runtime"
 cp "$root/tools/x87-trig-differential/core_math_sincosf.c" \
   "$stage/SOURCE.core_math_sincosf.c"
+cp "$root/apps/web/relink-exact-worker.sh" \
+  "$stage/SOURCE.relink-exact-worker.sh"
 cp "$root/third_party/box2d_legacy/License.txt" "$stage/LICENSE.Box2D"
 cp "$root/apps/web/EXACT_RUNTIME.md" "$stage/PROVENANCE.md"
 cp "$root/apps/web/EXACT_RUNTIME_SOURCES.md" "$stage/SOURCE_OFFER.md"
@@ -126,11 +130,12 @@ cp -a "$root/apps/web/guest/buildroot-external" \
   "$stage/SOURCE.guest-build/"
 printf '%s\n' 'generated exact browser runtime; safe to replace' > \
   "$stage/$runtime_marker"
-chmod 0755 "$stage/guest/irisu-exact-worker" "$stage/guest/ld-linux.so.2"
+chmod 0755 "$stage/guest/irisu-exact-worker"
 (
   cd "$stage"
   sha256sum libv86.js v86.wasm buildroot-bzimage68.bin seabios.bin vgabios.bin \
-    SOURCE.core_math_sincosf.c LICENSE.Box2D guest/* > SHA256SUMS
+    SOURCE.core_math_sincosf.c SOURCE.relink-exact-worker.sh LICENSE.Box2D \
+    guest/* > SHA256SUMS
 )
 
 mkdir -p "$(dirname -- "$output")"

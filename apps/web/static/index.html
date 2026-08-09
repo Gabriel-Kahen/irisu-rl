@@ -7,8 +7,8 @@
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self' blob:; style-src 'self'; connect-src 'self'">
   <title>irisu</title>
   <link rel="stylesheet" href="./styles.css?v=20260809e">
-  <link rel="preload" href="./exact-runtime/v86.wasm" as="fetch" type="application/wasm" crossorigin>
-  <link rel="preload" href="./exact-runtime/buildroot-bzimage68.bin" as="fetch" crossorigin>
+  <link rel="preload" href="./exact-runtime/v86.wasm?v=20260809j" as="fetch" type="application/wasm" crossorigin>
+  <link rel="preload" href="./exact-runtime/buildroot-bzimage68.bin?v=20260809j" as="fetch" crossorigin>
 </head>
 <body>
   <main class="app">
@@ -63,6 +63,6 @@
     <div id="appError" class="app-error" role="alert" hidden></div>
   </main>
   <div id="toast" class="toast"></div>
-  <script type="module" src="./app.js?v=20260809h"></script>
+  <script type="module" src="./app.js?v=20260809j"></script>
 </body>
 </html>

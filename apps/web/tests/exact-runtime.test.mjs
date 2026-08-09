@@ -18,6 +18,17 @@ test("forwards worker startup progress without coupling it to RPC state", () => 
   assert.deepEqual(updates, ["Starting exact simulation…"]);
 });
 
+test("terminates a worker that never finishes startup", async () => {
+  class SilentWorker {
+    static latest;
+    constructor() { SilentWorker.latest = this; }
+    terminate() { this.terminated = true; }
+  }
+  await assert.rejects(ExactWorkerClient.create({WorkerClass: SilentWorker, timeoutMs: 5}),
+    /exact worker startup timed out/);
+  assert.equal(SilentWorker.latest.terminated, true);
+});
+
 test("serializes queued async steps and inserts a release tick after a shot", async () => {
   const calls = [];
   const resolvers = [];

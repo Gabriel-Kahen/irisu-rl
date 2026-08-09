@@ -1,17 +1,18 @@
 /* global V86 */
 "use strict";
 
-importScripts("./exact-runtime/libv86.js?v=20260809f");
+importScripts("./exact-runtime/libv86.js?v=20260809j");
 
 const MAGIC = 0x43505249;
 const VERSION = 1;
+const RUNTIME_VERSION = "20260809j";
+const RUNTIME_CACHE_PREFIX = "irisu-exact-runtime-";
+const RUNTIME_CACHE = `${RUNTIME_CACHE_PREFIX}${RUNTIME_VERSION}`;
 const READY_MARKER = "__IRISU_RPC_READY__";
 const GUEST_ERROR_MARKER = "__IRISU_GUEST_ERROR__:";
 const guestFiles = [
   "irisu-exact-worker",
   "libirisu_box2d_msvc_exact_multiworld.so",
-  "ld-linux.so.2",
-  "libc.so.6",
   "libstdc++.so.6",
 ];
 
@@ -24,6 +25,41 @@ const responseBytes = [];
 const requests = new Map();
 
 const progress = message => postMessage({type: "progress", message});
+
+const runtimeCache = typeof caches === "undefined" ? Promise.resolve(null) :
+  caches.open(RUNTIME_CACHE).then(cache => {
+    // Runtime URLs are immutable and versioned. Retain only the current set.
+    caches.keys().then(names => Promise.all(names
+      .filter(name => name.startsWith(RUNTIME_CACHE_PREFIX) && name !== RUNTIME_CACHE)
+      .map(name => caches.delete(name)))).catch(() => {});
+    return cache;
+  }).catch(() => null);
+
+async function fetchRuntimeBuffer(path) {
+  const url = `./exact-runtime/${path}?v=${RUNTIME_VERSION}`;
+  const request = new Request(url);
+  const cache = await runtimeCache;
+  if (cache) {
+    try {
+      const cached = await cache.match(request);
+      if (cached) return await cached.arrayBuffer();
+    } catch (_) {
+      // A denied or unreadable CacheStorage entry must not prevent startup.
+      try { await cache.delete(request); } catch (_) { /* Best effort. */ }
+    }
+  }
+  const response = await fetch(request);
+  if (!response.ok) throw new Error(`could not load exact-runtime/${path}`);
+  if (cache) cache.put(request, response.clone()).catch(() => {});
+  return response.arrayBuffer();
+}
+
+async function evictRuntime(path) {
+  const cache = await runtimeCache;
+  if (!cache) return;
+  try { await cache.delete(new Request(`./exact-runtime/${path}?v=${RUNTIME_VERSION}`)); }
+  catch (_) { /* Best effort. */ }
+}
 
 function fail(error) {
   const detail = error?.stack || String(error);
@@ -134,18 +170,33 @@ function waitForProtocolReady() {
 
 async function start() {
   progress("Downloading emulator and game engine…");
-  const guestDownloads = Promise.all(guestFiles.map(async name => {
-    const response = await fetch(`./exact-runtime/guest/${name}?v=20260809f`);
-    if (!response.ok) throw new Error(`could not load exact-runtime/guest/${name}`);
-    return {name, bytes: new Uint8Array(await response.arrayBuffer())};
-  }));
+  // Begin every large transfer together. Compiling WASM while the kernel and
+  // guest files download removes the serial waterfall in v86's URL loader.
+  const compilingWasm = fetchRuntimeBuffer("v86.wasm").then(WebAssembly.compile)
+    .catch(async error => {
+      await evictRuntime("v86.wasm");
+      throw error;
+    });
+  const [bios, vgaBios, bzimage, files, wasmModule] = await Promise.all([
+    fetchRuntimeBuffer("seabios.bin"),
+    fetchRuntimeBuffer("vgabios.bin"),
+    fetchRuntimeBuffer("buildroot-bzimage68.bin"),
+    Promise.all(guestFiles.map(async name => ({
+      name, bytes: new Uint8Array(await fetchRuntimeBuffer(`guest/${name}`)),
+    }))),
+    compilingWasm,
+  ]);
   emulator = new V86({
-    wasm_path: "./exact-runtime/v86.wasm?v=20260809f",
+    wasm_fn: imports => WebAssembly.instantiate(wasmModule, imports)
+      .then(instance => instance.exports).catch(async error => {
+        await evictRuntime("v86.wasm");
+        throw error;
+      }),
     memory_size: 128 * 1024 * 1024,
     vga_memory_size: 2 * 1024 * 1024,
-    bios: {url: "./exact-runtime/seabios.bin?v=20260809f"},
-    vga_bios: {url: "./exact-runtime/vgabios.bin?v=20260809f"},
-    bzimage: {url: "./exact-runtime/buildroot-bzimage68.bin?v=20260809f", async: false},
+    bios: {buffer: bios},
+    vga_bios: {buffer: vgaBios},
+    bzimage: {buffer: bzimage},
     filesystem: {},
     cmdline: "rdinit=/irisu-direct-init console=ttyS0 quiet loglevel=0 tsc=reliable mitigations=off random.trust_cpu=on",
     autostart: false,
@@ -156,7 +207,7 @@ async function start() {
   });
   emulator.add_listener("serial0-output-byte", onSerialByte);
   const emulatorReady = new Promise(resolve => emulator.add_listener("emulator-ready", resolve));
-  const [files] = await Promise.all([guestDownloads, emulatorReady]);
+  await emulatorReady;
   progress("Preparing exact game engine…");
   for (const {name, bytes} of files) {
     await emulator.create_file(`/${name}`, bytes);

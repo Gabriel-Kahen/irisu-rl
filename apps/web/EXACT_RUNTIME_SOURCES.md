@@ -13,8 +13,9 @@ Upstream source is available from:
   downloads hash-verified Buildroot 2024.02.13 inputs and emits
   `legal-info.tar.xz`, including package sources, licenses, manifests, patches,
   and the generated Buildroot/Linux configurations.
-- Debian glibc 2.41-12+deb13u3 source package: https://sources.debian.org/src/glibc/2.41-12%2Bdeb13u3/
-- Debian GCC 14.2.0-19 source package for libgcc and libstdc++: https://sources.debian.org/src/gcc-14/14.2.0-19/
+- The linker-only worker staging recipe is bundled as
+  `SOURCE.relink-exact-worker.sh`.
+- Debian GCC 14.2.0-19 source package for libstdc++: https://sources.debian.org/src/gcc-14/14.2.0-19/
 
 This local artifact is not a public-distribution approval. A distributor must
 retain the exact source and build material required by every component license
