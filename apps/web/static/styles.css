@@ -49,74 +49,27 @@ canvas { display: block; width: 100%; height: 100%; cursor: default; touch-actio
   display: grid;
   place-content: center;
   justify-items: center;
-  gap: 18px;
+  gap: 16px;
   padding: 30px;
   text-align: center;
-  background:
-    radial-gradient(circle at 50% 42%, #263032 0, #101719 31%, #080d0ff2 68%),
-    #080d0f;
+  background: #000;
 }
 .runtime-loading[hidden] { display: none; }
 .runtime-spinner {
-  position: relative;
-  width: 58px;
-  height: 58px;
-  border: 1px solid #556062;
+  width: 40px;
+  height: 40px;
+  border: 3px solid #fff4;
+  border-top-color: #fff;
   border-radius: 50%;
-  box-shadow: 0 0 28px #d68ba126, inset 0 0 18px #0009;
+  animation: runtime-spin .8s linear infinite;
 }
-.runtime-spinner::before {
-  content: "";
-  position: absolute;
-  inset: -1px;
-  border: 2px solid transparent;
-  border-top-color: var(--rose);
-  border-right-color: #d68ba144;
-  border-radius: inherit;
-  animation: runtime-spin 1.05s linear infinite;
-}
-.runtime-spinner span {
-  position: absolute;
-  inset: 20px;
-  border-radius: 50%;
-  background: var(--rose);
-  box-shadow: 0 0 16px #d68ba1;
-  animation: runtime-pulse 1.05s ease-in-out infinite alternate;
-}
-.runtime-loading-copy { display: grid; justify-items: center; gap: 7px; }
-.runtime-loading-copy strong {
-  color: #eee5db;
+.runtime-loading strong {
+  color: #fff;
   font-size: 12px;
   letter-spacing: .16em;
-  text-transform: uppercase;
 }
-.runtime-loading-copy > span:not(.runtime-loading-meter) {
-  min-height: 14px;
-  color: #9ca5a3;
-  font-size: 10px;
-}
-.runtime-loading-meter {
-  position: relative;
-  width: min(220px, 60vw);
-  height: 2px;
-  margin-top: 6px;
-  overflow: hidden;
-  background: #303839;
-}
-.runtime-loading-meter::after {
-  content: "";
-  position: absolute;
-  inset: 0;
-  width: 42%;
-  background: linear-gradient(90deg, transparent, var(--rose), transparent);
-  animation: runtime-scan 1.3s ease-in-out infinite;
-}
-.runtime-loading.error .runtime-spinner::before,
-.runtime-loading.error .runtime-spinner span { animation: none; border-color: #efabbc; background: #8f1830; }
 
 @keyframes runtime-spin { to { transform: rotate(360deg); } }
-@keyframes runtime-pulse { to { opacity: .35; transform: scale(.55); } }
-@keyframes runtime-scan { from { transform: translateX(-120%); } to { transform: translateX(340%); } }
 
 kbd { margin-left: 4px; color: #858c8c; font-size: 7px; }
 
@@ -164,7 +117,5 @@ kbd { margin-left: 4px; color: #858c8c; font-size: 7px; }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .runtime-spinner::before,
-  .runtime-spinner span,
-  .runtime-loading-meter::after { animation-duration: 0.001ms; animation-iteration-count: 1; }
+  .runtime-spinner { animation-duration: 0.001ms; animation-iteration-count: 1; }
 }

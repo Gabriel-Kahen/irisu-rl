@@ -20,7 +20,6 @@ const ui = {
   replayForward: $("#replayForwardButton"), replayScrubber: $("#replayScrubber"),
   replayPosition: $("#replayPosition"), exitReplay: $("#exitReplayButton"),
   runtimeLoading: $("#runtimeLoading"),
-  runtimeLoadingStatus: $("#runtimeLoadingStatus"),
   appError: $("#appError"),
   toast: $("#toast"),
 };
@@ -64,10 +63,6 @@ function showToast(text) {
 function showPersistentError(text = "") {
   ui.appError.textContent = text;
   ui.appError.hidden = !text;
-}
-
-function updateRuntimeLoading(message) {
-  if (ui.runtimeLoadingStatus) ui.runtimeLoadingStatus.textContent = message;
 }
 
 function announceReplay(key, text) {
@@ -419,8 +414,7 @@ function receiveSnapshot(next, error) {
     ui.replayError.textContent = error.message;
     ui.replayError.hidden = false;
     showPersistentError(error.message);
-    ui.runtimeLoading?.classList.add("error");
-    updateRuntimeLoading("The exact simulation could not start.");
+    if (ui.runtimeLoading) ui.runtimeLoading.hidden = true;
     showToast(error.message);
     return;
   }
@@ -489,7 +483,7 @@ window.addEventListener("keydown", (event) => {
 window.addEventListener("blur", stopFastForward);
 
 draw();
-BrowserGame.create(receiveSnapshot, {onProgress: updateRuntimeLoading}).then((instance) => {
+BrowserGame.create(receiveSnapshot).then((instance) => {
   game = instance;
   game.setAim(aim.x, aim.y);
   document.documentElement.dataset.backend = "exact-v86";
