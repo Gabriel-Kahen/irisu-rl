@@ -67,6 +67,19 @@ class ValidateRunnerTests(unittest.TestCase):
             ["python:tests/nested/test_large.py", "python:tests/test_small.py"],
         )
 
+    def test_python_discovery_uses_pytest_for_pytest_modules(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            tests = root / "tests"
+            tests.mkdir()
+            path = tests / "test_native_pytest.py"
+            path.write_text("import pytest\n", encoding="utf-8")
+            task = validate.discover_python_tasks(root, "python")[0]
+        self.assertEqual(
+            task.command,
+            ("python", "-m", "pytest", "-q", "tests/test_native_pytest.py"),
+        )
+
     def test_web_discovery_is_recursive(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

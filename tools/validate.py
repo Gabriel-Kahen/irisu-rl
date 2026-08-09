@@ -102,14 +102,22 @@ def discover_python_tasks(
         key=lambda path: (-path.stat().st_size, path.relative_to(root).as_posix())
     )
     capacity = jobs if jobs is not None else available_cpus()
-    return [
-        Task(
-            f"python:{path.relative_to(root).as_posix()}",
-            (python, "-m", "unittest", "-v", str(path.relative_to(root))),
-            slots=min(capacity, PYTHON_TASK_SLOTS.get(path.name, 1)),
+    tasks = []
+    for path in paths:
+        relative = str(path.relative_to(root))
+        runner = (
+            (python, "-m", "pytest", "-q", relative)
+            if "import pytest" in path.read_text(encoding="utf-8")
+            else (python, "-m", "unittest", "-v", relative)
         )
-        for path in paths
-    ]
+        tasks.append(
+            Task(
+                f"python:{path.relative_to(root).as_posix()}",
+                runner,
+                slots=min(capacity, PYTHON_TASK_SLOTS.get(path.name, 1)),
+            )
+        )
+    return tasks
 
 
 def discover_web_tasks(root: Path = ROOT) -> list[Task]:
