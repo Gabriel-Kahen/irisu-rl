@@ -1,0 +1,71 @@
+[experiment]
+schema = "irisu-r3g-event-world-model-mpc-development-v1"
+development_only = true
+sealed_test_allowed = false
+canonical_run_allowed = false
+protocol_sha256 = "6dfb2ffa3a76cc00447e3dcf889f6209a17ff5e2f4c3382fe0959bbabbd52991"
+repository_revision = "de701b36355d5ec582df30f4223aabde7bc537df"
+runtime_sha256 = "4f6928f18c83159b0db1cb895891007ac805d2542954b41d767619eedf3f7c79"
+checkpoint_sha256 = "31c9bc5e10b0ad021eecedf0c0037de6b24bd4d74e0cfbe9b4922b77dc53da1d"
+trusted_joint_source_sha256 = "dc7009fc18a322eca5dace55b9baf982b6ced26c18517af752aab0f6365d362e"
+logical_cpu = 9
+
+[candidate]
+pair_cap = 3
+geometry_cap = 3
+candidate_cap = 9
+cooldown_ticks = 16
+require_pristine_source = true
+
+[world_model]
+renewal_events = 2
+maximum_event_ticks = 1600
+rot_delay_ticks = 40
+neighbor_count = 24
+calibration_fraction = 0.5
+conformal_alpha = 0.05
+risk_upper_limit = 0.25
+minimum_score_advantage = 0.0
+continuation_checkpoint_ticks = [2000, 10000, 20000, 50000]
+
+[budgets]
+teacher_query_stride_shots = 2
+teacher_queries_per_seed = 4
+calibration_horizon_ticks = 4000
+calibration_decisions_per_seed = 1
+calibration_query_stride_shots = 8
+dagger_horizon_ticks = 4000
+dagger_decisions_per_seed = 1
+heldout_horizon_ticks = 10000
+heldout_independent_queries_per_seed = 1
+heldout_execution_queries_per_seed = 1
+heldout_exact_queries_per_seed = 2
+stress_horizon_ticks = 10000
+stress_exact_queries_per_seed = 2
+student_execution_queries_per_seed = 1
+student_query_stride_shots = 1
+
+[policy]
+maximum_overrides_per_episode = 1
+override_epoch = "whole episode; public observations do not expose exact renewal events"
+heldout_sampling = "first eligible queried state per seed before certification"
+
+[barrier]
+minimum_heldout_unsafe_outcomes = 32
+minimum_heldout_unsafe_states = 8
+minimum_heldout_unsafe_seeds = 4
+minimum_heldout_severe_outcomes = 8
+minimum_valid_episodes = 59
+maximum_false_safe_cp_upper = 0.05
+minimum_coverage_cluster_lower = 0.05
+coverage_bootstrap_replicates = 10000
+
+[splits]
+teacher_screen_count = 8
+teacher_screen_horizon = 2000
+student_screen_count = 8
+student_screen_horizon = 10000
+dagger_train_count = 16
+barrier_calibration_count = 64
+barrier_heldout_count = 64
+barrier_stress_count = 64
