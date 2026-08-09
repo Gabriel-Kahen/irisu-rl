@@ -9,9 +9,9 @@ if [[ "$output" == / || "$output" == "$root" ]]; then
   exit 1
 fi
 
-tag=web-exact-runtime-20260809
-asset=irisu-exact-runtime-20260809.tar.gz
-archive_sha=9937a50853fd5f29ddf853eb6e6e3ec6e55251b496f7306ed4855f8648937928
+tag=web-exact-runtime-fastboot-20260809
+asset=irisu-exact-runtime-fastboot-20260809.tar.gz
+archive_sha=ccdb8dd5a855490e54934c6985f598e4abb7ec4414c616fc355522cee257b7f2
 url="https://github.com/Gabriel-Kahen/irisu-rl/releases/download/$tag/$asset"
 archive=$(mktemp "${output}.archive.XXXXXX")
 stage=$(mktemp -d "${output}.stage.XXXXXX")

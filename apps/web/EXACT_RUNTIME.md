@@ -9,7 +9,9 @@ Pinned components:
 - v86 npm package 0.5.432 (`f3d4472a9c934b9ad78a311f5849ba711a296d23`), BSD-2-Clause, with the bounded CORE-MATH x87 trigonometry patch using CORE-MATH commit `07cf01e12a42b82cc478341982936cad7f3f9bdc` under MIT. Its license is distributed as `LICENSE.v86`; the exact patched CORE-MATH source and MIT notice are distributed as `SOURCE.core_math_sincosf.c`.
 - The project-owned Linux 6.8.12 i386/initramfs guest, built reproducibly with
   Buildroot 2024.02.13 and pinned as SHA-256
-  `389fb6e37c9f9f101232ad68b7177bced98caee9f7a531e99ea00b836833ea33`.
+  `681388b6db219fbb1dc63a678cd276d73c21bbb047cd8c7a6771fc4e567591c0`.
+  Its dedicated `/irisu-init` mounts only the filesystems required by the exact
+  worker, avoiding unrelated boot services in the browser startup path.
   Its complete build recipe is distributed as `SOURCE.guest-build`; the same
   recipe produces a `legal-info.tar.xz` archive containing corresponding
   sources, licenses, generated configs, and manifests.

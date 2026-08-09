@@ -1,7 +1,7 @@
 /* global V86 */
 "use strict";
 
-importScripts("./exact-runtime/libv86.js");
+importScripts("./exact-runtime/libv86.js?v=20260809e");
 
 const MAGIC = 0x43505249;
 const VERSION = 1;
@@ -11,8 +11,6 @@ const guestFiles = [
   "libirisu_box2d_msvc_exact_multiworld.so",
   "ld-linux.so.2",
   "libc.so.6",
-  "libm.so.6",
-  "libgcc_s.so.1",
   "libstdc++.so.6",
 ];
 
@@ -129,19 +127,19 @@ function waitForPrompt() {
 async function start() {
   progress("Downloading emulator and game engine…");
   const guestDownloads = Promise.all(guestFiles.map(async name => {
-    const response = await fetch(`./exact-runtime/guest/${name}`);
+    const response = await fetch(`./exact-runtime/guest/${name}?v=20260809e`);
     if (!response.ok) throw new Error(`could not load exact-runtime/guest/${name}`);
     return {name, bytes: new Uint8Array(await response.arrayBuffer())};
   }));
   emulator = new V86({
-    wasm_path: "./exact-runtime/v86.wasm",
+    wasm_path: "./exact-runtime/v86.wasm?v=20260809e",
     memory_size: 128 * 1024 * 1024,
     vga_memory_size: 2 * 1024 * 1024,
-    bios: {url: "./exact-runtime/seabios.bin"},
-    vga_bios: {url: "./exact-runtime/vgabios.bin"},
-    bzimage: {url: "./exact-runtime/buildroot-bzimage68.bin", async: false},
+    bios: {url: "./exact-runtime/seabios.bin?v=20260809e"},
+    vga_bios: {url: "./exact-runtime/vgabios.bin?v=20260809e"},
+    bzimage: {url: "./exact-runtime/buildroot-bzimage68.bin?v=20260809e", async: false},
     filesystem: {},
-    cmdline: "console=ttyS0 tsc=reliable mitigations=off random.trust_cpu=on",
+    cmdline: "rdinit=/irisu-init console=ttyS0 quiet loglevel=0 tsc=reliable mitigations=off random.trust_cpu=on",
     autostart: false,
     fastboot: true,
     disable_keyboard: true,

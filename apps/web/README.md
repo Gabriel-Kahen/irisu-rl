@@ -30,7 +30,8 @@ the exact i386 worker under v86 inside a Web Worker and requires no application
 server or cross-origin isolation. Dependencies are pinned and cached in
 `build-web/downloads`; generated guest binaries remain outside source control.
 The client overlaps emulator and guest-engine downloads, uses v86 fast boot,
-and shows the current startup phase until the first exact state is available.
+reuses parity-verified runtime libraries already in the guest image, and shows
+the current startup phase until the first exact state is available.
 The workspace's standard exact-worker paths are used when the two environment
 variables are omitted. The build reproducibly compiles the pinned v86
 CORE-MATH patch; `IRISU_V86_WASM` may point at a prebuilt artifact with the
@@ -57,7 +58,7 @@ the seed and immutable input stream when their exact observations have left the
 bounded in-memory cache.
 
 GitHub Pages downloads the hash-pinned runtime from the
-[`web-exact-runtime-20260809`](https://github.com/Gabriel-Kahen/irisu-rl/releases/tag/web-exact-runtime-20260809)
+[`web-exact-runtime-fastboot-20260809`](https://github.com/Gabriel-Kahen/irisu-rl/releases/tag/web-exact-runtime-fastboot-20260809)
 release with `fetch-exact-runtime.sh`, verifies both the archive and its embedded
 runtime manifest, and passes the prepared directory through
 `IRISU_EXACT_RUNTIME_DIR`.
