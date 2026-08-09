@@ -73,7 +73,7 @@ test("50 Hz scheduler queues elapsed ticks without overlapping the pump", () => 
   assert.equal(delay, 19);
 });
 
-test("fast-forward targets twice the previous tick batch", () => {
+test("fast-forward targets an 80-tick batch", () => {
   let delay;
   const game = new BrowserGame({close() {}}, () => {}, {
     seed: 1, now: () => 61,
@@ -86,7 +86,7 @@ test("fast-forward targets twice the previous tick batch", () => {
   let pumps = 0;
   game.pump = () => { pumps++; };
   game.schedule();
-  assert.equal(game.pendingTicks, 40);
+  assert.equal(game.pendingTicks, 80);
   assert.equal(pumps, 1);
   assert.equal(game.deadline, 81);
   assert.equal(delay, 20);

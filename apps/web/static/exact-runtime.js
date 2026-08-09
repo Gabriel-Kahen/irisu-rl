@@ -7,7 +7,7 @@ import {
 } from "./replay.mjs";
 
 const kinds = {weak: 1, strong: 2, both: 3};
-const FAST_FORWARD_TICKS = 40;
+const FAST_FORWARD_TICKS = 80;
 
 export class ExactWorkerClient {
   static async create({WorkerClass = globalThis.Worker, timeoutMs = 60000,
