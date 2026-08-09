@@ -1,0 +1,112 @@
+version = "hierarchical-options-v1"
+status = "development_only_not_canonical_evidence"
+deployable = false
+canonical_r3_evidence = false
+sealed_evaluation_allowed = false
+physics_backend = "portable"
+objective = "offline_multi_spawn_option_value_fitting_for_renewable_survival"
+trusted_runtime = "/home/gabe/Documents/irisu/artifacts/r3/runtime/main-0c48dba-20260723/portable-build/libirisu_clone.so"
+artifact_namespace = "artifacts/r3/development/hierarchical-options-20260729"
+
+[frozen_v5]
+checkpoint = "/home/gabe/Documents/irisu/artifacts/r3/development/r3d-survival-v5-20260729/long-development.pt"
+sha256 = "31c9bc5e10b0ad021eecedf0c0037de6b24bd4d74e0cfbe9b4922b77dc53da1d"
+cooldown_ticks = 16
+minimum_pair_closure_sizes = 0.05
+impact_side_sizes = 0.50
+impact_below_sizes = 0.75
+source_velocity_lead_ticks = 1.0
+ticks_per_second = 50.0
+act_logit_bias = 1.0
+
+[seeds]
+split = "train"
+allocator_key = 7384177335025047626
+fit_cursor = 0
+fit_count = 8
+screen_cursor = 8
+screen_count = 8
+paired_cursor = 16
+paired_count = 16
+plateau_cursor = 32
+plateau_count = 8
+
+[collection]
+episode_ticks = 4000
+event_stride_ticks = 180
+minimum_event_gap_ticks = 90
+maximum_states_per_seed = 18
+branch_horizon_ticks = 360
+option_commit_ticks = 96
+
+[value_fit]
+ridge_candidates = [0.1, 1.0, 10.0, 100.0]
+curve_fractions = [0.25, 0.50, 1.0]
+minimum_samples_per_option = 4
+
+[screen]
+horizon_ticks = 10000
+selection_order = [
+  "minimum_new_catastrophic_regressions",
+  "minimum_gauge_failures",
+  "maximum_p10_survival_ticks",
+  "maximum_median_survival_ticks",
+  "maximum_median_raw_score",
+  "minimum_ridge",
+]
+
+[paired_evaluation]
+horizon_ticks = 20000
+checkpoints = [2000, 10000, 20000]
+
+[plateau_probe]
+horizon_ticks = 50000
+checkpoints = [2000, 10000, 20000, 50000]
+
+[controller]
+observe_ticks = 16
+resolution_wait_ticks = 4
+abandon_ticks = 32
+impact_side_sizes = 0.50
+impact_below_sizes = 0.75
+source_velocity_lead_ticks = 1.0
+minimum_pair_closure_sizes = 0.05
+ticks_per_second = 50.0
+hazard_remaining_ticks = 48
+enable_bonus = false
+enable_rotten_matching = true
+enable_hazard_ejection = false
+enable_edge_ejection = false
+
+[hierarchy]
+option_commit_ticks = 96
+minimum_option_dwell_ticks = 96
+maximum_option_dwell_ticks = 360
+low_gauge_fraction = 0.0
+catastrophic_absolute_drop_ticks = 2000
+catastrophic_relative_survival = 0.50
+conservative_advantage_margin = 40385.0
+conservative_advantage_basis = "selected_ridge_10_held_rmse_40384.7371_ceiled"
+minimum_option_samples = 4
+base_wait_only = true
+residual_variants = ["agreement_only", "high_advantage_override"]
+
+[utility]
+alive_horizon_bonus = 100000.0
+survival_tick = 8.0
+gauge = 1.0
+renewable_group_credit = 0.25
+rot_liability = -1.0
+score_delta = 8.0
+qualifying_clear_delta = 100.0
+rotten_event = -2200.0
+ejected_event = -20.0
+terminal_lost_tick = -24.0
+
+[evidence]
+policy_observation = "public_only"
+hidden_rng = "opaque_snapshot_consumed_only_by_development_branch_teacher"
+branch_protocol = "restore_identical_portable_snapshot_and_rng_per_option"
+policy_snapshot_access = false
+sealed_material_used = false
+canonical_run_storage_used = false
