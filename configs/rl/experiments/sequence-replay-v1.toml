@@ -1,0 +1,95 @@
+version = "sequence-replay-v1"
+status = "development_only_not_canonical_evidence"
+deployable = false
+canonical_r3_evidence = false
+sealed_evaluation_allowed = false
+objective = "recurrent_residual_over_frozen_v5_with_causal_geometry_gate"
+
+[inputs]
+trusted_replay_sha256 = "73bf5b5d4a478c9bf73b62a6df98f16a01fde2cf97eb751438cd0ae857e3362d"
+exact_worker_sha256 = "4faa4508a89df3e1e62b80e2871b6a35b5913f220d53fe5de43408ad6512c261"
+portable_runtime_sha256 = "4f6928f18c83159b0db1cb895891007ac805d2542954b41d767619eedf3f7c79"
+frozen_v5_sha256 = "31c9bc5e10b0ad021eecedf0c0037de6b24bd4d74e0cfbe9b4922b77dc53da1d"
+fast_geometry_sha256 = "5db3b5cc3fe7583d98e294561d3928677ee708bc62327b67bfb9e7da46eaaefe"
+extended_geometry_sha256 = "6752f1c7be5a05e75d7bd85f0464e58c327acfc5b0155461e851ac13451c931a"
+geometry_collection_sha256 = "906eb8c468d87efe4c26b1d139a4b76c99e86b6c643f5b1ca81e188a74dac08c"
+legacy_geometry_vocabulary_sha256 = "e6cd65d87e6ca4fa5a2bcb89cd9e61186f29eac265af25e867eaf69f0346d7a4"
+
+[frozen_v5]
+cooldown_ticks = 16
+minimum_pair_closure_sizes = 0.05
+impact_side_sizes = 0.50
+impact_below_sizes = 0.75
+source_velocity_lead_ticks = 1.0
+ticks_per_second = 50.0
+act_logit_bias = 1.0
+
+[model]
+body_hidden = 64
+global_hidden = 48
+event_hidden = 32
+recurrent_hidden = 96
+pair_hidden = 96
+value_quantiles = 51
+residual_scale = 4.0
+geometry_residual_scale = 2.0
+geometry_gate_threshold = 0.90
+dropout = 0.0
+
+[training]
+seed = 2026072907
+torch_threads = 1
+replay_weight = 0.50
+development_weight = 1.0
+geometry_weight = 1.0
+baseline_kl_weight = 0.05
+value_weight = 0.25
+learning_rate = 0.0003
+gradient_clip = 1.0
+burn_in = 8
+tbptt_steps = 32
+batch_episodes = 4
+steps = [0, 80, 240, 600]
+development_seed_label = "irisu-sequence-replay-training-v1"
+development_seeds = 8
+development_ticks = 3000
+dagger_behavior = "legacy_extended_geometry"
+branch_queries_per_episode = 12
+branch_query_stride_decisions = 8
+branch_horizon_ticks = 128
+
+[selection]
+seed_label = "irisu-sequence-replay-selection-v1"
+seeds = 8
+horizons = [2000, 10000]
+ranking = [
+  "minimum_catastrophic_regressions",
+  "minimum_gauge_regressions",
+  "maximum_p10_survival_ticks",
+  "maximum_median_survival_ticks",
+  "maximum_median_raw_score",
+  "minimum_training_steps",
+]
+
+[deployment]
+minimum_restraint_probability = 0.90
+minimum_pair_probability = 0.80
+minimum_geometry_probability = 0.55
+minimum_geometry_margin = 0.05
+maximum_pair_overrides_without_progress = 1
+fallback = "frozen_v5_analytic_geometry"
+
+[evaluation]
+suite_label = "irisu-sequence-replay-fixed-development-v1"
+seed_count = 16
+horizons = [2000, 10000, 20000]
+optional_50k_seed_count = 8
+optional_horizon = 50000
+training_seed_overlap_allowed = false
+sealed_test_allowed = false
+
+[catastrophic_regression]
+terminal_flip = "baseline survives horizon without gauge failure; candidate gauge-fails"
+severe_joint_collapse_minimum_tick_loss = 2000
+severe_joint_collapse_maximum_survival_ratio = 0.50
+severe_joint_collapse_maximum_score_ratio = 0.50
