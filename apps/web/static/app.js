@@ -1,4 +1,4 @@
-import {BrowserGame} from "./exact-runtime.js?v=20260809k";
+import {BrowserGame} from "./exact-runtime.js?v=20260809l";
 import {
   activatedTrailAlphas, colorFor, hasActivatedTrail,
 } from "./colors.mjs?v=20260723d";
@@ -18,7 +18,8 @@ const ui = {
   replayAnnouncement: $("#replayAnnouncement"),
   replayPlay: $("#replayPlayButton"), replayBack: $("#replayBackButton"),
   replayForward: $("#replayForwardButton"), replayScrubber: $("#replayScrubber"),
-  replayPosition: $("#replayPosition"), exitReplay: $("#exitReplayButton"),
+  replaySpeed: $("#replaySpeed"), replayPosition: $("#replayPosition"),
+  exitReplay: $("#exitReplayButton"),
   runtimeLoading: $("#runtimeLoading"),
   appError: $("#appError"),
   toast: $("#toast"),
@@ -385,6 +386,7 @@ function syncUi() {
     const totalSeconds = (replay.total_frames * REPLAY_TICK_MS / 1000).toFixed(1);
     ui.replayPosition.textContent = `${replay.frame} / ${replay.total_frames} · ${seconds}s / ${totalSeconds}s`;
     ui.replayPlay.textContent = snapshot.running ? "pause" : "play";
+    ui.replaySpeed.value = String(replay.speed);
     ui.replayPlay.disabled = replay.frame >= replay.total_frames;
     ui.replayBack.disabled = replay.frame <= 0;
     ui.replayForward.disabled = replay.frame >= replay.total_frames;
@@ -465,6 +467,8 @@ ui.replayFile.addEventListener("change", () => {
 ui.replayPlay.addEventListener("click", () => setRunning(!snapshot?.running));
 ui.replayBack.addEventListener("click", () => game?.stepReplay(-1));
 ui.replayForward.addEventListener("click", () => game?.stepReplay(1));
+ui.replaySpeed.addEventListener("change", () => game?.setReplaySpeed(
+  Number(ui.replaySpeed.value)));
 ui.replayScrubber.addEventListener("input", () => {
   const frame = Number(ui.replayScrubber.value);
   ui.replayPosition.textContent = `frame ${frame} / ${ui.replayScrubber.max}`;
@@ -473,6 +477,14 @@ ui.replayScrubber.addEventListener("change", () => game?.seekReplay(
   Number(ui.replayScrubber.value)));
 ui.exitReplay.addEventListener("click", restart);
 window.addEventListener("keydown", (event) => {
+  if (snapshot?.mode === "replay" &&
+      ["Space", "ArrowLeft", "ArrowRight"].includes(event.code)) {
+    event.preventDefault();
+    if (event.repeat && event.code === "Space") return;
+    if (event.code === "Space") setRunning(!snapshot.running);
+    else game?.stepReplay(event.code === "ArrowLeft" ? -1 : 1);
+    return;
+  }
   if (event.target instanceof HTMLInputElement || event.target instanceof HTMLButtonElement ||
       event.target?.isContentEditable) return;
   if (event.code === "Space") { event.preventDefault(); setRunning(!snapshot?.running); }

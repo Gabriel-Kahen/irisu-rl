@@ -8,6 +8,8 @@ Its open-bottom U-shaped well follows the measured v2.03 mode-0 geometry.
 - Shift + click: both shots
 - Mouse wheel down: fast-forward (wheel up stops)
 - Space: pause/resume
+- In replay mode, Left/Right: step backward/forward without changing play state
+- Replay speed: 1x, 2x, 4x, or 8x
 - `R`: restart with a new random seed
 - **play replay**: open an original v2.03 normal-mode `.rpy` file
 - **save replay**: download the completed run from the game-over dialog
@@ -59,7 +61,8 @@ Saved replays use the original v2.03 52-byte header and per-20 ms input-word
 format. The exact actions accepted by the simulator are recorded, including
 release and idle ticks, and terminal metadata comes from the first recorded
 finish. Replay playback applies the original two-frame startup edge rule.
-The transport can pause, step, and scrub; long backward seeks are rebuilt from
+The transport can pause, step without interrupting playback, scrub, and play at
+1x, 2x, 4x, or 8x; long backward seeks are rebuilt from
 the seed and immutable input stream when their exact observations have left the
 bounded in-memory cache.
 

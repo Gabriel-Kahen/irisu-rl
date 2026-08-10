@@ -6,7 +6,7 @@
   <meta name="theme-color" content="#070a0b">
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self' blob:; style-src 'self'; connect-src 'self'">
   <title>irisu</title>
-  <link rel="stylesheet" href="./styles.css?v=20260809e">
+  <link rel="stylesheet" href="./styles.css?v=20260809f">
   <link rel="preload" href="./exact-runtime/v86.wasm?v=20260809j" as="fetch" type="application/wasm" crossorigin>
   <link rel="preload" href="./exact-runtime/buildroot-bzimage68.bin?v=20260809j" as="fetch" crossorigin>
 </head>
@@ -49,8 +49,16 @@
         </div>
         <div class="replay-transport">
           <button id="replayPlayButton" type="button">pause</button>
-          <button id="replayBackButton" type="button" aria-label="Step back one replay frame">−1</button>
-          <button id="replayForwardButton" type="button" aria-label="Step forward one replay frame">+1</button>
+          <button id="replayBackButton" type="button" aria-label="Step back one replay frame">−1 <kbd>←</kbd></button>
+          <button id="replayForwardButton" type="button" aria-label="Step forward one replay frame">+1 <kbd>→</kbd></button>
+          <label class="replay-speed" for="replaySpeed">speed
+            <select id="replaySpeed">
+              <option value="1">1x</option>
+              <option value="2">2x</option>
+              <option value="4">4x</option>
+              <option value="8">8x</option>
+            </select>
+          </label>
           <label class="visually-hidden" for="replayScrubber">Replay position</label>
           <input id="replayScrubber" class="replay-scrubber" type="range" min="0" max="0" value="0" step="1">
           <output id="replayPosition" for="replayScrubber">frame 0 / 0</output>
@@ -63,6 +71,6 @@
     <div id="appError" class="app-error" role="alert" hidden></div>
   </main>
   <div id="toast" class="toast"></div>
-  <script type="module" src="./app.js?v=20260809k"></script>
+  <script type="module" src="./app.js?v=20260809l"></script>
 </body>
 </html>

@@ -84,6 +84,54 @@ test("50 Hz scheduler queues elapsed ticks without overlapping the pump", () => 
   assert.equal(delay, 19);
 });
 
+test("replay speed changes scheduler cadence", () => {
+  let delay;
+  const game = new BrowserGame({close() {}}, () => {}, {
+    seed: 1, now: () => 11,
+    clock: {setTimeout: (_callback, value) => { delay = value; return 1; }, clearTimeout() {}},
+  });
+  assert.throws(() => game.setReplaySpeed(3), /1x, 2x, 4x, or 8x/);
+  for (const speed of [1, 2, 4, 8]) {
+    game.setReplaySpeed(speed);
+    assert.equal(game.replayInterval(), 20 / speed);
+  }
+  game.setReplaySpeed(4);
+  game.mode = "replay";
+  game.running = true;
+  game.replayFrame = 1;
+  game.replayComputed = 20;
+  game.replayEffectiveTotal = 20;
+  game.deadline = 5;
+  game.displayReplayFrame = position => {
+    game.replayFrame = position;
+    return true;
+  };
+  game.schedule();
+  assert.equal(game.replayFrame, 3);
+  assert.equal(game.deadline, 15);
+  assert.equal(delay, 4);
+});
+
+test("buffered replay steps accumulate and respect a later pause", () => {
+  const game = new BrowserGame({close() {}}, () => {}, {
+    seed: 1, now: () => 0,
+    clock: {setTimeout: () => 1, clearTimeout() {}},
+  });
+  game.mode = "replay";
+  game.observation = observation(0);
+  game.running = true;
+  game.replayData = {frameCount: 10, words: new Uint32Array(10)};
+  game.replayEffectiveTotal = 10;
+  game.stepReplay(1);
+  game.stepReplay(1);
+  assert.equal(game.replayRequestedFrame, 2);
+  assert.equal(game.replayResumeAfterSeek, true);
+  game.setRunning(false);
+  assert.equal(game.replayResumeAfterSeek, false);
+  game.setRunning(true);
+  assert.equal(game.replayResumeAfterSeek, true);
+});
+
 test("fast-forward targets an 80-tick batch", () => {
   let delay;
   const game = new BrowserGame({close() {}}, () => {}, {
@@ -351,19 +399,32 @@ test("precomputes imported levels exactly and scrubs cached observations without
   const callCount = calls.length;
   game.seekReplay(3);
   assert.equal(game.observation.tick, 3);
+  assert.equal(game.running, false);
+  game.setRunning(true);
+  game.stepReplay(-1);
+  assert.equal(game.observation.tick, 2);
+  assert.equal(game.running, true);
+  game.stepReplay(1);
+  assert.equal(game.observation.tick, 3);
+  assert.equal(game.running, true);
+  game.setRunning(false);
   game.seekReplay(1);
   assert.equal(game.observation.tick, 1);
+  assert.equal(game.running, false);
   assert.equal(calls.length, callCount);
 
   // An old position may leave the bounded cache during a very long replay.
   // Seeking there must rebuild exact state from the immutable seed/input stream.
+  game.seekReplay(2);
   game.replayCache.entries[0] = null;
-  game.seekReplay(1);
+  game.setRunning(true);
+  game.stepReplay(-1);
   for (let tries = 0; clients.length < 3 || !game.replayComplete; tries++) {
     assert.ok(tries < 20, "evicted replay position should be rebuilt");
     await new Promise(resolve => setImmediate(resolve));
   }
   assert.equal(game.observation.tick, 1);
+  assert.equal(game.running, true);
   assert.equal(clients.length, 3);
   assert.deepEqual(calls.slice(-4), [
     {kind: 1, x: 10, y: 20, suppressFreshEdges: true},

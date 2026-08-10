@@ -65,6 +65,16 @@ test("browser module cache-bust chain stays aligned", () => {
   assert.match(runtime, new RegExp(`exact-codec\\.mjs\\?v=${version}`));
 });
 
+test("replay transport exposes keyboard stepping and playback speeds", () => {
+  const html = readFileSync(path.join(web, "static/index.html"), "utf8");
+  const app = readFileSync(path.join(web, "static/app.js"), "utf8");
+  const css = readFileSync(path.join(web, "static/styles.css"), "utf8");
+  assert.match(html, /id="replaySpeed"[\s\S]*value="1"[\s\S]*value="2"[\s\S]*value="4"[\s\S]*value="8"/);
+  assert.match(app, /\["Space", "ArrowLeft", "ArrowRight"\]/);
+  assert.match(app, /game\?\.stepReplay\(event\.code === "ArrowLeft" \? -1 : 1\)/);
+  assert.match(css, /\.replay-speed select/);
+});
+
 test("browser guest uses a minimal executable direct init", () => {
   const board = path.join(web, "guest", "buildroot-external", "board", "irisu");
   const initPath = path.join(board, "rootfs-overlay", "irisu-direct-init");

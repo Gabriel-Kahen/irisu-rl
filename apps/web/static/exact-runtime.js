@@ -1,14 +1,15 @@
 import {
   OPCODE, decodeHello, decodeObservation, decodeReset, decodeStep, encodeReset, encodeStep,
-} from "./exact-codec.mjs?v=20260809k";
+} from "./exact-codec.mjs?v=20260809l";
 import {
   ReplayObservationCache, decodeReplayWord, encodeReplayWord,
-  quantizeReplayPoint, serializeReplay,
+  quantizeReplayPoint, serializeReplay, REPLAY_TICK_MS,
 } from "./replay.mjs";
 
 const kinds = {weak: 1, strong: 2, both: 3};
 const FAST_FORWARD_TICKS = 80;
 const FAST_FORWARD_WAIT_TICKS = 20;
+const REPLAY_SPEEDS = new Set([1, 2, 4, 8]);
 
 export class ExactWorkerClient {
   static async create({WorkerClass = globalThis.Worker, timeoutMs = 60000,
@@ -148,6 +149,8 @@ export class BrowserGame {
     this.replayWarning = "";
     this.replayTerminalReason = null;
     this.replayLastProgressTime = 0;
+    this.replaySpeed = 1;
+    this.replayResumeAfterSeek = false;
     this.pendingTicks = 0;
     this.processing = false;
     this.releaseNext = false;
@@ -173,6 +176,7 @@ export class BrowserGame {
         complete: this.replayComplete,
         buffering: this.replayBuffering,
         warning: this.replayWarning,
+        speed: this.replaySpeed,
         cursor: this.replayFrame > 0 ?
           decodeReplayWord(this.replayData.words[this.replayFrame - 1]) : null,
       } : null});
@@ -204,6 +208,7 @@ export class BrowserGame {
     this.replayBuffering = false;
     this.replayWarning = "";
     this.replayTerminalReason = null;
+    this.replayResumeAfterSeek = false;
     try {
       // Exact workers deliberately permit one successful Reset per process.
       // A new run therefore needs a fresh worker/guest, not another Reset RPC
@@ -256,9 +261,11 @@ export class BrowserGame {
     if (this.mode === "replay") {
       const canRun = this.observation && this.replayFrame < this.replayEffectiveTotal;
       this.running = Boolean(running && canRun);
+      this.replayResumeAfterSeek = Boolean(this.running &&
+        this.replayRequestedFrame !== null);
       this.replayBuffering = Boolean(this.running &&
         this.replayFrame >= this.replayComputed && !this.replayComplete);
-      this.deadline = this.now() + 20;
+      this.deadline = this.now() + this.replayInterval();
       this.emit();
       return;
     }
@@ -291,6 +298,22 @@ export class BrowserGame {
       if (!this.pendingTicks && !this.processing) this.fastForward = false;
     }
     this.emit();
+  }
+
+  replayInterval() {
+    return REPLAY_TICK_MS / this.replaySpeed;
+  }
+
+  setReplaySpeed(speed) {
+    const value = Number(speed);
+    if (!REPLAY_SPEEDS.has(value)) {
+      throw new RangeError("replay speed must be 1x, 2x, 4x, or 8x");
+    }
+    this.replaySpeed = value;
+    if (this.mode === "replay") {
+      this.deadline = this.now() + this.replayInterval();
+      this.emit();
+    }
   }
 
   nextAction() {
@@ -365,6 +388,7 @@ export class BrowserGame {
     this.replayWarning = replay.zeroPadding ? "" :
       "The v2.03 loader ignores nonzero reserved header bytes; playback uses its fixed 52-byte offset.";
     this.replayTerminalReason = null;
+    this.replayResumeAfterSeek = false;
     try {
       if (this.hasReset) {
         if (!this.clientFactory) throw new Error("replay playback needs a fresh exact worker");
@@ -383,7 +407,7 @@ export class BrowserGame {
       this.replayInitialObservation = state.observation;
       this.observation = state.observation;
       this.running = replay.frameCount > 0;
-      this.deadline = this.now() + 20;
+      this.deadline = this.now() + this.replayInterval();
       this.emit();
       void this.prepareReplay(epoch);
       return true;
@@ -411,29 +435,37 @@ export class BrowserGame {
     return true;
   }
 
-  seekReplay(position) {
+  seekReplay(position, {preserveRunning = false} = {}) {
     if (this.mode !== "replay") return;
     const target = Math.max(0, Math.min(this.replayEffectiveTotal,
       Math.round(Number(position))));
-    this.running = false;
+    this.running = Boolean(preserveRunning && this.running &&
+      target < this.replayEffectiveTotal);
     this.pendingTicks = 0;
-    this.deadline = this.now() + 20;
+    this.deadline = this.now() + this.replayInterval();
     if (target <= this.replayComputed) {
       this.replayRequestedFrame = null;
+      this.replayResumeAfterSeek = false;
       this.replayBuffering = false;
-      if (!this.displayReplayFrame(target)) void this.rebuildReplay(target);
+      if (!this.displayReplayFrame(target)) {
+        void this.rebuildReplay(target, {resume: this.running});
+      }
     } else {
       this.replayRequestedFrame = target;
+      this.replayResumeAfterSeek = this.running;
       this.replayBuffering = true;
       this.emit();
     }
   }
 
   stepReplay(delta) {
-    if (this.mode === "replay") this.seekReplay(this.replayFrame + delta);
+    if (this.mode === "replay") {
+      const position = this.replayRequestedFrame ?? this.replayFrame;
+      this.seekReplay(position + delta, {preserveRunning: true});
+    }
   }
 
-  async rebuildReplay(target) {
+  async rebuildReplay(target, {resume = false} = {}) {
     const epoch = ++this.epoch;
     this.running = false;
     this.pendingTicks = 0;
@@ -446,6 +478,7 @@ export class BrowserGame {
     this.replayWarning = this.replayData.zeroPadding ? "" :
       "The v2.03 loader ignores nonzero reserved header bytes; playback uses its fixed 52-byte offset.";
     this.replayTerminalReason = null;
+    this.replayResumeAfterSeek = Boolean(resume && target < this.replayEffectiveTotal);
     this.terminalReason = null;
     this.emit();
     try {
@@ -465,6 +498,8 @@ export class BrowserGame {
       if (target === 0) {
         this.replayRequestedFrame = null;
         this.replayBuffering = false;
+        this.running = this.replayResumeAfterSeek;
+        this.replayResumeAfterSeek = false;
         this.displayReplayFrame(0);
       }
       void this.prepareReplay(epoch);
@@ -523,6 +558,9 @@ export class BrowserGame {
           const target = this.replayRequestedFrame;
           this.replayRequestedFrame = null;
           this.replayBuffering = false;
+          this.running = this.replayResumeAfterSeek && target < this.replayEffectiveTotal;
+          this.replayResumeAfterSeek = false;
+          this.deadline = this.now() + this.replayInterval();
           this.displayReplayFrame(target);
         } else if (this.running && this.replayBuffering &&
                    this.replayComputed > this.replayFrame) {
@@ -555,6 +593,9 @@ export class BrowserGame {
         const target = Math.min(this.replayRequestedFrame, this.replayEffectiveTotal);
         this.replayRequestedFrame = null;
         this.replayBuffering = false;
+        this.running = this.replayResumeAfterSeek && target < this.replayEffectiveTotal;
+        this.replayResumeAfterSeek = false;
+        this.deadline = this.now() + this.replayInterval();
         this.displayReplayFrame(target, {emit: false});
       }
       if (this.replayFrame >= this.replayEffectiveTotal) {
@@ -610,9 +651,10 @@ export class BrowserGame {
     if (this.closed) return;
     const now = this.now();
     if (this.mode === "replay") {
+      const interval = this.replayInterval();
       if (this.running) {
         const due = now < this.deadline ? 0 :
-          Math.min(5, Math.floor((now - this.deadline) / 20) + 1);
+          Math.min(5, Math.floor((now - this.deadline) / interval) + 1);
         if (due) {
           const available = Math.min(this.replayComputed, this.replayEffectiveTotal);
           const next = Math.min(available, this.replayFrame + due);
@@ -628,9 +670,9 @@ export class BrowserGame {
             this.terminalReason = this.replayTerminalReason;
             this.emit();
           }
-          this.deadline += due * 20;
+          this.deadline += due * interval;
         }
-      } else this.deadline = now + 20;
+      } else this.deadline = now + interval;
       this.timer = this.clock.setTimeout(() => this.schedule(),
         Math.max(1, this.deadline - this.now()));
       return;
