@@ -1,4 +1,4 @@
-import {BrowserGame} from "./exact-runtime.js?v=20260809l";
+import {BrowserGame} from "./exact-runtime.js?v=20260809m";
 import {
   activatedTrailAlphas, colorFor, hasActivatedTrail,
 } from "./colors.mjs?v=20260723d";
@@ -40,6 +40,7 @@ let lastReplayAnnouncement = "";
 const bodyTrails = new Map();
 
 const fastForwardIdleMs = 160;
+const replaySkipFrames = 5_000 / REPLAY_TICK_MS;
 
 function stopFastForward() {
   clearTimeout(fastForwardTimer);
@@ -465,8 +466,8 @@ ui.replayFile.addEventListener("change", () => {
   if (file) void openReplayFile(file);
 });
 ui.replayPlay.addEventListener("click", () => setRunning(!snapshot?.running));
-ui.replayBack.addEventListener("click", () => game?.stepReplay(-1));
-ui.replayForward.addEventListener("click", () => game?.stepReplay(1));
+ui.replayBack.addEventListener("click", () => game?.stepReplay(-replaySkipFrames));
+ui.replayForward.addEventListener("click", () => game?.stepReplay(replaySkipFrames));
 ui.replaySpeed.addEventListener("change", () => game?.setReplaySpeed(
   Number(ui.replaySpeed.value)));
 ui.replayScrubber.addEventListener("input", () => {
@@ -482,7 +483,8 @@ window.addEventListener("keydown", (event) => {
     event.preventDefault();
     if (event.repeat && event.code === "Space") return;
     if (event.code === "Space") setRunning(!snapshot.running);
-    else game?.stepReplay(event.code === "ArrowLeft" ? -1 : 1);
+    else game?.stepReplay(event.code === "ArrowLeft" ?
+      -replaySkipFrames : replaySkipFrames);
     return;
   }
   if (event.target instanceof HTMLInputElement || event.target instanceof HTMLButtonElement ||

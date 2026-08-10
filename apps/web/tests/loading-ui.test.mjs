@@ -70,8 +70,12 @@ test("replay transport exposes keyboard stepping and playback speeds", () => {
   const app = readFileSync(path.join(web, "static/app.js"), "utf8");
   const css = readFileSync(path.join(web, "static/styles.css"), "utf8");
   assert.match(html, /id="replaySpeed"[\s\S]*value="1"[\s\S]*value="2"[\s\S]*value="4"[\s\S]*value="8"/);
+  assert.match(html, /aria-label="Jump back 5 seconds">−5s/);
+  assert.match(html, /aria-label="Jump forward 5 seconds">\+5s/);
   assert.match(app, /\["Space", "ArrowLeft", "ArrowRight"\]/);
-  assert.match(app, /game\?\.stepReplay\(event\.code === "ArrowLeft" \? -1 : 1\)/);
+  assert.match(app, /const replaySkipFrames = 5_000 \/ REPLAY_TICK_MS/);
+  assert.match(app, /stepReplay\(-replaySkipFrames\)/);
+  assert.match(app, /stepReplay\(replaySkipFrames\)/);
   assert.match(css, /\.replay-speed select/);
 });
 
