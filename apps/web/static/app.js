@@ -1,4 +1,4 @@
-import {BrowserGame} from "./exact-runtime.js?v=20260809m";
+import {BrowserGame} from "./exact-runtime.js?v=20260809n";
 import {
   activatedTrailAlphas, colorFor, hasActivatedTrail,
 } from "./colors.mjs?v=20260723d";
@@ -37,6 +37,8 @@ let game = null;
 let trailTick = -1;
 let replayLoadEpoch = 0;
 let lastReplayAnnouncement = "";
+let replayScrubbing = false;
+let replayScrubTarget = null;
 const bodyTrails = new Map();
 
 const fastForwardIdleMs = 160;
@@ -130,6 +132,8 @@ function setRunning(running) {
 function restart() {
   if (!game) return;
   replayLoadEpoch++;
+  replayScrubbing = false;
+  replayScrubTarget = null;
   stopFastForward();
   ui.replayError.hidden = true;
   showPersistentError();
@@ -169,6 +173,8 @@ function saveReplay() {
 
 async function openReplayFile(file) {
   const epoch = ++replayLoadEpoch;
+  replayScrubbing = false;
+  replayScrubTarget = null;
   stopFastForward();
   ui.replayError.hidden = true;
   showPersistentError();
@@ -350,6 +356,16 @@ function processEvents(events) {
   }
 }
 
+function showReplayPosition(frame, totalFrames) {
+  const seconds = (frame * REPLAY_TICK_MS / 1000).toFixed(1);
+  const totalSeconds = (totalFrames * REPLAY_TICK_MS / 1000).toFixed(1);
+  ui.replayScrubber.setAttribute("aria-valuetext",
+    `frame ${frame} of ${totalFrames}`);
+  ui.replayPosition.value = `frame ${frame} / ${totalFrames}`;
+  ui.replayPosition.textContent =
+    `${frame} / ${totalFrames} · ${seconds}s / ${totalSeconds}s`;
+}
+
 function syncUi() {
   if (!snapshot) return;
   const state = snapshot.observation;
@@ -379,13 +395,13 @@ function syncUi() {
     else aim.visible = false;
     ui.replayName.textContent = replay.name;
     ui.replayScrubber.max = String(replay.total_frames);
-    ui.replayScrubber.value = String(replay.frame);
-    ui.replayScrubber.setAttribute("aria-valuetext",
-      `frame ${replay.frame} of ${replay.total_frames}`);
-    ui.replayPosition.value = `frame ${replay.frame} / ${replay.total_frames}`;
-    const seconds = (replay.frame * REPLAY_TICK_MS / 1000).toFixed(1);
-    const totalSeconds = (replay.total_frames * REPLAY_TICK_MS / 1000).toFixed(1);
-    ui.replayPosition.textContent = `${replay.frame} / ${replay.total_frames} · ${seconds}s / ${totalSeconds}s`;
+    const scrubTarget = replayScrubTarget === null ? null :
+      Math.min(replayScrubTarget, replay.total_frames);
+    if (scrubTarget === replay.frame) replayScrubTarget = null;
+    if (!replayScrubbing && replayScrubTarget === null) {
+      ui.replayScrubber.value = String(replay.frame);
+      showReplayPosition(replay.frame, replay.total_frames);
+    }
     ui.replayPlay.textContent = snapshot.running ? "pause" : "play";
     ui.replaySpeed.value = String(replay.speed);
     ui.replayPlay.disabled = replay.frame >= replay.total_frames;
@@ -402,6 +418,8 @@ function syncUi() {
     document.documentElement.dataset.replayFrame = String(replay.frame);
     document.documentElement.dataset.replayBuffered = String(replay.buffered_frames);
   } else {
+    replayScrubbing = false;
+    replayScrubTarget = null;
     lastReplayAnnouncement = "";
     ui.replayError.hidden = true;
     delete document.documentElement.dataset.replayFrame;
@@ -471,11 +489,17 @@ ui.replayForward.addEventListener("click", () => game?.stepReplay(replaySkipFram
 ui.replaySpeed.addEventListener("change", () => game?.setReplaySpeed(
   Number(ui.replaySpeed.value)));
 ui.replayScrubber.addEventListener("input", () => {
+  replayScrubbing = true;
+  replayScrubTarget = null;
   const frame = Number(ui.replayScrubber.value);
-  ui.replayPosition.textContent = `frame ${frame} / ${ui.replayScrubber.max}`;
+  showReplayPosition(frame, Number(ui.replayScrubber.max));
 });
-ui.replayScrubber.addEventListener("change", () => game?.seekReplay(
-  Number(ui.replayScrubber.value)));
+ui.replayScrubber.addEventListener("change", () => {
+  const frame = Number(ui.replayScrubber.value);
+  replayScrubbing = false;
+  replayScrubTarget = frame;
+  game?.seekReplay(frame, {preserveRunning: true});
+});
 ui.exitReplay.addEventListener("click", restart);
 window.addEventListener("keydown", (event) => {
   if (snapshot?.mode === "replay" &&

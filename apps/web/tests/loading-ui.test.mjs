@@ -76,6 +76,10 @@ test("replay transport exposes keyboard stepping and playback speeds", () => {
   assert.match(app, /const replaySkipFrames = 5_000 \/ REPLAY_TICK_MS/);
   assert.match(app, /stepReplay\(-replaySkipFrames\)/);
   assert.match(app, /stepReplay\(replaySkipFrames\)/);
+  assert.match(app, /let replayScrubbing = false/);
+  assert.match(app, /let replayScrubTarget = null/);
+  assert.match(app, /if \(!replayScrubbing && replayScrubTarget === null\)/);
+  assert.match(app, /seekReplay\(frame, \{preserveRunning: true\}\)/);
   assert.match(css, /\.replay-speed select/);
 });
 

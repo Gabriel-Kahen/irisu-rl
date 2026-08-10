@@ -61,8 +61,8 @@ Saved replays use the original v2.03 52-byte header and per-20 ms input-word
 format. The exact actions accepted by the simulator are recorded, including
 release and idle ticks, and terminal metadata comes from the first recorded
 finish. Replay playback applies the original two-frame startup edge rule.
-The transport can pause, jump five seconds without interrupting playback, scrub, and play at
-1x, 2x, 4x, or 8x; long backward seeks are rebuilt from
+The transport can pause, jump five seconds, scrub without interrupting playback,
+and play at 1x, 2x, 4x, or 8x; long backward seeks are rebuilt from
 the seed and immutable input stream when their exact observations have left the
 bounded in-memory cache.
 

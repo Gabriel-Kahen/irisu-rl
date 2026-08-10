@@ -407,6 +407,9 @@ test("precomputes imported levels exactly and scrubs cached observations without
   game.stepReplay(1);
   assert.equal(game.observation.tick, 3);
   assert.equal(game.running, true);
+  game.seekReplay(1, {preserveRunning: true});
+  assert.equal(game.observation.tick, 1);
+  assert.equal(game.running, true);
   game.setRunning(false);
   game.seekReplay(1);
   assert.equal(game.observation.tick, 1);
