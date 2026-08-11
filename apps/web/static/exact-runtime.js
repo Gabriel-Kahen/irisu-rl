@@ -1,10 +1,10 @@
 import {
   OPCODE, decodeHello, decodeObservation, decodeReset, decodeStep, encodeReset, encodeStep,
-} from "./exact-codec.mjs?v=20260810a";
+} from "./exact-codec.mjs?v=20260810b";
 import {
   ReplayObservationCache, decodeReplayWord, encodeReplayWord,
   quantizeReplayPoint, serializeReplay, REPLAY_TICK_MS,
-} from "./replay.mjs";
+} from "./replay.mjs?v=20260810b";
 
 const kinds = {weak: 1, strong: 2, both: 3};
 const FAST_FORWARD_TICKS = 80;

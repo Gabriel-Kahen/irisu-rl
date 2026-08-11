@@ -1,9 +1,11 @@
-import {BrowserGame} from "./exact-runtime.js?v=20260810a";
+import {BrowserGame} from "./exact-runtime.js?v=20260810b";
 import {
   activatedTrailAlphas, colorFor, hasActivatedTrail,
 } from "./colors.mjs?v=20260723d";
-import {parseReplay, REPLAY_TICK_MS} from "./replay.mjs";
-import {RestartGate} from "./restart-gate.mjs?v=20260810a";
+import {
+  clampReplayScrubFrame, parseReplay, REPLAY_TICK_MS,
+} from "./replay.mjs?v=20260810b";
+import {RestartGate} from "./restart-gate.mjs?v=20260810b";
 
 const canvas = document.querySelector("#game");
 const ctx = canvas.getContext("2d");
@@ -507,9 +509,13 @@ ui.replayScrubber.addEventListener("input", () => {
   showReplayPosition(frame, Number(ui.replayScrubber.max));
 });
 ui.replayScrubber.addEventListener("change", () => {
-  const frame = Number(ui.replayScrubber.value);
+  const frame = clampReplayScrubFrame(
+    ui.replayScrubber.value, snapshot?.replay?.buffered_frames,
+  );
   replayScrubbing = false;
   replayScrubTarget = frame;
+  ui.replayScrubber.value = String(frame);
+  showReplayPosition(frame, Number(ui.replayScrubber.max));
   game?.seekReplay(frame, {preserveRunning: true});
 });
 ui.exitReplay.addEventListener("click", () => { void restart(); });
