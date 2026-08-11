@@ -40,6 +40,13 @@ export function quantizeReplayPoint(x, y) {
   };
 }
 
+export function clampReplayScrubFrame(position, bufferedFrames) {
+  const requested = Math.round(Number(position));
+  const maximum = Math.floor(Number(bufferedFrames));
+  if (!Number.isFinite(requested) || !Number.isFinite(maximum)) return 0;
+  return Math.max(0, Math.min(Math.max(0, maximum), requested));
+}
+
 export function encodeReplayWord(kind, x, y) {
   if (!Number.isInteger(kind) || kind < 0 || kind > 3) {
     throw new RangeError("replay button level must be in [0, 3]");
