@@ -1,4 +1,4 @@
-# irisu-rl
+# irisu-ml
 
 This is the complete project repository for IriSu mechanics research and
 reinforcement-learning work. It includes a deterministic, asset-free C++20

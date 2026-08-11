@@ -1,6 +1,6 @@
 import {
   OPCODE, decodeHello, decodeObservation, decodeReset, decodeStep, encodeReset, encodeStep,
-} from "./exact-codec.mjs?v=20260809n";
+} from "./exact-codec.mjs?v=20260810a";
 import {
   ReplayObservationCache, decodeReplayWord, encodeReplayWord,
   quantizeReplayPoint, serializeReplay, REPLAY_TICK_MS,
