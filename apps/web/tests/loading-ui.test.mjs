@@ -62,7 +62,18 @@ test("browser module cache-bust chain stays aligned", () => {
   const version = html.match(/app\.js\?v=([0-9a-z]+)/)?.[1];
   assert.ok(version);
   assert.match(app, new RegExp(`exact-runtime\\.js\\?v=${version}`));
+  assert.match(app, new RegExp(`restart-gate\\.mjs\\?v=${version}`));
   assert.match(runtime, new RegExp(`exact-codec\\.mjs\\?v=${version}`));
+});
+
+test("restart shows the emulator loading state and awaits the fresh worker", () => {
+  const app = readFileSync(path.join(web, "static/app.js"), "utf8");
+  assert.match(app, /new RestartGate\(\(pending\) => \{/);
+  assert.match(app, /runtimeLoading\) ui\.runtimeLoading\.hidden = !pending/);
+  assert.match(app, /ui\.restart\.disabled = pending/);
+  assert.match(app, /ui\.again\.disabled = pending/);
+  assert.match(app, /const restarted = await game\.restart\(seed\)/);
+  assert.doesNotMatch(app, /game\.restart\(seed\);[\s\S]{0,120}syncUi\(\)/);
 });
 
 test("replay transport exposes keyboard stepping and playback speeds", () => {

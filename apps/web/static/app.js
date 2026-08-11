@@ -1,8 +1,9 @@
-import {BrowserGame} from "./exact-runtime.js?v=20260809n";
+import {BrowserGame} from "./exact-runtime.js?v=20260810a";
 import {
   activatedTrailAlphas, colorFor, hasActivatedTrail,
 } from "./colors.mjs?v=20260723d";
 import {parseReplay, REPLAY_TICK_MS} from "./replay.mjs";
+import {RestartGate} from "./restart-gate.mjs?v=20260810a";
 
 const canvas = document.querySelector("#game");
 const ctx = canvas.getContext("2d");
@@ -40,6 +41,13 @@ let lastReplayAnnouncement = "";
 let replayScrubbing = false;
 let replayScrubTarget = null;
 const bodyTrails = new Map();
+
+const restartGate = new RestartGate((pending) => {
+  if (ui.runtimeLoading) ui.runtimeLoading.hidden = !pending;
+  ui.restart.disabled = pending;
+  ui.again.disabled = pending;
+  ui.openReplay.disabled = pending || !game;
+});
 
 const fastForwardIdleMs = 160;
 const replaySkipFrames = 5_000 / REPLAY_TICK_MS;
@@ -129,19 +137,23 @@ function setRunning(running) {
   syncUi();
 }
 
-function restart() {
-  if (!game) return;
-  replayLoadEpoch++;
-  replayScrubbing = false;
-  replayScrubTarget = null;
-  stopFastForward();
-  ui.replayError.hidden = true;
-  showPersistentError();
-  const seed = crypto.getRandomValues(new Uint32Array(1))[0];
-  game.restart(seed);
-  started = true;
-  lastEvent = -1;
-  syncUi();
+async function restart() {
+  if (!game) return false;
+  return restartGate.run(async () => {
+    replayLoadEpoch++;
+    replayScrubbing = false;
+    replayScrubTarget = null;
+    stopFastForward();
+    ui.replayError.hidden = true;
+    showPersistentError();
+    const seed = crypto.getRandomValues(new Uint32Array(1))[0];
+    const restarted = await game.restart(seed);
+    if (restarted) {
+      started = true;
+      lastEvent = -1;
+    }
+    return restarted;
+  });
 }
 
 function replayFilename(state) {
@@ -471,8 +483,8 @@ canvas.addEventListener("wheel", (event) => {
   else if (event.deltaY < 0) stopFastForward();
 }, {passive: false});
 ui.pause.addEventListener("click", () => setRunning(!snapshot?.running));
-ui.restart.addEventListener("click", restart);
-ui.again.addEventListener("click", restart);
+ui.restart.addEventListener("click", () => { void restart(); });
+ui.again.addEventListener("click", () => { void restart(); });
 ui.saveReplay.addEventListener("click", saveReplay);
 ui.openReplay.addEventListener("click", () => {
   if (ui.replayFile.showPicker) ui.replayFile.showPicker();
@@ -500,7 +512,7 @@ ui.replayScrubber.addEventListener("change", () => {
   replayScrubTarget = frame;
   game?.seekReplay(frame, {preserveRunning: true});
 });
-ui.exitReplay.addEventListener("click", restart);
+ui.exitReplay.addEventListener("click", () => { void restart(); });
 window.addEventListener("keydown", (event) => {
   if (snapshot?.mode === "replay" &&
       ["Space", "ArrowLeft", "ArrowRight"].includes(event.code)) {
@@ -514,7 +526,7 @@ window.addEventListener("keydown", (event) => {
   if (event.target instanceof HTMLInputElement || event.target instanceof HTMLButtonElement ||
       event.target?.isContentEditable) return;
   if (event.code === "Space") { event.preventDefault(); setRunning(!snapshot?.running); }
-  if (event.key.toLowerCase() === "r") restart();
+  if (event.key.toLowerCase() === "r") void restart();
   if (snapshot?.mode !== "replay" && event.key.toLowerCase() === "w") shoot("weak");
   if (snapshot?.mode !== "replay" && event.key.toLowerCase() === "s") shoot("strong");
 });
